@@ -22,6 +22,20 @@ async def private_response(interaction: discord.Interaction, content: str, **kwa
         await interaction.response.send_message(content, ephemeral=True, **kwargs)
 
 
+async def dm_or_private(cog: "Bank", interaction: discord.Interaction, content: str, action: str) -> None:
+    sent = await send_dm_safe(
+        cog.db,
+        guild_id=interaction.guild.id if interaction.guild else None,
+        user=interaction.user,
+        action=action,
+        content=content[:1900],
+    )
+    if sent:
+        await private_response(interaction, "Te envie la informacion por DM.")
+    else:
+        await private_response(interaction, content[:1900])
+
+
 class PayFineModal(discord.ui.Modal, title="Pagar multa"):
     fine_code = discord.ui.TextInput(label="ID de multa", placeholder="MULTA-000001")
 
@@ -75,31 +89,31 @@ class BankPanelView(discord.ui.View):
         super().__init__(timeout=None)
         self.cog = cog
 
-    @discord.ui.button(label="Consultar saldo", style=discord.ButtonStyle.primary, custom_id="g3n:bank:balance")
+    @discord.ui.button(label="Consultar saldo", emoji="💰", style=discord.ButtonStyle.primary, custom_id="g3n:bank:balance")
     async def balance(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
         await self.cog.show_balance_interaction(interaction)
 
-    @discord.ui.button(label="Mis multas", style=discord.ButtonStyle.secondary, custom_id="g3n:bank:fines")
+    @discord.ui.button(label="Mis multas", emoji="🚨", style=discord.ButtonStyle.danger, custom_id="g3n:bank:fines")
     async def fines(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
         await self.cog.show_fines_interaction(interaction)
 
-    @discord.ui.button(label="Pagar multa", style=discord.ButtonStyle.secondary, custom_id="g3n:bank:pay_fine")
+    @discord.ui.button(label="Pagar multa", emoji="✅", style=discord.ButtonStyle.success, custom_id="g3n:bank:pay_fine")
     async def pay_fine(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
         await interaction.response.send_modal(PayFineModal(self.cog))
 
-    @discord.ui.button(label="Cobrar saldo", style=discord.ButtonStyle.success, custom_id="g3n:bank:withdraw")
+    @discord.ui.button(label="Cobrar saldo", emoji="💳", style=discord.ButtonStyle.success, custom_id="g3n:bank:withdraw")
     async def withdraw(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
         await interaction.response.send_modal(WithdrawalModal(self.cog))
 
-    @discord.ui.button(label="Transferir plata", style=discord.ButtonStyle.secondary, custom_id="g3n:bank:transfer")
+    @discord.ui.button(label="Transferir plata", emoji="🔁", style=discord.ButtonStyle.secondary, custom_id="g3n:bank:transfer")
     async def transfer(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
         await interaction.response.send_modal(TransferModal(self.cog))
 
-    @discord.ui.button(label="Estado de cuenta", style=discord.ButtonStyle.secondary, custom_id="g3n:bank:statement")
+    @discord.ui.button(label="Estado de cuenta", emoji="📜", style=discord.ButtonStyle.secondary, custom_id="g3n:bank:statement")
     async def statement(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
         await self.cog.show_statement_interaction(interaction)
 
-    @discord.ui.button(label="Depositos", style=discord.ButtonStyle.secondary, custom_id="g3n:bank:deposits")
+    @discord.ui.button(label="Depositos", emoji="🪙", style=discord.ButtonStyle.secondary, custom_id="g3n:bank:deposits")
     async def deposits(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
         await self.cog.show_deposits_interaction(interaction)
 
@@ -192,13 +206,23 @@ class Bank(commands.Cog):
         if not isinstance(interaction.user, discord.Member) or not has_bank_access(self.db, interaction.user):
             await private_response(interaction, "Necesitas rol MIEMBRO G3NESYS o INVITADO.")
             return
-        await private_response(interaction, self.balance_text(interaction.guild.id, interaction.user))
+        await dm_or_private(
+            self,
+            interaction,
+            self.balance_text(interaction.guild.id, interaction.user),
+            "consultar_saldo",
+        )
 
     async def show_statement_interaction(self, interaction: discord.Interaction) -> None:
         if not isinstance(interaction.user, discord.Member) or not has_bank_access(self.db, interaction.user):
             await private_response(interaction, "Necesitas rol MIEMBRO G3NESYS o INVITADO.")
             return
-        await private_response(interaction, self.statement_text(interaction.guild.id, interaction.user))
+        await dm_or_private(
+            self,
+            interaction,
+            self.statement_text(interaction.guild.id, interaction.user),
+            "estado_cuenta",
+        )
 
     async def show_fines_interaction(self, interaction: discord.Interaction) -> None:
         rows = self.db.fetch_all(
@@ -216,7 +240,7 @@ class Bank(commands.Cog):
         lines = ["**Tus multas**"]
         for row in rows:
             lines.append(f"`{row['code']}` {format_amount(row['amount'])} - {row['status']} - {row['reason']}")
-        await private_response(interaction, "\n".join(lines))
+        await dm_or_private(self, interaction, "\n".join(lines), "mis_multas_panel")
 
     async def show_deposits_interaction(self, interaction: discord.Interaction) -> None:
         rows = self.db.fetch_all(
@@ -234,7 +258,7 @@ class Bank(commands.Cog):
         lines = ["**Depositos recientes**"]
         for row in rows:
             lines.append(f"`{row['code']}` {format_amount(row['amount'])} - {row['description']}")
-        await private_response(interaction, "\n".join(lines))
+        await dm_or_private(self, interaction, "\n".join(lines), "depositos_panel")
 
     async def pay_fine_interaction(self, interaction: discord.Interaction, fine_code: str) -> None:
         if not isinstance(interaction.user, discord.Member) or not has_bank_access(self.db, interaction.user):

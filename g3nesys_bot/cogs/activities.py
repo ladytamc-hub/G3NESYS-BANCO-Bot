@@ -86,6 +86,20 @@ async def private_response(interaction: discord.Interaction, content: str, **kwa
         await interaction.response.send_message(content, ephemeral=ephemeral, **kwargs)
 
 
+async def dm_or_private(cog: "Activities", interaction: discord.Interaction, content: str, action: str) -> None:
+    sent = await send_dm_safe(
+        cog.db,
+        guild_id=interaction.guild.id if interaction.guild else None,
+        user=interaction.user,
+        action=action,
+        content=content[:1900],
+    )
+    if sent:
+        await private_response(interaction, "Te envie la informacion por DM.")
+    else:
+        await private_response(interaction, content[:1900])
+
+
 class TemplateModal(discord.ui.Modal, title="Crear plantilla"):
     template_name = discord.ui.TextInput(label="Nombre de plantilla", max_length=80)
     activity_name = discord.ui.TextInput(label="Nombre base de actividad", max_length=100)
@@ -224,6 +238,7 @@ class PingsPanelView(discord.ui.View):
 
     @discord.ui.button(
         label="Crear actividad",
+        emoji="⚔️",
         style=discord.ButtonStyle.primary,
         custom_id="g3n:pings:create_activity",
     )
@@ -235,6 +250,7 @@ class PingsPanelView(discord.ui.View):
 
     @discord.ui.button(
         label="Crear plantilla",
+        emoji="🧾",
         style=discord.ButtonStyle.secondary,
         custom_id="g3n:pings:create_template",
     )
@@ -246,6 +262,7 @@ class PingsPanelView(discord.ui.View):
 
     @discord.ui.button(
         label="Seleccionar plantilla",
+        emoji="📋",
         style=discord.ButtonStyle.secondary,
         custom_id="g3n:pings:select_template",
     )
@@ -268,6 +285,7 @@ class PingsPanelView(discord.ui.View):
 
     @discord.ui.button(
         label="Ver mis actividades",
+        emoji="🗓️",
         style=discord.ButtonStyle.secondary,
         custom_id="g3n:pings:my_activities",
     )
@@ -287,10 +305,11 @@ class PingsPanelView(discord.ui.View):
         lines = ["**Tus ultimas actividades**"]
         for row in rows:
             lines.append(f"`{row['code']}` {row['name']} - {row['horario']} - {row['status']}")
-        await private_response(interaction, "\n".join(lines))
+        await dm_or_private(self.cog, interaction, "\n".join(lines), "mis_actividades_panel")
 
     @discord.ui.button(
         label="Ver plantillas",
+        emoji="📚",
         style=discord.ButtonStyle.secondary,
         custom_id="g3n:pings:view_templates",
     )
@@ -315,10 +334,11 @@ class PingsPanelView(discord.ui.View):
                 f"`{row['id']}` {row['name']} - {row['activity_name']} "
                 f"({row['roles']} roles, {row['default_time']})"
             )
-        await private_response(interaction, "\n".join(lines))
+        await dm_or_private(self.cog, interaction, "\n".join(lines), "plantillas_panel")
 
     @discord.ui.button(
         label="Configuracion",
+        emoji="⚙️",
         style=discord.ButtonStyle.secondary,
         custom_id="g3n:pings:configuration",
     )
@@ -355,13 +375,14 @@ class ActivityView(discord.ui.View):
             button.callback = self.role_button
             self.add_item(button)
 
-        self.add_control_button("Salirme", "leave", discord.ButtonStyle.danger, 3, role_disabled)
+        self.add_control_button("Salirme", "leave", discord.ButtonStyle.danger, 3, role_disabled, "🚪")
         self.add_control_button(
             "Iniciar",
             "start",
             discord.ButtonStyle.success,
             3,
             status not in {ACTIVITY_OPEN, ACTIVITY_NOTICE},
+            "▶️",
         )
         self.add_control_button(
             "Aviso",
@@ -369,13 +390,15 @@ class ActivityView(discord.ui.View):
             discord.ButtonStyle.primary,
             3,
             status != ACTIVITY_OPEN,
+            "📣",
         )
         self.add_control_button(
-            "Check",
+            "Mandar check",
             "check",
             discord.ButtonStyle.primary,
             3,
             status != ACTIVITY_IN_PROGRESS,
+            "✅",
         )
         self.add_control_button(
             "Finalizar",
@@ -383,13 +406,23 @@ class ActivityView(discord.ui.View):
             discord.ButtonStyle.success,
             3,
             status != ACTIVITY_IN_PROGRESS,
+            "🏁",
         )
         self.add_control_button(
-            "Reparto",
+            "Verificar asistencia",
+            "verify",
+            discord.ButtonStyle.secondary,
+            4,
+            status not in {ACTIVITY_IN_PROGRESS, ACTIVITY_FINISHED},
+            "🔍",
+        )
+        self.add_control_button(
+            "Generar reparto",
             "payout",
             discord.ButtonStyle.primary,
             4,
             status != ACTIVITY_FINISHED,
+            "💰",
         )
         self.add_control_button(
             "Cancelar",
@@ -397,6 +430,7 @@ class ActivityView(discord.ui.View):
             discord.ButtonStyle.danger,
             4,
             status in {ACTIVITY_CANCELLED, ACTIVITY_FINISHED, ACTIVITY_PAYOUT_CREATED},
+            "✖️",
         )
 
     def add_control_button(
@@ -406,9 +440,11 @@ class ActivityView(discord.ui.View):
         style: discord.ButtonStyle,
         row: int,
         disabled: bool,
+        emoji: str | None = None,
     ) -> None:
         button = discord.ui.Button(
             label=label,
+            emoji=emoji,
             style=style,
             custom_id=f"g3n:activity:{action}:{self.activity_id}",
             row=row,
@@ -435,6 +471,7 @@ class ConfirmAttendanceView(discord.ui.View):
         self.activity_id = activity_id
         button = discord.ui.Button(
             label="Aqui estoy",
+            emoji="✅",
             style=discord.ButtonStyle.success,
             custom_id=f"g3n:attendance:confirm:{activity_id}",
         )
@@ -443,6 +480,61 @@ class ConfirmAttendanceView(discord.ui.View):
 
     async def confirm(self, interaction: discord.Interaction) -> None:
         await self.cog.confirm_attendance(interaction, self.activity_id)
+
+
+class PayoutPercentModal(discord.ui.Modal, title="Editar participacion"):
+    user = discord.ui.TextInput(label="Usuario (ID o mencion)")
+    percent = discord.ui.TextInput(label="Participacion %", placeholder="100")
+
+    def __init__(self, cog: "Activities", guild_id: int, payout_code: str):
+        super().__init__(timeout=180)
+        self.cog = cog
+        self.guild_id = guild_id
+        self.payout_code = payout_code
+
+    async def on_submit(self, interaction: discord.Interaction) -> None:
+        await self.cog.edit_payout_percent_interaction(
+            interaction,
+            self.guild_id,
+            self.payout_code,
+            str(self.user.value),
+            str(self.percent.value),
+        )
+
+
+class PayoutEditView(discord.ui.View):
+    def __init__(self, cog: "Activities", guild_id: int, payout_code: str):
+        super().__init__(timeout=900)
+        self.cog = cog
+        self.guild_id = guild_id
+        self.payout_code = payout_code
+
+    @discord.ui.button(
+        label="Ver lista",
+        emoji="📋",
+        style=discord.ButtonStyle.secondary,
+        custom_id="g3n:payout:view_list",
+    )
+    async def view_list(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
+        await self.cog.send_payout_list_interaction(interaction, self.guild_id, self.payout_code)
+
+    @discord.ui.button(
+        label="Editar %",
+        emoji="✏️",
+        style=discord.ButtonStyle.primary,
+        custom_id="g3n:payout:edit_percent",
+    )
+    async def edit_percent(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
+        payout = self.cog.get_payout_by_code(self.guild_id, self.payout_code)
+        if payout is None:
+            await private_response(interaction, "No encontre ese reparto.")
+            return
+        if int(payout["caller_id"]) != interaction.user.id and interaction.guild is None:
+            await private_response(interaction, "Solo el caller puede editar este reparto desde DM.")
+            return
+        await interaction.response.send_modal(
+            PayoutPercentModal(self.cog, self.guild_id, self.payout_code)
+        )
 
 
 class Activities(commands.Cog):
@@ -984,6 +1076,8 @@ class Activities(commands.Cog):
             await self.start_activity(interaction, activity_id)
         elif action == "check":
             await self.send_attendance_check(interaction, activity_id)
+        elif action == "verify":
+            await self.verify_attendance(interaction, activity_id)
         elif action == "finish":
             await self.finish_activity(interaction, activity_id)
         elif action == "cancel":
@@ -1065,6 +1159,60 @@ class Activities(commands.Cog):
                     view=ConfirmAttendanceView(self, activity_id),
                 )
         await interaction.followup.send("Check enviado por DM.", ephemeral=True)
+
+    async def verify_attendance(self, interaction: discord.Interaction, activity_id: int) -> None:
+        activity = self.get_activity(activity_id)
+        participants = self.get_activity_participants(activity_id)
+        attendance_rows = self.db.fetch_all(
+            "SELECT * FROM asistencia_actividades WHERE actividad_id = ?",
+            (activity_id,),
+        )
+        attendance = {int(row["usuario_id"]): row for row in attendance_rows}
+        confirmed: list[str] = []
+        checked_absent: list[str] = []
+        pending: list[str] = []
+        for participant in participants:
+            user_id = int(participant["user_id"])
+            row = attendance.get(user_id)
+            name = f"{participant['display_name']} (<@{user_id}>)"
+            if row and int(row["confirmo_boton"]) == 1 and row["estado"] == ATTENDANCE_CONFIRMED:
+                confirmed.append(name)
+            elif row and int(row["confirmo_boton"]) == 1:
+                checked_absent.append(name)
+            else:
+                pending.append(name)
+
+        def block(title: str, rows: list[str]) -> list[str]:
+            values = [f"**{title}**"]
+            values.extend(f"• {row}" for row in rows)
+            if not rows:
+                values.append("• Ninguno")
+            return values
+
+        lines = [
+            f"🔍 **Verificacion de asistencia**",
+            f"Actividad: `{activity['code']}` {activity['name']}",
+            "",
+            *block("Confirmados con check y voz", confirmed),
+            "",
+            *block("Dieron check pero no estan en voz", checked_absent),
+            "",
+            *block("Sin check", pending),
+        ]
+        content = "\n".join(lines)
+        if len(content) > 1900:
+            content = content[:1850] + "\n\nLista recortada por limite de Discord."
+        sent = await send_dm_safe(
+            self.db,
+            guild_id=interaction.guild.id,
+            user=interaction.user,
+            action="verificar_asistencia",
+            content=content,
+        )
+        if sent:
+            await interaction.followup.send("Te envie la lista de asistencia por DM.", ephemeral=True)
+        else:
+            await interaction.followup.send(content, ephemeral=True)
 
     async def confirm_attendance(self, interaction: discord.Interaction, activity_id: int) -> None:
         activity = self.get_activity(activity_id)
@@ -1293,7 +1441,28 @@ class Activities(commands.Cog):
         )
         await self.update_activity_message(activity_id)
         await self.send_payout_to_admins(interaction.guild, payout_id)
-        await private_response(interaction, f"Reparto preliminar creado: `{code}`.")
+        dm_content = (
+            f"💰 **Reparto preliminar creado:** `{code}`\n\n"
+            "Todos los participantes confirmados quedaron con **100%** por defecto.\n"
+            "Usa el boton **Editar %** para ajustar casos como 10%, 50%, etc.\n\n"
+            f"{self.payout_participants_text(interaction.guild.id, code)}"
+        )
+        sent = await send_dm_safe(
+            self.db,
+            guild_id=interaction.guild.id,
+            user=interaction.user,
+            action="reparto_preliminar_caller",
+            content=dm_content[:1900],
+            view=PayoutEditView(self, interaction.guild.id, code),
+        )
+        if sent:
+            await private_response(interaction, f"Reparto preliminar `{code}` creado. Te envie la lista por DM.")
+        else:
+            await private_response(
+                interaction,
+                dm_content[:1900],
+                view=PayoutEditView(self, interaction.guild.id, code),
+            )
 
     def get_payout_by_code(self, guild_id: int, code: str):
         return self.db.fetch_one(
@@ -1344,6 +1513,65 @@ class Activities(commands.Cog):
                 (amount, int(row["id"])),
             )
 
+    def payout_participants_text(self, guild_id: int, code: str) -> str:
+        payout = self.get_payout_by_code(guild_id, code)
+        if payout is None:
+            return "No encontre ese reparto."
+        rows = self.db.fetch_all(
+            "SELECT * FROM payout_participants WHERE payout_id = ? ORDER BY id ASC",
+            (int(payout["id"]),),
+        )
+        if not rows:
+            return "Ese reparto no tiene participantes."
+        lines = [f"📋 **Participantes de {code}**"]
+        for row in rows:
+            amount = f"{int(row['amount']):,}".replace(",", ".")
+            lines.append(f"• <@{row['user_id']}> - {row['participation_percent']}% - {amount}")
+        return "\n".join(lines)
+
+    async def send_payout_list_interaction(
+        self,
+        interaction: discord.Interaction,
+        guild_id: int,
+        code: str,
+    ) -> None:
+        await private_response(interaction, self.payout_participants_text(guild_id, code))
+
+    async def edit_payout_percent_interaction(
+        self,
+        interaction: discord.Interaction,
+        guild_id: int,
+        code: str,
+        user_raw: str,
+        percent_raw: str,
+    ) -> None:
+        payout = self.get_payout_by_code(guild_id, code)
+        if payout is None:
+            await private_response(interaction, "No encontre ese reparto.")
+            return
+        if payout["status"] != PAYOUT_PENDING:
+            await private_response(interaction, "Solo se pueden modificar repartos pendientes.")
+            return
+        if int(payout["caller_id"]) != interaction.user.id and not is_admin_subject(self.db, interaction):
+            await private_response(interaction, "Solo el caller del reparto o un admin puede modificarlo.")
+            return
+        user_id = parse_channel_id(user_raw)
+        if user_id is None:
+            await private_response(interaction, "No pude leer el usuario.")
+            return
+        try:
+            percent = parse_percent(percent_raw)
+            self.set_payout_participation(int(payout["id"]), user_id, percent)
+            self.recalculate_payout_amounts(int(payout["id"]))
+        except ValueError as exc:
+            await private_response(interaction, str(exc))
+            return
+        await private_response(
+            interaction,
+            f"Participacion actualizada a {percent}%.\n\n{self.payout_participants_text(guild_id, code)}",
+            view=PayoutEditView(self, guild_id, code),
+        )
+
     async def send_payout_to_admins(self, guild: discord.Guild, payout_id: int) -> None:
         payout = self.db.fetch_one("SELECT * FROM payouts WHERE id = ?", (payout_id,))
         channel_id = self.db.get_setting(guild.id, "channel_repartos_id") or self.db.get_setting(
@@ -1363,6 +1591,11 @@ class Activities(commands.Cog):
         embed.add_field(name="Loot bruto", value=f"{payout['gross_loot']:,}".replace(",", "."))
         embed.add_field(name="Aporte gremial", value=f"{payout['guild_amount']:,}".replace(",", "."))
         embed.add_field(name="Monto repartible", value=f"{payout['distributable']:,}".replace(",", "."))
+        embed.add_field(
+            name="Participantes confirmados",
+            value=self.payout_participants_text(guild.id, payout["code"])[:1024],
+            inline=False,
+        )
         embed.set_image(url=ADMIN_PANEL_IMAGE)
         await channel.send(embed=embed)
 

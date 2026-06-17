@@ -30,6 +30,7 @@ from ..services.economy import (
     register_guild_expense,
     register_guild_income,
 )
+from ..services.fines import cancel_fine, create_fine
 from ..services.notifications import send_dm_safe
 from ..utils import format_amount, parse_channel_id, parse_int_amount, utc_now_iso
 
@@ -41,6 +42,20 @@ async def private_response(interaction: discord.Interaction, content: str, **kwa
         await interaction.response.send_message(content, ephemeral=True, **kwargs)
 
 
+async def dm_or_private(cog: "Admin", interaction: discord.Interaction, content: str, action: str) -> None:
+    sent = await send_dm_safe(
+        cog.db,
+        guild_id=interaction.guild.id if interaction.guild else None,
+        user=interaction.user,
+        action=action,
+        content=content[:1900],
+    )
+    if sent:
+        await private_response(interaction, "Te envie la informacion por DM.")
+    else:
+        await private_response(interaction, content[:1900])
+
+
 class ConfirmAdminActionView(discord.ui.View):
     def __init__(self, cog: "Admin", *, admin_id: int, action: str, payload: dict):
         super().__init__(timeout=120)
@@ -49,7 +64,7 @@ class ConfirmAdminActionView(discord.ui.View):
         self.action = action
         self.payload = payload
 
-    @discord.ui.button(label="Confirmar", style=discord.ButtonStyle.danger)
+    @discord.ui.button(label="Confirmar", emoji="✅", style=discord.ButtonStyle.danger)
     async def confirm(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
         if interaction.user.id != self.admin_id:
             await interaction.response.send_message("Solo quien inicio la operacion puede confirmar.", ephemeral=True)
@@ -64,7 +79,7 @@ class ConfirmAdminActionView(discord.ui.View):
             message = str(exc)
         await interaction.response.edit_message(content=message, view=None)
 
-    @discord.ui.button(label="Cancelar", style=discord.ButtonStyle.secondary)
+    @discord.ui.button(label="Cancelar", emoji="❌", style=discord.ButtonStyle.secondary)
     async def cancel(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
         if interaction.user.id != self.admin_id:
             await interaction.response.send_message("Solo quien inicio la operacion puede cancelar.", ephemeral=True)
@@ -123,6 +138,116 @@ class UserStatementModal(discord.ui.Modal, title="Estado de cuenta"):
         await self.cog.user_statement_interaction(interaction, str(self.user.value))
 
 
+class CreateFineModal(discord.ui.Modal, title="Crear multa"):
+    user = discord.ui.TextInput(label="Usuario (ID o mencion)")
+    amount = discord.ui.TextInput(label="Monto", placeholder="200000")
+    reason = discord.ui.TextInput(label="Motivo", style=discord.TextStyle.paragraph)
+
+    def __init__(self, cog: "Admin"):
+        super().__init__(timeout=180)
+        self.cog = cog
+
+    async def on_submit(self, interaction: discord.Interaction) -> None:
+        if not is_admin_subject(self.cog.db, interaction):
+            await private_response(interaction, "Solo admins autorizados pueden crear multas.")
+            return
+        try:
+            user_id = parse_channel_id(str(self.user.value))
+            if user_id is None:
+                raise ValueError("No pude leer el usuario.")
+            member = interaction.guild.get_member(user_id)
+            if member is None:
+                raise ValueError("No encontre al usuario en el servidor.")
+            amount = parse_int_amount(str(self.amount.value))
+        except ValueError as exc:
+            await private_response(interaction, str(exc))
+            return
+        await private_response(
+            interaction,
+            (
+                "¿Confirmas esta operacion?\n"
+                f"Crear multa a {member.mention} por {format_amount(amount)}.\n"
+                f"Motivo: {self.reason.value}"
+            ),
+            view=ConfirmAdminActionView(
+                self.cog,
+                admin_id=interaction.user.id,
+                action="create_fine",
+                payload={
+                    "user_id": member.id,
+                    "amount": amount,
+                    "reason": str(self.reason.value),
+                },
+            ),
+        )
+
+
+class CancelFineModal(discord.ui.Modal, title="Cancelar multa"):
+    fine_code = discord.ui.TextInput(label="ID de multa", placeholder="MULTA-000001")
+    reason = discord.ui.TextInput(label="Motivo de cancelacion", style=discord.TextStyle.paragraph)
+
+    def __init__(self, cog: "Admin"):
+        super().__init__(timeout=180)
+        self.cog = cog
+
+    async def on_submit(self, interaction: discord.Interaction) -> None:
+        if not is_admin_subject(self.cog.db, interaction):
+            await private_response(interaction, "Solo admins autorizados pueden cancelar multas.")
+            return
+        fine_code = str(self.fine_code.value).strip().upper()
+        fine = self.cog.db.fetch_one(
+            "SELECT * FROM fines WHERE guild_id = ? AND code = ?",
+            (interaction.guild.id, fine_code),
+        )
+        if fine is None:
+            await private_response(interaction, "No encontre esa multa.")
+            return
+        await private_response(
+            interaction,
+            (
+                "¿Confirmas esta operacion?\n"
+                f"Cancelar multa `{fine_code}` de <@{fine['user_id']}>.\n"
+                f"Motivo: {self.reason.value}"
+            ),
+            view=ConfirmAdminActionView(
+                self.cog,
+                admin_id=interaction.user.id,
+                action="cancel_fine",
+                payload={
+                    "fine_code": fine_code,
+                    "reason": str(self.reason.value),
+                },
+            ),
+        )
+
+
+class FineAdminView(discord.ui.View):
+    def __init__(self, cog: "Admin"):
+        super().__init__(timeout=300)
+        self.cog = cog
+
+    async def require_admin(self, interaction: discord.Interaction) -> bool:
+        if is_admin_subject(self.cog.db, interaction):
+            return True
+        await private_response(interaction, "Solo admins autorizados pueden usar multas.")
+        return False
+
+    @discord.ui.button(label="Crear multa", emoji="🚨", style=discord.ButtonStyle.danger)
+    async def create_fine_button(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
+        if await self.require_admin(interaction):
+            await interaction.response.send_modal(CreateFineModal(self.cog))
+
+    @discord.ui.button(label="Cancelar multa", emoji="🟢", style=discord.ButtonStyle.success)
+    async def cancel_fine_button(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
+        if await self.require_admin(interaction):
+            await interaction.response.send_modal(CancelFineModal(self.cog))
+
+    @discord.ui.button(label="Pendientes", emoji="📋", style=discord.ButtonStyle.secondary)
+    async def pending_fines_button(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
+        if await self.require_admin(interaction):
+            await private_response(interaction, self.cog.pending_fines_text(interaction.guild.id))
+
+
 class AdminPanelView(discord.ui.View):
     def __init__(self, cog: "Admin"):
         super().__init__(timeout=None)
@@ -134,57 +259,61 @@ class AdminPanelView(discord.ui.View):
         await private_response(interaction, "Solo admins autorizados pueden usar este panel.")
         return False
 
-    @discord.ui.button(label="Ver Tesoreria", style=discord.ButtonStyle.primary, custom_id="g3n:admin:treasury", row=0)
+    @discord.ui.button(label="Ver Tesoreria", emoji="💰", style=discord.ButtonStyle.primary, custom_id="g3n:admin:treasury", row=0)
     async def treasury(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
         if await self.require_admin(interaction):
-            await private_response(interaction, self.cog.treasury_text(interaction.guild.id))
+            await dm_or_private(self.cog, interaction, self.cog.treasury_text(interaction.guild.id), "tesoreria_panel")
 
-    @discord.ui.button(label="Registrar Ingreso", style=discord.ButtonStyle.secondary, custom_id="g3n:admin:income", row=0)
+    @discord.ui.button(label="Registrar Ingreso", emoji="📥", style=discord.ButtonStyle.success, custom_id="g3n:admin:income", row=0)
     async def income(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
         if await self.require_admin(interaction):
             await interaction.response.send_modal(IncomeModal(self.cog))
 
-    @discord.ui.button(label="Registrar Egreso", style=discord.ButtonStyle.secondary, custom_id="g3n:admin:expense", row=0)
+    @discord.ui.button(label="Registrar Egreso", emoji="📤", style=discord.ButtonStyle.danger, custom_id="g3n:admin:expense", row=0)
     async def expense(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
         if await self.require_admin(interaction):
             await interaction.response.send_modal(ExpenseModal(self.cog))
 
-    @discord.ui.button(label="Depositar a Usuario", style=discord.ButtonStyle.success, custom_id="g3n:admin:deposit", row=0)
+    @discord.ui.button(label="Depositar a Usuario", emoji="🪙", style=discord.ButtonStyle.success, custom_id="g3n:admin:deposit", row=0)
     async def deposit(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
         if await self.require_admin(interaction):
             await interaction.response.send_modal(DepositModal(self.cog))
 
-    @discord.ui.button(label="Revisar Repartos", style=discord.ButtonStyle.secondary, custom_id="g3n:admin:payouts", row=1)
+    @discord.ui.button(label="Revisar Repartos", emoji="📋", style=discord.ButtonStyle.secondary, custom_id="g3n:admin:payouts", row=1)
     async def payouts(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
         if await self.require_admin(interaction):
-            await private_response(interaction, self.cog.pending_payouts_text(interaction.guild.id))
+            await dm_or_private(self.cog, interaction, self.cog.pending_payouts_text(interaction.guild.id), "repartos_panel")
 
-    @discord.ui.button(label="Multas", style=discord.ButtonStyle.secondary, custom_id="g3n:admin:fines", row=1)
+    @discord.ui.button(label="Multas", emoji="🚨", style=discord.ButtonStyle.danger, custom_id="g3n:admin:fines", row=1)
     async def fines(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
         if await self.require_admin(interaction):
-            await private_response(interaction, "Usa `!crear_multa @usuario monto motivo` o `!cancelar_multa MULTA-000001 motivo`.")
+            await private_response(
+                interaction,
+                "Panel de multas:",
+                view=FineAdminView(self.cog),
+            )
 
-    @discord.ui.button(label="Solicitudes Cobro", style=discord.ButtonStyle.secondary, custom_id="g3n:admin:withdrawals", row=1)
+    @discord.ui.button(label="Solicitudes Cobro", emoji="💳", style=discord.ButtonStyle.secondary, custom_id="g3n:admin:withdrawals", row=1)
     async def withdrawals(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
         if await self.require_admin(interaction):
-            await private_response(interaction, self.cog.withdrawals_text(interaction.guild.id))
+            await dm_or_private(self.cog, interaction, self.cog.withdrawals_text(interaction.guild.id), "cobros_panel")
 
-    @discord.ui.button(label="Estado de Cuenta", style=discord.ButtonStyle.secondary, custom_id="g3n:admin:statement", row=1)
+    @discord.ui.button(label="Estado de Cuenta", emoji="👤", style=discord.ButtonStyle.secondary, custom_id="g3n:admin:statement", row=1)
     async def statement(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
         if await self.require_admin(interaction):
             await interaction.response.send_modal(UserStatementModal(self.cog))
 
-    @discord.ui.button(label="Historial", style=discord.ButtonStyle.secondary, custom_id="g3n:admin:history", row=2)
+    @discord.ui.button(label="Historial", emoji="📜", style=discord.ButtonStyle.secondary, custom_id="g3n:admin:history", row=2)
     async def history(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
         if await self.require_admin(interaction):
-            await private_response(interaction, self.cog.history_text(interaction.guild.id))
+            await dm_or_private(self.cog, interaction, self.cog.history_text(interaction.guild.id), "historial_panel")
 
-    @discord.ui.button(label="Rankings", style=discord.ButtonStyle.secondary, custom_id="g3n:admin:rankings", row=2)
+    @discord.ui.button(label="Rankings", emoji="🏆", style=discord.ButtonStyle.secondary, custom_id="g3n:admin:rankings", row=2)
     async def rankings(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
         if await self.require_admin(interaction):
-            await private_response(interaction, self.cog.rankings_text(interaction.guild.id))
+            await dm_or_private(self.cog, interaction, self.cog.rankings_text(interaction.guild.id), "rankings_panel")
 
-    @discord.ui.button(label="Reportes", style=discord.ButtonStyle.secondary, custom_id="g3n:admin:reports", row=2)
+    @discord.ui.button(label="Reportes", emoji="📊", style=discord.ButtonStyle.secondary, custom_id="g3n:admin:reports", row=2)
     async def reports(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
         if await self.require_admin(interaction):
             path = self.cog.create_report(interaction.guild.id)
@@ -194,12 +323,12 @@ class AdminPanelView(discord.ui.View):
                 ephemeral=True,
             )
 
-    @discord.ui.button(label="Auditoria", style=discord.ButtonStyle.secondary, custom_id="g3n:admin:audit", row=2)
+    @discord.ui.button(label="Auditoria", emoji="🔍", style=discord.ButtonStyle.secondary, custom_id="g3n:admin:audit", row=2)
     async def audit(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
         if await self.require_admin(interaction):
-            await private_response(interaction, self.cog.audit_text(interaction.guild.id))
+            await dm_or_private(self.cog, interaction, self.cog.audit_text(interaction.guild.id), "auditoria_panel")
 
-    @discord.ui.button(label="Configuracion", style=discord.ButtonStyle.secondary, custom_id="g3n:admin:config", row=3)
+    @discord.ui.button(label="Configuracion", emoji="⚙️", style=discord.ButtonStyle.secondary, custom_id="g3n:admin:config", row=3)
     async def config(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
         if await self.require_admin(interaction):
             await private_response(interaction, "Usa `!config_ver`, comandos `!canal_*_set`, `!caller_set` y `!economia_set`.")
@@ -523,10 +652,13 @@ class Admin(commands.Cog):
         action: str,
         payload: dict,
     ) -> str:
+        guild = interaction.guild
+        if guild is None:
+            raise ValueError("Esta accion debe confirmarse dentro del servidor.")
         if action == "expense":
             register_guild_expense(
                 self.db,
-                interaction.guild.id,
+                guild.id,
                 amount=int(payload["amount"]),
                 category=str(payload["category"]),
                 description=str(payload["description"]),
@@ -536,18 +668,18 @@ class Admin(commands.Cog):
         if action == "deposit":
             movement_id = deposit_to_user_from_treasury(
                 self.db,
-                interaction.guild.id,
+                guild.id,
                 user_id=int(payload["user_id"]),
                 amount=int(payload["amount"]),
                 balance_type=str(payload["balance_type"]),
                 reason=str(payload["reason"]),
                 admin_id=interaction.user.id,
             )
-            member = interaction.guild.get_member(int(payload["user_id"]))
+            member = guild.get_member(int(payload["user_id"]))
             if member:
                 await send_dm_safe(
                     self.db,
-                    guild_id=interaction.guild.id,
+                    guild_id=guild.id,
                     user=member,
                     action="deposito_admin",
                     content=(
@@ -557,17 +689,40 @@ class Admin(commands.Cog):
                         f"Motivo: {payload['reason']}\n"
                         f"Realizado por: {interaction.user.display_name}"
                     ),
-                )
+            )
             return f"Deposito registrado. Movimiento #{movement_id}."
+        if action == "create_fine":
+            member = guild.get_member(int(payload["user_id"]))
+            if member is None:
+                raise ValueError("No encontre al usuario en el servidor.")
+            code = await create_fine(
+                self.db,
+                guild_id=guild.id,
+                user=member,
+                amount=int(payload["amount"]),
+                reason=str(payload["reason"]),
+                origin="Manual",
+                created_by=interaction.user.id,
+            )
+            return f"Multa creada: `{code}`."
+        if action == "cancel_fine":
+            await cancel_fine(
+                self.db,
+                guild=guild,
+                fine_code=str(payload["fine_code"]),
+                admin_id=interaction.user.id,
+                reason=str(payload["reason"]),
+            )
+            return f"Multa cancelada: `{payload['fine_code']}`."
         if action == "liquidate_withdrawal":
             return await self.liquidate_withdrawal(
-                interaction.guild,
+                guild,
                 str(payload["code"]),
                 int(payload["amount"]),
                 interaction.user.id,
             )
         if action == "approve_payout":
-            return await self.approve_payout(interaction.guild, str(payload["code"]), interaction.user.id)
+            return await self.approve_payout(guild, str(payload["code"]), interaction.user.id)
         raise ValueError("Accion no reconocida.")
 
     async def approve_withdrawal(self, guild: discord.Guild, code: str, admin_id: int) -> None:
@@ -843,6 +998,25 @@ class Admin(commands.Cog):
                 f"`{row['code']}` <@{row['user_id']}> {format_amount(row['amount_requested'])} - {row['status']}"
             )
         lines.append("Comandos: `!aprobar_cobro CODIGO`, `!liquidar_cobro CODIGO monto`.")
+        return "\n".join(lines)
+
+    def pending_fines_text(self, guild_id: int) -> str:
+        rows = self.db.fetch_all(
+            """
+            SELECT code, user_id, amount, reason, created_at
+            FROM fines
+            WHERE guild_id = ? AND status = 'Pendiente'
+            ORDER BY id DESC LIMIT 15
+            """,
+            (guild_id,),
+        )
+        if not rows:
+            return "No hay multas pendientes."
+        lines = ["🚨 **Multas pendientes**"]
+        for row in rows:
+            lines.append(
+                f"`{row['code']}` <@{row['user_id']}> {format_amount(row['amount'])} - {row['reason']}"
+            )
         return "\n".join(lines)
 
     def pending_payouts_text(self, guild_id: int) -> str:

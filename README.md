@@ -12,6 +12,7 @@ Bot modular para Discord.py, SQLite y Railway.
 - Cobros para MIEMBRO G3NESYS e INVITADO. El saldo no se descuenta al solicitar, solo cuando admin liquida.
 - Panel administrativo con tesoreria, ingresos, egresos, depositos admin, repartos, cobros, historial, rankings, reportes y auditoria.
 - Backups automaticos de SQLite.
+- Paneles con emojis, botones coloreados y respuestas por DM cuando es posible para no saturar canales.
 
 ## Instalacion local
 
@@ -106,6 +107,8 @@ Cada comando se ejecuta en el canal que quieres configurar.
 
 - Los paneles quedan fijos y las respuestas de botones son privadas cuando Discord lo permite.
 - El caller crea actividades y genera reparto, pero no deposita saldos.
+- En actividades, "Mandar check" envia el check por DM y "Verificar asistencia" manda al caller la lista de quienes dieron check.
+- Al generar reparto, el caller recibe por DM la lista de participantes confirmados con 100% de participacion por defecto y un boton para editar porcentajes.
 - El admin aprueba repartos y liquida cobros.
 - Si el usuario confirma asistencia pero no esta en el canal de voz configurado, queda ausente.
 - La multa automatica por inasistencia solo se genera para ausentes y solo si esta activada.
