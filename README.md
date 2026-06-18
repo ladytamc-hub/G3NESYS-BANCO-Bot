@@ -106,11 +106,18 @@ Cada comando se ejecuta en el canal que quieres configurar.
 ## Reglas importantes implementadas
 
 - Los paneles quedan fijos y las respuestas de botones son privadas cuando Discord lo permite.
-- El panel administrativo incluye `📣 Callers` para consultar el ranking, agregar y eliminar callers.
-- Al agregar un caller se envia una bienvenida formal por DM con funciones y responsabilidades; al eliminarlo no se envia DM.
-- El ranking muestra plata repartida, actividades creadas/completadas/canceladas y asistencias/ausencias.
+- El panel administrativo incluye `📣 Callers` antes de `⚙️ Configuracion`; Configuracion siempre queda al final.
+- Al agregar un caller se envia una bienvenida formal por DM con funciones y responsabilidades.
+- Al eliminar un caller, el admin elige entre `📨 Enviar aviso` y `🔕 No enviar aviso`; si no elige, no se manda DM.
+- El ranking muestra plata repartida, actividades creadas/completadas/canceladas, cancelaciones justificadas y asistencias/ausencias.
+- El Panel de Pings incluye `🏆 Mi ranking` y `⚠️ Mis penalizaciones`; cada caller consulta sus datos por DM.
+- Los admins consultan el ranking completo de todos los callers desde `Panel Administrativo > Callers > Lista de callers`.
+- Al llegar a -14 puntos, el caller recibe una advertencia y pierde acceso a las funciones de actividades hasta que un admin retire la penalizacion.
+- Cancelar por composicion incompleta no resta reputacion; por ejemplo, registrar 3 personas para 5 cupos requeridos.
+- El caller entra automaticamente al control de asistencia de las actividades que dirige, aunque no ocupe un cupo de la composicion.
 - Cada servidor Discord mantiene independientes sus configuraciones, callers, saldos, tesoreria, movimientos, multas, actividades, cobros y repartos.
 - Los codigos pueden comenzar desde `000001` en cada servidor sin chocar con los datos de otros servidores.
+- El inicio local bloquea una segunda instancia sobre la misma base para evitar respuestas duplicadas o falsos `Command not found`.
 - El caller crea actividades y genera reparto, pero no deposita saldos.
 - En actividades, "Mandar check" envia el check por DM y "Verificar asistencia" manda al caller la lista de quienes dieron check.
 - Al generar reparto, el caller recibe por DM la lista de participantes confirmados con 100% de participacion por defecto, puede editar porcentajes y luego enviarlo a revision con boton.
@@ -164,14 +171,15 @@ Cada comando se ejecuta en el canal que quieres configurar.
 En el modal de crear plantilla o crear actividad:
 
 ```text
-🌾 | Falce | 2
-🔮 | Prisma | 2
+Falce 2
+🔮 Prisma 2
 🛡️ | Tanque | 1
 ```
 
-El orden es `emoji | nombre del rol o arma | cantidad requerida`. El emoji es
-opcional y tambien puedes pegar un emoji personalizado del servidor. El ping
-mostrara el avance como `Falce [0/2]` y bloqueara el boton al llegar a `[2/2]`.
+La cantidad es obligatoria y el emoji es opcional. Se aceptan formatos como
+`Falce 2`, `🌾 Falce 2` o `🌾 | Falce | 2`. La creacion de una plantilla exige
+una descripcion, que se copia a la actividad al publicarla. El ping mostrara
+el avance como `Falce [0/2]` y bloqueara el boton al llegar a `[2/2]`.
 
 Cuando el caller mande el check, **Aqui estoy** solo confirmara a usuarios
 conectados al canal de voz configurado. Si la actividad no tiene un canal

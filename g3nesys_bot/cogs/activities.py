@@ -29,9 +29,15 @@ from ..permissions import (
     require_caller_context,
 )
 from ..services.audit import log_action
+from ..services.callers import (
+    caller_ranking,
+    cancellation_capacity,
+    evaluate_caller_penalties,
+    is_caller_penalized,
+)
 from ..services.fines import create_fine
 from ..services.notifications import send_dm_safe
-from ..utils import normalize_key, parse_channel_id, parse_int_amount, utc_now_iso
+from ..utils import format_amount, normalize_key, parse_channel_id, parse_int_amount, utc_now_iso
 
 
 MAX_ACTIVITY_ROLES = 15
@@ -61,10 +67,14 @@ def parse_role_lines(raw: str) -> list[dict]:
                 )
             slots = int(slots_raw)
         else:
-            equals_match = re.fullmatch(r"(.+?)\s*=\s*(\d+)", line)
-            if equals_match:
-                name_part = equals_match.group(1).strip()
-                slots = int(equals_match.group(2))
+            quantity_match = (
+                re.fullmatch(r"(.+?)\s*=\s*(\d+)", line)
+                or re.fullmatch(r"(.+?)(?::|-)\s*(\d+)", line)
+                or re.fullmatch(r"(.+?)\s+(\d+)", line)
+            )
+            if quantity_match:
+                name_part = quantity_match.group(1).strip()
+                slots = int(quantity_match.group(2))
                 first_part, separator, remaining = name_part.partition(" ")
                 if separator and (
                     first_part.startswith(("<:", "<a:"))
@@ -75,15 +85,10 @@ def parse_role_lines(raw: str) -> list[dict]:
                 else:
                     name = name_part
             else:
-                legacy_match = re.fullmatch(r"(.+?)(?::|-)\s*(\d+)", line)
-                if legacy_match:
-                    name = legacy_match.group(1).strip()
-                    slots = int(legacy_match.group(2))
-                else:
-                    raise ValueError(
-                        f"Linea {position}: falta la cantidad requerida. "
-                        "Ejemplo: 🌾 | Falce | 2"
-                    )
+                raise ValueError(
+                    f"Linea {position}: falta la cantidad requerida. "
+                    "Ejemplo: Falce 2"
+                )
         name = name.strip()
         emoji = emoji.strip()
         if not name:
@@ -125,6 +130,21 @@ async def private_response(interaction: discord.Interaction, content: str, **kwa
         await interaction.response.send_message(content, ephemeral=ephemeral, **kwargs)
 
 
+async def reject_caller_access(db, interaction: discord.Interaction, action: str) -> None:
+    if interaction.guild is not None and is_caller_penalized(
+        db,
+        interaction.guild.id,
+        interaction.user.id,
+    ):
+        await private_response(
+            interaction,
+            "Tu acceso de caller esta suspendido por reputacion. "
+            "Un administrador debe retirar la penalizacion desde el Panel Administrativo.",
+        )
+        return
+    await private_response(interaction, f"Solo callers autorizados o admins pueden {action}.")
+
+
 async def dm_or_private(cog: "Activities", interaction: discord.Interaction, content: str, action: str) -> None:
     sent = await send_dm_safe(
         cog.db,
@@ -143,10 +163,16 @@ class TemplateModal(discord.ui.Modal, title="Crear plantilla"):
     template_name = discord.ui.TextInput(label="Nombre de plantilla", max_length=80)
     activity_name = discord.ui.TextInput(label="Nombre base de actividad", max_length=100)
     default_time = discord.ui.TextInput(label="Horario base", max_length=40)
-    roles = discord.ui.TextInput(
-        label="Emoji | rol/arma | cantidad",
+    description = discord.ui.TextInput(
+        label="Descripcion obligatoria",
         style=discord.TextStyle.paragraph,
-        placeholder="🌾 | Falce | 2\n🔮 | Prisma | 2\n🛡️ | Tanque | 1",
+        placeholder="Explica el objetivo, requisitos o indicaciones de la actividad.",
+        max_length=600,
+    )
+    roles = discord.ui.TextInput(
+        label="Rol/arma y cantidad (emoji opcional)",
+        style=discord.TextStyle.paragraph,
+        placeholder="Falce 2\n🔮 Prisma 2\n🛡️ | Tanque | 1",
         max_length=1800,
     )
 
@@ -166,6 +192,7 @@ class ActivityModal(discord.ui.Modal):
         template_id: int | None,
         default_name: str = "",
         default_time: str = "",
+        default_notes: str = "",
     ):
         title = "Publicar actividad" if template_id else "Crear actividad"
         super().__init__(title=title, timeout=300)
@@ -191,6 +218,7 @@ class ActivityModal(discord.ui.Modal):
             required=False,
             style=discord.TextStyle.paragraph,
             max_length=600,
+            default=default_notes,
         )
         self.add_item(self.activity_name)
         self.add_item(self.horario)
@@ -199,9 +227,9 @@ class ActivityModal(discord.ui.Modal):
         self.roles = None
         if template_id is None:
             self.roles = discord.ui.TextInput(
-                label="Emoji | rol/arma | cantidad",
+                label="Rol/arma y cantidad (emoji opcional)",
                 style=discord.TextStyle.paragraph,
-                placeholder="🌾 | Falce | 2\n🔮 | Prisma | 2\n🛡️ | Tanque | 1",
+                placeholder="Falce 2\n🔮 Prisma 2\n🛡️ | Tanque | 1",
                 max_length=1800,
             )
             self.add_item(self.roles)
@@ -260,6 +288,7 @@ class TemplateSelect(discord.ui.Select):
                 template_id=template_id,
                 default_name=template["activity_name"],
                 default_time=template["default_time"],
+                default_notes=template["description"],
             )
         )
 
@@ -283,7 +312,7 @@ class PingsPanelView(discord.ui.View):
     )
     async def create_activity(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
         if not is_caller_subject(self.cog.db, interaction):
-            await private_response(interaction, "Solo callers autorizados o admins pueden crear actividades.")
+            await reject_caller_access(self.cog.db, interaction, "crear actividades")
             return
         await interaction.response.send_modal(ActivityModal(self.cog, template_id=None))
 
@@ -295,7 +324,7 @@ class PingsPanelView(discord.ui.View):
     )
     async def create_template(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
         if not is_caller_subject(self.cog.db, interaction):
-            await private_response(interaction, "Solo callers autorizados o admins pueden crear plantillas.")
+            await reject_caller_access(self.cog.db, interaction, "crear plantillas")
             return
         await interaction.response.send_modal(TemplateModal(self.cog))
 
@@ -307,7 +336,7 @@ class PingsPanelView(discord.ui.View):
     )
     async def select_template(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
         if not is_caller_subject(self.cog.db, interaction):
-            await private_response(interaction, "Solo callers autorizados o admins pueden publicar actividades.")
+            await reject_caller_access(self.cog.db, interaction, "publicar actividades")
             return
         templates = self.cog.db.fetch_all(
             "SELECT * FROM templates WHERE guild_id = ? ORDER BY created_at DESC LIMIT 25",
@@ -374,6 +403,34 @@ class PingsPanelView(discord.ui.View):
                 f"({row['roles']} roles, {row['default_time']})"
             )
         await dm_or_private(self.cog, interaction, "\n".join(lines), "plantillas_panel")
+
+    @discord.ui.button(
+        label="Mi ranking",
+        emoji="🏆",
+        style=discord.ButtonStyle.primary,
+        custom_id="g3n:pings:my_caller_ranking",
+    )
+    async def my_ranking(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
+        await dm_or_private(
+            self.cog,
+            interaction,
+            self.cog.my_caller_ranking_text(interaction.guild.id, interaction.user.id),
+            "mi_ranking_caller",
+        )
+
+    @discord.ui.button(
+        label="Mis penalizaciones",
+        emoji="⚠️",
+        style=discord.ButtonStyle.secondary,
+        custom_id="g3n:pings:my_caller_penalties",
+    )
+    async def my_penalties(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
+        await dm_or_private(
+            self.cog,
+            interaction,
+            self.cog.my_caller_penalties_text(interaction.guild.id, interaction.user.id),
+            "mis_penalizaciones_caller",
+        )
 
     @discord.ui.button(
         label="Configuracion",
@@ -631,6 +688,8 @@ class Activities(commands.Cog):
         )
         for row in active_rows:
             await self.update_activity_message(int(row["id"]))
+        for guild in self.bot.guilds:
+            await evaluate_caller_penalties(self.db, guild)
 
     @commands.command(name="panel_pings")
     async def panel_pings(self, ctx: commands.Context) -> None:
@@ -664,6 +723,64 @@ class Activities(commands.Cog):
             await ctx.message.delete()
         except discord.HTTPException:
             pass
+
+    def my_caller_ranking_text(self, guild_id: int, user_id: int) -> str:
+        ranking = caller_ranking(self.db, guild_id)
+        for position, row in enumerate(ranking, start=1):
+            if int(row["user_id"]) != user_id:
+                continue
+            status = "⛔ Penalizado" if int(row["penalized"]) else "🟢 Activo"
+            return "\n".join(
+                [
+                    "🏆 **Mi ranking como caller**",
+                    f"Posicion: **#{position} de {len(ranking)}**",
+                    f"Estado: **{status}**",
+                    f"Puntos: **{row['score']}**",
+                    f"Plata repartida: **{format_amount(row['distributed'])}**",
+                    f"Actividades creadas: **{row['activities_created']}**",
+                    f"Actividades completadas: **{row['activities_completed']}**",
+                    f"Cancelaciones con consecuencia: **{row['activities_cancelled']}**",
+                    f"Cancelaciones justificadas por cupos: **{row['cancellations_exempt']}**",
+                    f"Asistencias: **{row['attendances']}**",
+                    f"Ausencias: **{row['absences']}**",
+                    "",
+                    "Puntuacion: +10 completada, +2 asistencia, -4 cancelacion no justificada y -6 ausencia.",
+                    "Al llegar a -14 puntos, el acceso de caller queda suspendido.",
+                ]
+            )
+        return "No tienes un perfil de caller autorizado en este servidor."
+
+    def my_caller_penalties_text(self, guild_id: int, user_id: int) -> str:
+        rows = self.db.fetch_all(
+            """
+            SELECT score_at_penalty, reason, active, penalized_at,
+                   notified_at, removed_by, removed_at, rearmed
+            FROM caller_penalties
+            WHERE guild_id = ? AND user_id = ?
+            ORDER BY id DESC LIMIT 8
+            """,
+            (guild_id, user_id),
+        )
+        if not rows:
+            return "🟢 **Mis penalizaciones de caller**\nNo tienes penalizaciones registradas."
+        lines = ["⚠️ **Mis penalizaciones de caller**"]
+        for index, row in enumerate(rows, start=1):
+            status = "ACTIVA" if int(row["active"]) else "RETIRADA"
+            lines.extend(
+                [
+                    "",
+                    f"**{index}. {status}**",
+                    f"Puntaje al penalizar: **{row['score_at_penalty']}**",
+                    f"Motivo: {row['reason']}",
+                    f"Fecha: `{row['penalized_at']}`",
+                    f"Aviso DM: `{'enviado' if row['notified_at'] else 'no entregado'}`",
+                ]
+            )
+            if not int(row["active"]):
+                lines.append(f"Retirada: `{row['removed_at'] or 'sin fecha'}`")
+                if row["removed_by"]:
+                    lines.append(f"Retirada por: <@{row['removed_by']}>")
+        return "\n".join(lines)[:1900]
 
     @commands.command(name="penalizacion_remove")
     async def penalizacion_remove(self, ctx: commands.Context, member: discord.Member, *, reason: str = "") -> None:
@@ -863,16 +980,24 @@ class Activities(commands.Cog):
         except ValueError as exc:
             await private_response(interaction, str(exc))
             return
+        description = str(modal.description.value).strip()
+        if not description:
+            await private_response(interaction, "La descripcion de la plantilla es obligatoria.")
+            return
         template_id = self.db.execute(
             """
-            INSERT INTO templates (guild_id, name, activity_name, default_time, created_by, created_at)
-            VALUES (?, ?, ?, ?, ?, ?)
+            INSERT INTO templates (
+                guild_id, name, activity_name, default_time,
+                description, created_by, created_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 interaction.guild.id,
                 str(modal.template_name.value).strip(),
                 str(modal.activity_name.value).strip(),
                 str(modal.default_time.value).strip(),
+                description,
                 interaction.user.id,
                 utc_now_iso(),
             ),
@@ -898,7 +1023,8 @@ class Activities(commands.Cog):
         )
         await private_response(
             interaction,
-            f"Plantilla guardada con {len(roles)} roles:\n\n{preview}",
+            f"Plantilla guardada con {len(roles)} roles.\n\n"
+            f"**Descripcion:** {description}\n\n{preview}",
         )
 
     async def publish_activity_from_modal(
@@ -1166,6 +1292,13 @@ class Activities(commands.Cog):
             await self.leave_activity(interaction, activity_id)
             return
         if not can_manage_activity(self.db, interaction, int(activity["caller_id"])):
+            if interaction.guild is not None and is_caller_penalized(
+                self.db,
+                interaction.guild.id,
+                interaction.user.id,
+            ):
+                await reject_caller_access(self.db, interaction, "controlar actividades")
+                return
             await private_response(interaction, "Solo el caller creador o un admin puede controlar esta actividad.")
             return
         if action == "payout":
@@ -1222,7 +1355,12 @@ class Activities(commands.Cog):
             "UPDATE activities SET status = ?, started_at = ? WHERE id = ?",
             (ACTIVITY_IN_PROGRESS, utc_now_iso(), activity_id),
         )
-        for participant in self.get_activity_participants(activity_id):
+        participant_ids = {
+            int(participant["user_id"])
+            for participant in self.get_activity_participants(activity_id)
+        }
+        attendance_users = participant_ids | {int(activity["caller_id"])}
+        for user_id in attendance_users:
             self.db.execute(
                 """
                 INSERT INTO asistencia_actividades (
@@ -1231,7 +1369,7 @@ class Activities(commands.Cog):
                 VALUES (?, ?, ?, 0, 0)
                 ON CONFLICT(actividad_id, usuario_id) DO NOTHING
                 """,
-                (activity_id, int(participant["user_id"]), ATTENDANCE_PENDING),
+                (activity_id, user_id, ATTENDANCE_PENDING),
             )
         self.bot.add_view(ConfirmAttendanceView(self, activity_id))
         await self.update_activity_message(activity_id)
@@ -1242,13 +1380,19 @@ class Activities(commands.Cog):
         if activity["status"] != ACTIVITY_IN_PROGRESS:
             await interaction.followup.send("El check solo aplica en actividades en curso.", ephemeral=True)
             return
-        participants = self.get_activity_participants(activity_id)
-        if not participants:
-            await interaction.followup.send("No hay participantes anotados.", ephemeral=True)
-            return
-        for participant in participants:
-            member = interaction.guild.get_member(int(participant["user_id"]))
+        participant_ids = {
+            int(participant["user_id"])
+            for participant in self.get_activity_participants(activity_id)
+        }
+        recipient_ids = participant_ids | {int(activity["caller_id"])}
+        for user_id in recipient_ids:
+            member = interaction.guild.get_member(user_id)
             if member:
+                caller_note = (
+                    " Como caller, tu asistencia tambien forma parte de tu reputacion."
+                    if user_id == int(activity["caller_id"])
+                    else " Si te anotaste y no participas, puedes recibir multa automatica."
+                )
                 await send_dm_safe(
                     self.db,
                     guild_id=interaction.guild.id,
@@ -1256,7 +1400,7 @@ class Activities(commands.Cog):
                     action="check_asistencia",
                     content=(
                         f"Confirma tu asistencia a **{activity['name']}**. "
-                        "Si te anotaste y no participas, puedes recibir multa automatica."
+                        f"{caller_note}"
                     ),
                     view=ConfirmAttendanceView(self, activity_id),
                 )
@@ -1328,7 +1472,7 @@ class Activities(commands.Cog):
             "SELECT 1 FROM activity_participants WHERE activity_id = ? AND user_id = ?",
             (activity_id, interaction.user.id),
         )
-        if participant is None:
+        if participant is None and interaction.user.id != int(activity["caller_id"]):
             await private_response(interaction, "No estas registrado en esta actividad.")
             return
         guild = self.bot.get_guild(int(activity["guild_id"]))
@@ -1445,7 +1589,43 @@ class Activities(commands.Cog):
                         amount=absence_fine_amount,
                         observation=fine_code,
                     )
+        participant_ids = {int(participant["user_id"]) for participant in participants}
+        caller_id = int(activity["caller_id"])
+        if caller_id not in participant_ids:
+            caller_attendance = self.db.fetch_one(
+                """
+                SELECT * FROM asistencia_actividades
+                WHERE actividad_id = ? AND usuario_id = ?
+                """,
+                (activity_id, caller_id),
+            )
+            if caller_attendance is None or caller_attendance["estado"] == ATTENDANCE_PENDING:
+                self.db.execute(
+                    """
+                    INSERT INTO asistencia_actividades (
+                        actividad_id, usuario_id, estado, confirmo_boton,
+                        confirmo_voz, fecha_check
+                    )
+                    VALUES (?, ?, ?, 0, 0, ?)
+                    ON CONFLICT(actividad_id, usuario_id)
+                    DO UPDATE SET estado = excluded.estado,
+                                  confirmo_boton = 0,
+                                  confirmo_voz = 0,
+                                  fecha_check = excluded.fecha_check
+                    """,
+                    (activity_id, caller_id, ATTENDANCE_ABSENT, utc_now_iso()),
+                )
+                caller_attendance = self.db.fetch_one(
+                    """
+                    SELECT * FROM asistencia_actividades
+                    WHERE actividad_id = ? AND usuario_id = ?
+                    """,
+                    (activity_id, caller_id),
+                )
+            if caller_attendance and caller_attendance["estado"] == ATTENDANCE_ABSENT:
+                absences.append(caller_id)
         await self.update_activity_message(activity_id)
+        await evaluate_caller_penalties(self.db, interaction.guild)
         await interaction.followup.send(
             f"Actividad finalizada. Ausentes registrados: {len(absences)}.",
             ephemeral=True,
@@ -1456,9 +1636,38 @@ class Activities(commands.Cog):
         if activity["status"] in {ACTIVITY_CANCELLED, ACTIVITY_FINISHED, ACTIVITY_PAYOUT_CREATED}:
             await interaction.followup.send("Esta actividad ya no puede cancelarse.", ephemeral=True)
             return
+        required_slots, registered_slots, reputation_exempt = cancellation_capacity(
+            self.db,
+            activity_id,
+        )
+        cancelled_by_admin = (
+            interaction.user.id != int(activity["caller_id"])
+            and is_admin_subject(self.db, interaction)
+        )
+        reputation_exempt = reputation_exempt or cancelled_by_admin
+        if cancelled_by_admin:
+            cancellation_reason = "Cancelacion realizada por un administrador."
+        elif registered_slots < required_slots:
+            cancellation_reason = (
+                f"Composicion incompleta: {registered_slots}/{required_slots} cupos ocupados."
+            )
+        else:
+            cancellation_reason = "Cancelacion del caller con composicion completa."
         self.db.execute(
-            "UPDATE activities SET status = ?, ended_at = ? WHERE id = ?",
-            (ACTIVITY_CANCELLED, utc_now_iso(), activity_id),
+            """
+            UPDATE activities
+            SET status = ?, ended_at = ?, cancelled_by = ?,
+                cancellation_reputation_exempt = ?, cancellation_reason = ?
+            WHERE id = ?
+            """,
+            (
+                ACTIVITY_CANCELLED,
+                utc_now_iso(),
+                interaction.user.id,
+                1 if reputation_exempt else 0,
+                cancellation_reason,
+                activity_id,
+            ),
         )
         participants = self.get_activity_participants(activity_id)
         for participant in participants:
@@ -1470,12 +1679,22 @@ class Activities(commands.Cog):
                     user=member,
                     action="cancelar_actividad",
                     content=(
-                        f"La actividad **{activity['name']}** fue cancelada por el caller. "
-                        "No se aplicaran multas ni penalizaciones."
+                        f"La actividad **{activity['name']}** fue cancelada. "
+                        f"Motivo: {cancellation_reason} "
+                        "No se aplicaran multas ni penalizaciones de asistencia."
                     ),
                 )
         await self.update_activity_message(activity_id)
-        await interaction.followup.send("Actividad cancelada y participantes notificados.", ephemeral=True)
+        await evaluate_caller_penalties(self.db, interaction.guild)
+        reputation_note = (
+            f"No afecta la reputacion del caller: {cancellation_reason}"
+            if reputation_exempt
+            else "La cancelacion se registrara en la reputacion del caller."
+        )
+        await interaction.followup.send(
+            f"Actividad cancelada y participantes notificados. {reputation_note}",
+            ephemeral=True,
+        )
 
     async def create_payout_from_modal(
         self,

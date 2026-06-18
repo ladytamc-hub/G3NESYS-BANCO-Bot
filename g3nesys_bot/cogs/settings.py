@@ -5,7 +5,13 @@ from discord.ext import commands
 
 from ..permissions import require_admin_context
 from ..services.audit import log_action
-from ..services.callers import authorize_caller, caller_welcome_embed, revoke_caller
+from ..services.callers import (
+    CallerRemovalNoticeView,
+    authorize_caller,
+    caller_welcome_embed,
+    is_caller_penalized,
+    revoke_caller,
+)
 from ..services.notifications import send_dm_safe
 from ..utils import join_csv_ids, split_csv_ids
 
@@ -153,6 +159,13 @@ class Settings(commands.Cog):
         if member.bot:
             await ctx.reply("Un bot no puede registrarse como caller.", mention_author=False)
             return
+        if is_caller_penalized(self.db, ctx.guild.id, member.id):
+            await ctx.reply(
+                f"{member.mention} tiene una penalizacion activa. "
+                "Retirala primero desde el menu `Callers` del Panel Administrativo.",
+                mention_author=False,
+            )
+            return
         created = authorize_caller(
             self.db,
             ctx.guild.id,
@@ -199,10 +212,17 @@ class Settings(commands.Cog):
             action="Eliminar caller",
             affected_user_id=member.id,
             system="Callers",
-            observation="Caller eliminado con caller_remove; sin notificacion por DM.",
+            observation="Caller eliminado con caller_remove; aviso opcional pendiente.",
         )
         await ctx.reply(
-            f"➖ {member.mention} ya no es caller autorizado. No se envio ningun DM.",
+            f"➖ {member.mention} ya no es caller autorizado. ¿Deseas enviarle un aviso amistoso?",
+            view=CallerRemovalNoticeView(
+                self.db,
+                guild_id=ctx.guild.id,
+                guild_name=ctx.guild.name,
+                admin_id=ctx.author.id,
+                member=member,
+            ),
             mention_author=False,
         )
 

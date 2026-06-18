@@ -38,6 +38,70 @@ class Database:
         if "sent_to_admin_at" not in payout_columns:
             self._conn.execute("ALTER TABLE payouts ADD COLUMN sent_to_admin_at TEXT")
 
+        template_columns = {
+            row["name"]
+            for row in self._conn.execute("PRAGMA table_info(templates)").fetchall()
+        }
+        if "description" not in template_columns:
+            self._conn.execute(
+                "ALTER TABLE templates ADD COLUMN description TEXT NOT NULL DEFAULT ''"
+            )
+
+        activity_columns = {
+            row["name"]
+            for row in self._conn.execute("PRAGMA table_info(activities)").fetchall()
+        }
+        if "cancelled_by" not in activity_columns:
+            self._conn.execute("ALTER TABLE activities ADD COLUMN cancelled_by INTEGER")
+        if "cancellation_reputation_exempt" not in activity_columns:
+            self._conn.execute(
+                "ALTER TABLE activities ADD COLUMN cancellation_reputation_exempt INTEGER"
+            )
+        if "cancellation_reason" not in activity_columns:
+            self._conn.execute("ALTER TABLE activities ADD COLUMN cancellation_reason TEXT")
+
+        caller_penalty_columns = {
+            row["name"]
+            for row in self._conn.execute("PRAGMA table_info(caller_penalties)").fetchall()
+        }
+        if "id" not in caller_penalty_columns:
+            self._conn.execute(
+                """
+                CREATE TABLE caller_penalties__history_migration (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    guild_id INTEGER NOT NULL,
+                    user_id INTEGER NOT NULL,
+                    score_at_penalty INTEGER NOT NULL,
+                    reason TEXT NOT NULL,
+                    active INTEGER NOT NULL DEFAULT 1,
+                    penalized_at TEXT NOT NULL,
+                    notified_at TEXT,
+                    removed_by INTEGER,
+                    removed_at TEXT,
+                    rearmed INTEGER NOT NULL DEFAULT 0
+                )
+                """
+            )
+            self._conn.execute(
+                """
+                INSERT INTO caller_penalties__history_migration (
+                    guild_id, user_id, score_at_penalty, reason, active,
+                    penalized_at, notified_at, removed_by, removed_at, rearmed
+                )
+                SELECT guild_id, user_id, score_at_penalty, reason, active,
+                       penalized_at, notified_at, removed_by, removed_at, 0
+                FROM caller_penalties
+                """
+            )
+            self._conn.execute("DROP TABLE caller_penalties")
+            self._conn.execute(
+                "ALTER TABLE caller_penalties__history_migration RENAME TO caller_penalties"
+            )
+        elif "rearmed" not in caller_penalty_columns:
+            self._conn.execute(
+                "ALTER TABLE caller_penalties ADD COLUMN rearmed INTEGER NOT NULL DEFAULT 0"
+            )
+
         penalty_columns = {
             row["name"]
             for row in self._conn.execute("PRAGMA table_info(penalizacion_actividades)").fetchall()
@@ -66,12 +130,16 @@ class Database:
                     created_at TEXT NOT NULL,
                     started_at TEXT,
                     ended_at TEXT,
+                    cancelled_by INTEGER,
+                    cancellation_reputation_exempt INTEGER,
+                    cancellation_reason TEXT,
                     UNIQUE(guild_id, code)
                 )
                 """,
                 "id, code, guild_id, template_id, name, caller_id, horario, "
                 "voice_channel_id, notes, status, channel_id, message_id, "
-                "created_at, started_at, ended_at",
+                "created_at, started_at, ended_at, cancelled_by, "
+                "cancellation_reputation_exempt, cancellation_reason",
             ),
             "fines": (
                 """
@@ -229,6 +297,10 @@ class Database:
             "CREATE INDEX IF NOT EXISTS idx_penalties_guild_user_active "
             "ON penalizacion_actividades(guild_id, usuario_id, activo)"
         )
+        self._conn.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_caller_penalties_one_active "
+            "ON caller_penalties(guild_id, user_id) WHERE active = 1"
+        )
 
     def _has_unique_index(self, table: str, columns: tuple[str, ...]) -> bool:
         for index in self._conn.execute(f"PRAGMA index_list({table})").fetchall():
@@ -342,6 +414,20 @@ CREATE TABLE IF NOT EXISTS callers (
     PRIMARY KEY (guild_id, user_id)
 );
 
+CREATE TABLE IF NOT EXISTS caller_penalties (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    guild_id INTEGER NOT NULL,
+    user_id INTEGER NOT NULL,
+    score_at_penalty INTEGER NOT NULL,
+    reason TEXT NOT NULL,
+    active INTEGER NOT NULL DEFAULT 1,
+    penalized_at TEXT NOT NULL,
+    notified_at TEXT,
+    removed_by INTEGER,
+    removed_at TEXT,
+    rearmed INTEGER NOT NULL DEFAULT 0
+);
+
 CREATE TABLE IF NOT EXISTS panel_messages (
     guild_id INTEGER NOT NULL,
     panel_type TEXT NOT NULL,
@@ -358,6 +444,7 @@ CREATE TABLE IF NOT EXISTS templates (
     name TEXT NOT NULL,
     activity_name TEXT NOT NULL,
     default_time TEXT NOT NULL,
+    description TEXT NOT NULL,
     created_by INTEGER NOT NULL,
     created_at TEXT NOT NULL
 );
@@ -388,6 +475,9 @@ CREATE TABLE IF NOT EXISTS activities (
     created_at TEXT NOT NULL,
     started_at TEXT,
     ended_at TEXT,
+    cancelled_by INTEGER,
+    cancellation_reputation_exempt INTEGER,
+    cancellation_reason TEXT,
     UNIQUE(guild_id, code)
 );
 

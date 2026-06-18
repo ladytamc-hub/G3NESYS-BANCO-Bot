@@ -21,9 +21,12 @@ from ..constants import (
 from ..permissions import is_admin_subject, require_admin_context
 from ..services.audit import log_action
 from ..services.callers import (
+    CallerRemovalNoticeView,
     authorize_caller,
     caller_ranking,
     caller_welcome_embed,
+    is_caller_penalized,
+    remove_caller_penalty,
     revoke_caller,
 )
 from ..services.economy import (
@@ -256,9 +259,13 @@ class FineAdminView(discord.ui.View):
 
 class CallerMemberSelect(discord.ui.UserSelect):
     def __init__(self, cog: "Admin", *, action: str, admin_id: int):
-        label = "agregar" if action == "add" else "eliminar"
+        labels = {
+            "add": "agregar como caller",
+            "remove": "eliminar como caller",
+            "unpenalize": "quitar de penalizacion",
+        }
         super().__init__(
-            placeholder=f"Selecciona a quien quieres {label} como caller",
+            placeholder=f"Selecciona a quien quieres {labels[action]}",
             min_values=1,
             max_values=1,
         )
@@ -283,13 +290,15 @@ class CallerMemberSelect(discord.ui.UserSelect):
         if member is None:
             await private_response(interaction, "No encontre a ese usuario dentro del servidor.")
             return
-        if member.bot:
+        if member.bot and self.action == "add":
             await private_response(interaction, "Un bot no puede registrarse como caller.")
             return
         if self.action == "add":
             await self.cog.add_caller_interaction(interaction, member)
-        else:
+        elif self.action == "remove":
             await self.cog.remove_caller_interaction(interaction, member)
+        else:
+            await self.cog.remove_caller_penalty_interaction(interaction, member)
 
 
 class CallerSelectionView(discord.ui.View):
@@ -349,8 +358,31 @@ class CallersAdminView(discord.ui.View):
         if await self.require_admin(interaction):
             await private_response(
                 interaction,
-                "Selecciona al caller que quieres eliminar. No se enviara ningun DM:",
+                "Selecciona al caller que quieres eliminar. Despues podras elegir si envias un aviso:",
                 view=CallerSelectionView(self.cog, action="remove", admin_id=interaction.user.id),
+            )
+
+    @discord.ui.button(label="Penalizados", emoji="⚠️", style=discord.ButtonStyle.secondary)
+    async def penalties(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
+        if await self.require_admin(interaction):
+            await dm_or_private(
+                self.cog,
+                interaction,
+                self.cog.caller_penalties_text(interaction.guild.id),
+                "penalizaciones_callers",
+            )
+
+    @discord.ui.button(label="Quitar penalizacion", emoji="🟢", style=discord.ButtonStyle.success)
+    async def remove_penalty(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
+        if await self.require_admin(interaction):
+            await private_response(
+                interaction,
+                "Selecciona al caller cuya penalizacion quieres retirar:",
+                view=CallerSelectionView(
+                    self.cog,
+                    action="unpenalize",
+                    admin_id=interaction.user.id,
+                ),
             )
 
 
@@ -516,11 +548,6 @@ class AdminPanelView(discord.ui.View):
         if await self.require_admin(interaction):
             await dm_or_private(self.cog, interaction, self.cog.audit_text(interaction.guild.id), "auditoria_panel")
 
-    @discord.ui.button(label="Configuracion", emoji="⚙️", style=discord.ButtonStyle.secondary, custom_id="g3n:admin:config", row=3)
-    async def config(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
-        if await self.require_admin(interaction):
-            await private_response(interaction, "Usa `!config_ver`, comandos `!canal_*_set`, `!caller_set` y `!economia_set`.")
-
     @discord.ui.button(label="Callers", emoji="📣", style=discord.ButtonStyle.primary, custom_id="g3n:admin:callers", row=3)
     async def callers(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
         if await self.require_admin(interaction):
@@ -529,11 +556,18 @@ class AdminPanelView(discord.ui.View):
                 description=(
                     "Consulta el ranking o administra quienes pueden dirigir actividades.\n\n"
                     "**Puntuacion:** +10 por actividad completada, +2 por asistencia, "
-                    "-4 por cancelacion y -6 por ausencia."
+                    "-4 por cancelacion con composicion completa y -6 por ausencia. "
+                    "Las cancelaciones por cupos incompletos no restan. Al llegar a -14, "
+                    "el acceso de caller queda suspendido."
                 ),
                 color=discord.Color.magenta(),
             )
             await private_response(interaction, "Menu de callers:", embed=embed, view=CallersAdminView(self.cog))
+
+    @discord.ui.button(label="Configuracion", emoji="⚙️", style=discord.ButtonStyle.secondary, custom_id="g3n:admin:config", row=3)
+    async def config(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
+        if await self.require_admin(interaction):
+            await private_response(interaction, "Usa `!config_ver`, comandos `!canal_*_set`, `!caller_set` y `!economia_set`.")
 
 
 class Admin(commands.Cog):
@@ -562,6 +596,13 @@ class Admin(commands.Cog):
         interaction: discord.Interaction,
         member: discord.Member,
     ) -> None:
+        if is_caller_penalized(self.db, interaction.guild.id, member.id):
+            await private_response(
+                interaction,
+                f"{member.mention} tiene una penalizacion activa. "
+                "Retirala primero desde `Quitar penalizacion`.",
+            )
+            return
         created = authorize_caller(
             self.db,
             interaction.guild.id,
@@ -606,12 +647,77 @@ class Admin(commands.Cog):
             action="Eliminar caller",
             affected_user_id=member.id,
             system="Callers",
-            observation="Acceso de caller retirado desde el panel administrativo; sin notificacion por DM.",
+            observation="Acceso de caller retirado desde el panel administrativo; aviso opcional pendiente.",
         )
         await private_response(
             interaction,
-            f"➖ {member.mention} ya no es caller autorizado. No se envio ningun DM.",
+            f"➖ {member.mention} ya no es caller autorizado. ¿Deseas enviarle un aviso amistoso?",
+            view=CallerRemovalNoticeView(
+                self.db,
+                guild_id=interaction.guild.id,
+                guild_name=interaction.guild.name,
+                admin_id=interaction.user.id,
+                member=member,
+            ),
         )
+
+    async def remove_caller_penalty_interaction(
+        self,
+        interaction: discord.Interaction,
+        member: discord.Member,
+    ) -> None:
+        removed = remove_caller_penalty(
+            self.db,
+            interaction.guild.id,
+            member.id,
+            interaction.user.id,
+        )
+        if not removed:
+            await private_response(interaction, f"{member.mention} no tiene una penalizacion activa.")
+            return
+        log_action(
+            self.db,
+            interaction.guild.id,
+            admin_id=interaction.user.id,
+            action="Retirar penalizacion de caller",
+            affected_user_id=member.id,
+            system="Callers",
+            observation="Acceso de caller rehabilitado por un administrador.",
+        )
+        authorized = self.db.fetch_one(
+            "SELECT 1 FROM callers WHERE guild_id = ? AND user_id = ?",
+            (interaction.guild.id, member.id),
+        )
+        result = (
+            f"🟢 Se retiro la penalizacion de {member.mention}. Ya puede volver a usar las funciones de caller."
+            if authorized is not None
+            else f"🟢 Se retiro la penalizacion de {member.mention}. Debes agregarlo nuevamente si volvera a ser caller."
+        )
+        await private_response(
+            interaction,
+            result,
+        )
+
+    def caller_penalties_text(self, guild_id: int) -> str:
+        rows = self.db.fetch_all(
+            """
+            SELECT user_id, score_at_penalty, reason, penalized_at
+            FROM caller_penalties
+            WHERE guild_id = ? AND active = 1
+            ORDER BY score_at_penalty ASC, penalized_at ASC
+            LIMIT 30
+            """,
+            (guild_id,),
+        )
+        if not rows:
+            return "🟢 **Callers penalizados**\nNo hay penalizaciones activas."
+        lines = ["⚠️ **Callers penalizados**"]
+        for index, row in enumerate(rows, start=1):
+            lines.append(
+                f"{index}. <@{row['user_id']}> • **{row['score_at_penalty']} puntos** • {row['reason']}"
+            )
+        lines.append("Usa `🟢 Quitar penalizacion` en el menu de Callers para rehabilitar a alguien.")
+        return "\n".join(lines)
 
     def caller_ranking_embeds(self, guild: discord.Guild) -> list[discord.Embed]:
         rows = caller_ranking(self.db, guild.id)
@@ -641,13 +747,15 @@ class Admin(commands.Cog):
                 member = guild.get_member(int(row["user_id"]))
                 name = member.display_name if member else f"Usuario {row['user_id']}"
                 badge = medals.get(index, f"#{index}")
+                status = " • ⛔ Penalizado" if int(row["penalized"]) else ""
                 embed.add_field(
-                    name=f"{badge} {name} • {row['score']} puntos",
+                    name=f"{badge} {name} • {row['score']} puntos{status}",
                     value=(
                         f"💰 Repartido: **{format_amount(row['distributed'])}**\n"
                         f"⚔️ Creadas: **{row['activities_created']}** • "
                         f"✅ Completadas: **{row['activities_completed']}**\n"
                         f"❌ Canceladas: **{row['activities_cancelled']}** • "
+                        f"🛡️ Justificadas: **{row['cancellations_exempt']}**\n"
                         f"🙋 Asistencias: **{row['attendances']}** • "
                         f"🚫 Ausencias: **{row['absences']}**"
                     ),

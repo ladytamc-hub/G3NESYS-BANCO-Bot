@@ -13,6 +13,12 @@ ADMIN_PANEL_IMAGE = (
     "1516779706693849128/panel_administrativo.png"
 )
 
+CALLERS_WELCOME_IMAGE = (
+    "https://cdn.discordapp.com/attachments/1496878843644870716/"
+    "1517005391458996295/callers.jpg?ex=6a34b4dd&is=6a33635d&"
+    "hm=81fb1fe926eefbc1453299848aba21dda9730f12c13171536154bbf2dc755568"
+)
+
 ACTIVITY_DRAFT = "Borrador"
 ACTIVITY_OPEN = "Abierta"
 ACTIVITY_NOTICE = "En aviso"

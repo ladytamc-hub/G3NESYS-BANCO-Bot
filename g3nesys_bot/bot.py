@@ -2,20 +2,69 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
+from contextlib import contextmanager
+from pathlib import Path
+from typing import Iterator
 
 import discord
 from discord.ext import commands
 
-from .config import load_config
+from .config import AppConfig, load_config
 from .database import Database
 from .services.backups import backup_loop
 
 LOGGER = logging.getLogger("g3nesys")
 
 
+class BotAlreadyRunningError(RuntimeError):
+    pass
+
+
+@contextmanager
+def single_instance_lock(database_path: Path) -> Iterator[None]:
+    lock_path = database_path.with_name(f"{database_path.name}.instance.lock")
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    handle = lock_path.open("a+b")
+    handle.seek(0, os.SEEK_END)
+    if handle.tell() == 0:
+        handle.write(b"0")
+        handle.flush()
+    handle.seek(0)
+
+    try:
+        if os.name == "nt":
+            import msvcrt
+
+            msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+        else:
+            import fcntl
+
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError as exc:
+        handle.close()
+        raise BotAlreadyRunningError(
+            "Ya existe otra instancia local de G3NESYS usando esta base de datos."
+        ) from exc
+
+    try:
+        yield
+    finally:
+        handle.seek(0)
+        if os.name == "nt":
+            import msvcrt
+
+            msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+        else:
+            import fcntl
+
+            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+        handle.close()
+
+
 class G3NBot(commands.Bot):
-    def __init__(self):
-        self.config = load_config()
+    def __init__(self, config: AppConfig | None = None):
+        self.config = config or load_config()
         intents = discord.Intents.default()
         intents.members = True
         intents.guilds = True
@@ -49,14 +98,21 @@ class G3NBot(commands.Bot):
         LOGGER.info("Bot conectado como %s", self.user)
 
     async def on_command_error(self, ctx: commands.Context, error: Exception) -> None:
-        if isinstance(error, commands.CommandInvokeError) and isinstance(
-            error.original,
-            commands.CommandNotFound,
-        ):
-            return
-        if isinstance(error, commands.CommandNotFound):
-            return
-        if "Command " in str(error) and " is not found" in str(error):
+        original = getattr(error, "original", error)
+        if isinstance(original, commands.CommandNotFound):
+            attempted = (ctx.invoked_with or "").strip()
+            if attempted and self.get_command(attempted) is not None:
+                LOGGER.warning(
+                    "Se ignoro un CommandNotFound incorrecto para un comando registrado: %s",
+                    attempted,
+                )
+                return
+            shown_command = f"{ctx.prefix or self.config.command_prefix}{attempted}" if attempted else "ese comando"
+            await ctx.reply(
+                f"No reconozco `{shown_command}`. Revisa cómo está escrito o usa "
+                f"`{self.config.command_prefix}ayuda` para ver los comandos disponibles.",
+                mention_author=False,
+            )
             return
         if isinstance(error, commands.MissingRequiredArgument):
             await ctx.reply(
@@ -82,5 +138,10 @@ class G3NBot(commands.Bot):
 
 def run() -> None:
     logging.basicConfig(level=logging.INFO)
-    bot = G3NBot()
-    bot.run(bot.config.token)
+    config = load_config()
+    try:
+        with single_instance_lock(config.database_path):
+            bot = G3NBot(config)
+            bot.run(config.token)
+    except BotAlreadyRunningError as exc:
+        LOGGER.error("%s Cierra la otra ventana del bot antes de volver a iniciarlo.", exc)

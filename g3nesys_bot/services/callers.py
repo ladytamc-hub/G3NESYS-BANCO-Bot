@@ -8,11 +8,17 @@ from ..constants import (
     ACTIVITY_PAYOUT_CREATED,
     ATTENDANCE_ABSENT,
     ATTENDANCE_CONFIRMED,
+    CALLERS_WELCOME_IMAGE,
     PAYOUT_APPROVED,
     PAYOUT_DEPOSITED,
 )
 from ..database import Database
 from ..utils import utc_now_iso
+from .audit import log_action
+from .notifications import send_dm_safe
+
+
+CALLER_PENALTY_THRESHOLD = -14
 
 
 def authorize_caller(
@@ -49,6 +55,66 @@ def revoke_caller(db: Database, guild_id: int, user_id: int) -> bool:
         (guild_id, user_id),
     )
     return True
+
+
+def is_caller_penalized(db: Database, guild_id: int, user_id: int) -> bool:
+    return db.fetch_one(
+        """
+        SELECT 1
+        FROM caller_penalties
+        WHERE guild_id = ? AND user_id = ? AND active = 1
+        """,
+        (guild_id, user_id),
+    ) is not None
+
+
+def remove_caller_penalty(
+    db: Database,
+    guild_id: int,
+    user_id: int,
+    removed_by: int,
+) -> bool:
+    penalty = db.fetch_one(
+        """
+        SELECT 1
+        FROM caller_penalties
+        WHERE guild_id = ? AND user_id = ? AND active = 1
+        """,
+        (guild_id, user_id),
+    )
+    if penalty is None:
+        return False
+    db.execute(
+        """
+        UPDATE caller_penalties
+        SET active = 0, removed_by = ?, removed_at = ?
+        WHERE guild_id = ? AND user_id = ? AND active = 1
+        """,
+        (removed_by, utc_now_iso(), guild_id, user_id),
+    )
+    return True
+
+
+def cancellation_capacity(db: Database, activity_id: int) -> tuple[int, int, bool]:
+    row = db.fetch_one(
+        """
+        SELECT
+            COALESCE((
+                SELECT SUM(slots)
+                FROM activity_roles
+                WHERE activity_id = ?
+            ), 0) AS required_slots,
+            COALESCE((
+                SELECT COUNT(*)
+                FROM activity_participants
+                WHERE activity_id = ?
+            ), 0) AS registered_slots
+        """,
+        (activity_id, activity_id),
+    )
+    required = int(row["required_slots"])
+    registered = int(row["registered_slots"])
+    return required, registered, required > registered
 
 
 def caller_welcome_embed(guild_name: str) -> discord.Embed:
@@ -92,12 +158,154 @@ def caller_welcome_embed(guild_name: str) -> discord.Embed:
     embed.set_footer(
         text=f"{guild_name} • Tu liderazgo representa a G3NESYS. Gracias por asumir esta responsabilidad."
     )
+    embed.set_image(url=CALLERS_WELCOME_IMAGE)
+    return embed
+
+
+def caller_removal_embed(guild_name: str) -> discord.Embed:
+    embed = discord.Embed(
+        title="👋 Cambio en tu acceso de Caller",
+        description=(
+            "Se te ha dado de baja de la lista de **callers autorizados de G3NESYS**. "
+            "Agradecemos el tiempo, liderazgo y apoyo que brindaste a las actividades."
+        ),
+        color=discord.Color.gold(),
+    )
+    embed.add_field(
+        name="💛 Sigues siendo parte de la comunidad",
+        value=(
+            "Este cambio solo retira el acceso para crear y dirigir actividades como caller. "
+            "Puedes seguir participando normalmente en las actividades del gremio."
+        ),
+        inline=False,
+    )
+    embed.add_field(
+        name="📩 Si tienes dudas",
+        value="Puedes comunicarte con el equipo administrativo para conocer más detalles.",
+        inline=False,
+    )
+    embed.set_footer(text=f"{guild_name} • Gracias por tu apoyo a G3NESYS.")
+    return embed
+
+
+class CallerRemovalNoticeView(discord.ui.View):
+    def __init__(
+        self,
+        db: Database,
+        *,
+        guild_id: int,
+        guild_name: str,
+        admin_id: int,
+        member: discord.Member,
+    ):
+        super().__init__(timeout=180)
+        self.db = db
+        self.guild_id = guild_id
+        self.guild_name = guild_name
+        self.admin_id = admin_id
+        self.member = member
+
+    async def require_admin(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id == self.admin_id:
+            return True
+        await interaction.response.send_message(
+            "Solo el admin que elimino al caller puede elegir esta opcion.",
+            ephemeral=True,
+        )
+        return False
+
+    @discord.ui.button(label="Enviar aviso", emoji="📨", style=discord.ButtonStyle.primary)
+    async def send_notice(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
+        if not await self.require_admin(interaction):
+            return
+        delivered = await send_dm_safe(
+            self.db,
+            guild_id=self.guild_id,
+            user=self.member,
+            action="aviso_baja_caller",
+            embed=caller_removal_embed(self.guild_name),
+        )
+        result = (
+            f"📨 {self.member.mention} ya no es caller autorizado. Aviso enviado por DM."
+            if delivered
+            else f"⚠️ {self.member.mention} fue eliminado, pero no pude enviarle el DM."
+        )
+        log_action(
+            self.db,
+            self.guild_id,
+            admin_id=self.admin_id,
+            action="Aviso de baja de caller",
+            affected_user_id=self.member.id,
+            system="Callers",
+            observation="DM enviado." if delivered else "Discord rechazo el DM.",
+        )
+        await interaction.response.edit_message(content=result, view=None)
+
+    @discord.ui.button(label="No enviar aviso", emoji="🔕", style=discord.ButtonStyle.secondary)
+    async def skip_notice(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
+        if not await self.require_admin(interaction):
+            return
+        log_action(
+            self.db,
+            self.guild_id,
+            admin_id=self.admin_id,
+            action="Omitir aviso de baja de caller",
+            affected_user_id=self.member.id,
+            system="Callers",
+            observation="El admin eligio no enviar DM.",
+        )
+        await interaction.response.edit_message(
+            content=f"🔕 {self.member.mention} ya no es caller autorizado. No se envio ningun aviso.",
+            view=None,
+        )
+
+
+def caller_penalty_embed(guild_name: str, score: int) -> discord.Embed:
+    embed = discord.Embed(
+        title="⚠️ Advertencia de reputacion de Caller",
+        description=(
+            f"Tu reputacion de caller llego a **{score} puntos**. Por este motivo, tu acceso "
+            "para crear y controlar actividades ha sido suspendido temporalmente."
+        ),
+        color=discord.Color.red(),
+    )
+    embed.add_field(
+        name="📋 ¿Que significa?",
+        value=(
+            "Ya no podras usar las funciones de caller del Panel de Actividades hasta que "
+            "un administrador retire la penalizacion."
+        ),
+        inline=False,
+    )
+    embed.add_field(
+        name="💡 Importante",
+        value=(
+            "Las actividades canceladas por no completar los cupos de la composicion no "
+            "afectan tu reputacion. Puedes hablar con la administracion si necesitas una revision."
+        ),
+        inline=False,
+    )
+    embed.set_footer(text=f"{guild_name} • Queremos ayudarte a recuperar tu buen historial.")
     return embed
 
 
 def caller_ranking(db: Database, guild_id: int) -> list[dict]:
     rows = db.fetch_all(
         """
+        WITH activity_stats AS (
+            SELECT
+                ac.*,
+                COALESCE(SUM(ar.slots), 0) AS required_slots,
+                COALESCE((
+                    SELECT COUNT(*)
+                    FROM activity_participants ap
+                    WHERE ap.activity_id = ac.id
+                ), 0) AS registered_slots
+            FROM activities ac
+            LEFT JOIN activity_roles ar ON ar.activity_id = ac.id
+            WHERE ac.guild_id = ?
+            GROUP BY ac.id
+        )
         SELECT
             c.user_id,
             c.created_at,
@@ -106,8 +314,17 @@ def caller_ranking(db: Database, guild_id: int) -> list[dict]:
                 WHEN ac.status IN (?, ?) THEN ac.id
             END) AS activities_completed,
             COUNT(DISTINCT CASE
-                WHEN ac.status = ? THEN ac.id
+                WHEN ac.status = ? AND COALESCE(
+                    ac.cancellation_reputation_exempt,
+                    CASE WHEN ac.registered_slots < ac.required_slots THEN 1 ELSE 0 END
+                ) = 0 THEN ac.id
             END) AS activities_cancelled,
+            COUNT(DISTINCT CASE
+                WHEN ac.status = ? AND COALESCE(
+                    ac.cancellation_reputation_exempt,
+                    CASE WHEN ac.registered_slots < ac.required_slots THEN 1 ELSE 0 END
+                ) = 1 THEN ac.id
+            END) AS cancellations_exempt,
             COALESCE((
                 SELECT COUNT(*)
                 FROM asistencia_actividades aa
@@ -130,16 +347,25 @@ def caller_ranking(db: Database, guild_id: int) -> list[dict]:
                 WHERE p.guild_id = c.guild_id
                   AND p.caller_id = c.user_id
                   AND p.status IN (?, ?)
-            ), 0) AS distributed
+            ), 0) AS distributed,
+            EXISTS(
+                SELECT 1
+                FROM caller_penalties cp
+                WHERE cp.guild_id = c.guild_id
+                  AND cp.user_id = c.user_id
+                  AND cp.active = 1
+            ) AS penalized
         FROM callers c
-        LEFT JOIN activities ac
+        LEFT JOIN activity_stats ac
             ON ac.guild_id = c.guild_id AND ac.caller_id = c.user_id
         WHERE c.guild_id = ?
         GROUP BY c.guild_id, c.user_id, c.created_at
         """,
         (
+            guild_id,
             ACTIVITY_FINISHED,
             ACTIVITY_PAYOUT_CREATED,
+            ACTIVITY_CANCELLED,
             ACTIVITY_CANCELLED,
             ATTENDANCE_CONFIRMED,
             ATTENDANCE_ABSENT,
@@ -169,3 +395,110 @@ def caller_ranking(db: Database, guild_id: int) -> list[dict]:
         )
     )
     return ranking
+
+
+async def evaluate_caller_penalties(db: Database, guild: discord.Guild) -> list[int]:
+    penalized_users: list[int] = []
+    for caller in caller_ranking(db, guild.id):
+        user_id = int(caller["user_id"])
+        score = int(caller["score"])
+        active_penalty = db.fetch_one(
+            """
+            SELECT id, notified_at
+            FROM caller_penalties
+            WHERE guild_id = ? AND user_id = ? AND active = 1
+            ORDER BY id DESC LIMIT 1
+            """,
+            (guild.id, user_id),
+        )
+        if score > CALLER_PENALTY_THRESHOLD:
+            db.execute(
+                """
+                UPDATE caller_penalties
+                SET rearmed = 1
+                WHERE guild_id = ? AND user_id = ? AND active = 0 AND rearmed = 0
+                """,
+                (guild.id, user_id),
+            )
+            continue
+        if active_penalty is not None:
+            if not active_penalty["notified_at"]:
+                member = guild.get_member(user_id)
+                if member is not None:
+                    delivered = await send_dm_safe(
+                        db,
+                        guild_id=guild.id,
+                        user=member,
+                        action="penalizacion_caller",
+                        embed=caller_penalty_embed(guild.name, score),
+                    )
+                    if delivered:
+                        db.execute(
+                            """
+                            UPDATE caller_penalties
+                            SET notified_at = ?
+                            WHERE id = ?
+                            """,
+                            (utc_now_iso(), int(active_penalty["id"])),
+                        )
+            continue
+
+        latest_inactive = db.fetch_one(
+            """
+            SELECT rearmed
+            FROM caller_penalties
+            WHERE guild_id = ? AND user_id = ? AND active = 0
+            ORDER BY id DESC LIMIT 1
+            """,
+            (guild.id, user_id),
+        )
+        if latest_inactive is not None and not int(latest_inactive["rearmed"]):
+            continue
+
+        now = utc_now_iso()
+        db.execute(
+            """
+            INSERT INTO caller_penalties (
+                guild_id, user_id, score_at_penalty, reason,
+                active, penalized_at, notified_at, rearmed
+            )
+            VALUES (?, ?, ?, ?, 1, ?, NULL, 0)
+            """,
+            (
+                guild.id,
+                user_id,
+                score,
+                f"Reputacion de caller igual o menor a {CALLER_PENALTY_THRESHOLD} puntos.",
+                now,
+            ),
+        )
+        member = guild.get_member(user_id)
+        delivered = False
+        if member is not None:
+            delivered = await send_dm_safe(
+                db,
+                guild_id=guild.id,
+                user=member,
+                action="penalizacion_caller",
+                embed=caller_penalty_embed(guild.name, score),
+            )
+        if delivered:
+            db.execute(
+                """
+                UPDATE caller_penalties
+                SET notified_at = ?
+                WHERE guild_id = ? AND user_id = ? AND active = 1
+                """,
+                (utc_now_iso(), guild.id, user_id),
+            )
+        log_action(
+            db,
+            guild.id,
+            admin_id=None,
+            action="Penalizacion automatica de caller",
+            affected_user_id=user_id,
+            system="Callers",
+            observation=f"Puntaje: {score}. Acceso de caller suspendido.",
+        )
+        penalized_users.append(user_id)
+    return penalized_users
