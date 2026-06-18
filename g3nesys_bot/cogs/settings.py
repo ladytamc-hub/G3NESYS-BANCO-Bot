@@ -48,7 +48,7 @@ class Settings(commands.Cog):
                     "`!canal_cobros_set` - Canal de cobros.",
                     "`!canal_multas_set` - Canal de multas.",
                     "`!canal_historial_set` - Canal historial.",
-                    "`!canal_repartos_set` - Canal de repartos.",
+                    "`!canal_splits_set` - Canal de Splits.",
                     "`!admin_role_set @rol` - Autoriza rol admin.",
                     "`!caller_set @usuario` - Autoriza caller.",
                     "`!caller_remove @usuario` - Quita caller.",
@@ -62,10 +62,10 @@ class Settings(commands.Cog):
                 [
                     "`!penalizaciones` - Lista penalizados.",
                     "`!penalizacion_remove @usuario motivo` - Quita penalizacion.",
-                    "`!reparto_participantes REP-000001` - Lista participantes.",
-                    "`!reparto_participacion REP-000001 @usuario 10` - Edita porcentaje.",
-                    "`!reparto_agregar REP-000001 @usuario 100` - Agrega participante.",
-                    "`!reparto_quitar REP-000001 @usuario` - Quita participante.",
+                    "`!split_participantes SPLIT-000001` - Lista participantes.",
+                    "`!split_participacion SPLIT-000001 @usuario 10` - Edita porcentaje.",
+                    "`!split_agregar SPLIT-000001 @usuario 100` - Agrega participante.",
+                    "`!split_quitar SPLIT-000001 @usuario` - Quita participante.",
                 ],
             ),
             (
@@ -97,9 +97,9 @@ class Settings(commands.Cog):
                     "`!aprobar_cobro COBRO-000001` - Aprueba cobro.",
                     "`!rechazar_cobro COBRO-000001 motivo` - Rechaza cobro.",
                     "`!liquidar_cobro COBRO-000001 monto` - Liquida cobro.",
-                    "`!aprobar_reparto REP-000001` - Aprueba reparto.",
-                    "`!rechazar_reparto REP-000001 motivo` - Rechaza reparto.",
-                    "`!corregir_reparto REP-000001 motivo` - Pide correccion.",
+                    "`!aprobar_split SPLIT-000001` - Aprueba Split.",
+                    "`!rechazar_split SPLIT-000001 motivo` - Rechaza Split.",
+                    "`!corregir_split SPLIT-000001 motivo` - Pide correccion.",
                     "`!reporte_excel` - Exporta reporte Excel.",
                 ],
             ),
@@ -236,11 +236,13 @@ class Settings(commands.Cog):
             ("Canal cobros", "channel_cobros_id"),
             ("Canal multas", "channel_multas_id"),
             ("Canal historial", "channel_historial_id"),
-            ("Canal repartos", "channel_repartos_id"),
+            ("Canal Splits", "channel_repartos_id"),
             ("Rol miembro", "member_role_name"),
             ("Rol invitado", "guest_role_name"),
             ("Multa inasistencia", "absence_fine_amount"),
             ("Multa inasistencia activa", "absence_fine_enabled"),
+            ("Permanencia minima en voz %", "voice_minimum_percent"),
+            ("Porcentaje caller predeterminado", "caller_percentage_default"),
         ]
         lines = ["**Configuracion G3NESYS**"]
         for label, key in keys:
@@ -260,6 +262,8 @@ class Settings(commands.Cog):
             "currency_name",
             "transfer_fee_percent",
             "require_voice_for_attendance",
+            "voice_minimum_percent",
+            "caller_percentage_default",
         }
         if key not in allowed:
             await ctx.reply(
@@ -310,7 +314,7 @@ class Settings(commands.Cog):
     async def canal_historial_set(self, ctx: commands.Context) -> None:
         await self.set_channel(ctx, "channel_historial_id")
 
-    @commands.command(name="canal_repartos_set")
+    @commands.command(name="canal_repartos_set", aliases=["canal_splits_set"])
     async def canal_repartos_set(self, ctx: commands.Context) -> None:
         await self.set_channel(ctx, "channel_repartos_id")
 

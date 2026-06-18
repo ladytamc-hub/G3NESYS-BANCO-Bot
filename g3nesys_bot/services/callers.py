@@ -132,7 +132,7 @@ def caller_welcome_embed(guild_name: str) -> discord.Embed:
             "• Usar el panel de actividades.\n"
             "• Crear plantillas y publicar actividades.\n"
             "• Administrar cupos, avisos y asistencia.\n"
-            "• Generar repartos y enviarlos a revision administrativa."
+            "• Generar Splits y enviarlos a revision administrativa."
         ),
         inline=False,
     )
@@ -142,7 +142,7 @@ def caller_welcome_embed(guild_name: str) -> discord.Embed:
             "• Asistir a las actividades que elijas organizar o en las que te registres.\n"
             "• Dirigir con respeto, orden e imparcialidad.\n"
             "• Verificar asistencia y canal de voz antes de cerrar la actividad.\n"
-            "• Revisar participantes y porcentajes antes de enviar un reparto.\n"
+            "• Revisar participantes y porcentajes antes de enviar un Split.\n"
             "• Avisar con claridad si una actividad debe cambiarse o cancelarse."
         ),
         inline=False,

@@ -37,6 +37,14 @@ class Database:
         }
         if "sent_to_admin_at" not in payout_columns:
             self._conn.execute("ALTER TABLE payouts ADD COLUMN sent_to_admin_at TEXT")
+        if "caller_percent" not in payout_columns:
+            self._conn.execute(
+                "ALTER TABLE payouts ADD COLUMN caller_percent REAL NOT NULL DEFAULT 0"
+            )
+        if "caller_amount" not in payout_columns:
+            self._conn.execute(
+                "ALTER TABLE payouts ADD COLUMN caller_amount INTEGER NOT NULL DEFAULT 0"
+            )
 
         template_columns = {
             row["name"]
@@ -59,6 +67,25 @@ class Database:
             )
         if "cancellation_reason" not in activity_columns:
             self._conn.execute("ALTER TABLE activities ADD COLUMN cancellation_reason TEXT")
+        if "check_sent_at" not in activity_columns:
+            self._conn.execute("ALTER TABLE activities ADD COLUMN check_sent_at TEXT")
+
+        attendance_columns = {
+            row["name"]
+            for row in self._conn.execute(
+                "PRAGMA table_info(asistencia_actividades)"
+            ).fetchall()
+        }
+        if "voice_seconds" not in attendance_columns:
+            self._conn.execute(
+                "ALTER TABLE asistencia_actividades "
+                "ADD COLUMN voice_seconds INTEGER NOT NULL DEFAULT 0"
+            )
+        if "participation_percent" not in attendance_columns:
+            self._conn.execute(
+                "ALTER TABLE asistencia_actividades "
+                "ADD COLUMN participation_percent REAL NOT NULL DEFAULT 0"
+            )
 
         caller_penalty_columns = {
             row["name"]
@@ -133,13 +160,14 @@ class Database:
                     cancelled_by INTEGER,
                     cancellation_reputation_exempt INTEGER,
                     cancellation_reason TEXT,
+                    check_sent_at TEXT,
                     UNIQUE(guild_id, code)
                 )
                 """,
                 "id, code, guild_id, template_id, name, caller_id, horario, "
                 "voice_channel_id, notes, status, channel_id, message_id, "
                 "created_at, started_at, ended_at, cancelled_by, "
-                "cancellation_reputation_exempt, cancellation_reason",
+                "cancellation_reputation_exempt, cancellation_reason, check_sent_at",
             ),
             "fines": (
                 """
@@ -215,13 +243,15 @@ class Database:
                     sent_to_admin_at TEXT,
                     reviewed_by INTEGER,
                     reviewed_at TEXT,
+                    caller_percent REAL NOT NULL DEFAULT 0,
+                    caller_amount INTEGER NOT NULL DEFAULT 0,
                     UNIQUE(guild_id, code)
                 )
                 """,
                 "id, code, guild_id, activity_id, caller_id, status, gross_loot, "
                 "market_rate_percent, repairs, other_expenses, guild_percent, "
                 "guild_amount, distributable, notes, created_at, sent_to_admin_at, "
-                "reviewed_by, reviewed_at",
+                "reviewed_by, reviewed_at, caller_percent, caller_amount",
             ),
             "movements": (
                 """
@@ -478,6 +508,7 @@ CREATE TABLE IF NOT EXISTS activities (
     cancelled_by INTEGER,
     cancellation_reputation_exempt INTEGER,
     cancellation_reason TEXT,
+    check_sent_at TEXT,
     UNIQUE(guild_id, code)
 );
 
@@ -512,7 +543,32 @@ CREATE TABLE IF NOT EXISTS asistencia_actividades (
     genero_multa INTEGER NOT NULL DEFAULT 0,
     justificado_por INTEGER,
     observaciones TEXT,
+    voice_seconds INTEGER NOT NULL DEFAULT 0,
+    participation_percent REAL NOT NULL DEFAULT 0,
     UNIQUE(actividad_id, usuario_id)
+);
+
+CREATE TABLE IF NOT EXISTS activity_voice_sessions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    guild_id INTEGER NOT NULL,
+    activity_id INTEGER NOT NULL REFERENCES activities(id) ON DELETE CASCADE,
+    user_id INTEGER NOT NULL,
+    joined_at TEXT NOT NULL,
+    left_at TEXT,
+    seconds INTEGER NOT NULL DEFAULT 0
+);
+
+CREATE TABLE IF NOT EXISTS activity_join_requests (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    guild_id INTEGER NOT NULL,
+    activity_id INTEGER NOT NULL REFERENCES activities(id) ON DELETE CASCADE,
+    user_id INTEGER NOT NULL,
+    display_name TEXT NOT NULL,
+    requested_role TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'Pendiente',
+    requested_at TEXT NOT NULL,
+    reviewed_by INTEGER,
+    reviewed_at TEXT
 );
 
 CREATE TABLE IF NOT EXISTS penalizacion_actividades (
@@ -604,6 +660,8 @@ CREATE TABLE IF NOT EXISTS payouts (
     sent_to_admin_at TEXT,
     reviewed_by INTEGER,
     reviewed_at TEXT,
+    caller_percent REAL NOT NULL DEFAULT 0,
+    caller_amount INTEGER NOT NULL DEFAULT 0,
     UNIQUE(guild_id, code)
 );
 
@@ -665,6 +723,12 @@ ON movements(guild_id, created_at);
 
 CREATE INDEX IF NOT EXISTS idx_activity_participants_activity
 ON activity_participants(activity_id);
+
+CREATE INDEX IF NOT EXISTS idx_voice_sessions_activity_user
+ON activity_voice_sessions(guild_id, activity_id, user_id, left_at);
+
+CREATE INDEX IF NOT EXISTS idx_join_requests_pending
+ON activity_join_requests(guild_id, activity_id, status);
 
 CREATE INDEX IF NOT EXISTS idx_activities_guild_status
 ON activities(guild_id, status);

@@ -4,7 +4,6 @@ from pathlib import Path
 
 import discord
 from discord.ext import commands
-from openpyxl import Workbook
 
 from ..constants import (
     ADMIN_PANEL_IMAGE,
@@ -41,6 +40,7 @@ from ..services.economy import (
 )
 from ..services.fines import cancel_fine, create_fine
 from ..services.notifications import send_dm_safe
+from ..services.reports import create_admin_report
 from ..utils import format_amount, parse_channel_id, parse_int_amount, utc_now_iso
 
 
@@ -145,6 +145,72 @@ class UserStatementModal(discord.ui.Modal, title="Estado de cuenta"):
 
     async def on_submit(self, interaction: discord.Interaction) -> None:
         await self.cog.user_statement_interaction(interaction, str(self.user.value))
+
+
+class ApproveWithdrawalModal(discord.ui.Modal, title="Aprobar cobro"):
+    code = discord.ui.TextInput(label="Codigo de cobro", placeholder="COBRO-000001")
+
+    def __init__(self, cog: "Admin"):
+        super().__init__(timeout=180)
+        self.cog = cog
+
+    async def on_submit(self, interaction: discord.Interaction) -> None:
+        if not is_admin_subject(self.cog.db, interaction):
+            await private_response(interaction, "Solo admins autorizados pueden aprobar cobros.")
+            return
+        code = str(self.code.value).strip().upper()
+        try:
+            await self.cog.approve_withdrawal(interaction.guild, code, interaction.user.id)
+        except ValueError as exc:
+            await private_response(interaction, str(exc))
+            return
+        await private_response(interaction, f"Solicitud `{code}` aprobada. Ya puede liquidarse.")
+
+
+class LiquidateWithdrawalModal(discord.ui.Modal, title="Liquidar cobro"):
+    code = discord.ui.TextInput(label="Codigo de cobro", placeholder="COBRO-000001")
+    amount = discord.ui.TextInput(label="Monto a liquidar", placeholder="1000000")
+
+    def __init__(self, cog: "Admin"):
+        super().__init__(timeout=180)
+        self.cog = cog
+
+    async def on_submit(self, interaction: discord.Interaction) -> None:
+        if not is_admin_subject(self.cog.db, interaction):
+            await private_response(interaction, "Solo admins autorizados pueden liquidar cobros.")
+            return
+        try:
+            amount = parse_int_amount(str(self.amount.value))
+            result = await self.cog.liquidate_withdrawal(
+                interaction.guild,
+                str(self.code.value).strip().upper(),
+                amount,
+                interaction.user.id,
+            )
+        except ValueError as exc:
+            await private_response(interaction, str(exc))
+            return
+        await private_response(interaction, result)
+
+
+class WithdrawalAdminView(discord.ui.View):
+    def __init__(self, cog: "Admin"):
+        super().__init__(timeout=600)
+        self.cog = cog
+
+    @discord.ui.button(label="Aprobar cobro", emoji="✅", style=discord.ButtonStyle.success)
+    async def approve(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
+        if not is_admin_subject(self.cog.db, interaction):
+            await private_response(interaction, "Solo admins autorizados pueden aprobar cobros.")
+            return
+        await interaction.response.send_modal(ApproveWithdrawalModal(self.cog))
+
+    @discord.ui.button(label="Liquidar cobro", emoji="💵", style=discord.ButtonStyle.primary)
+    async def liquidate(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
+        if not is_admin_subject(self.cog.db, interaction):
+            await private_response(interaction, "Solo admins autorizados pueden liquidar cobros.")
+            return
+        await interaction.response.send_modal(LiquidateWithdrawalModal(self.cog))
 
 
 class CreateFineModal(discord.ui.Modal, title="Crear multa"):
@@ -390,7 +456,7 @@ class PayoutReasonModal(discord.ui.Modal):
     reason = discord.ui.TextInput(label="Motivo", style=discord.TextStyle.paragraph, max_length=600)
 
     def __init__(self, cog: "Admin", code: str, target_status: str):
-        title = "Rechazar reparto" if target_status == PAYOUT_REJECTED else "Solicitar correccion"
+        title = "Rechazar Split" if target_status == PAYOUT_REJECTED else "Solicitar correccion"
         super().__init__(title=title, timeout=180)
         self.cog = cog
         self.code = code
@@ -412,7 +478,7 @@ class PayoutReasonModal(discord.ui.Modal):
             await private_response(interaction, str(exc))
             return
         label = "rechazado" if self.target_status == PAYOUT_REJECTED else "marcado para correccion"
-        await private_response(interaction, f"Reparto `{self.code}` {label}.")
+        await private_response(interaction, f"Split `{self.code}` {label}.")
 
 
 class PayoutReviewView(discord.ui.View):
@@ -437,14 +503,14 @@ class PayoutReviewView(discord.ui.View):
 
     async def handle_button(self, interaction: discord.Interaction) -> None:
         if not is_admin_subject(self.cog.db, interaction):
-            await private_response(interaction, "Solo admins autorizados pueden revisar repartos.")
+            await private_response(interaction, "Solo admins autorizados pueden revisar Splits.")
             return
         custom_id = str(interaction.data["custom_id"])
         action = custom_id.split(":")[3]
         if action == "approve":
             await private_response(
                 interaction,
-                f"¿Confirmas esta operacion?\nAprobar reparto `{self.code}` y depositar saldos.",
+                f"¿Confirmas esta operacion?\nAprobar Split `{self.code}` y depositar saldos.",
                 view=ConfirmAdminActionView(
                     self.cog,
                     admin_id=interaction.user.id,
@@ -499,7 +565,7 @@ class AdminPanelView(discord.ui.View):
         if await self.require_admin(interaction):
             await interaction.response.send_modal(DepositModal(self.cog))
 
-    @discord.ui.button(label="Revisar Repartos", emoji="📋", style=discord.ButtonStyle.secondary, custom_id="g3n:admin:payouts", row=1)
+    @discord.ui.button(label="Revisar Splits", emoji="📋", style=discord.ButtonStyle.secondary, custom_id="g3n:admin:payouts", row=1)
     async def payouts(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
         if await self.require_admin(interaction):
             await dm_or_private(self.cog, interaction, self.cog.pending_payouts_text(interaction.guild.id), "repartos_panel")
@@ -516,7 +582,11 @@ class AdminPanelView(discord.ui.View):
     @discord.ui.button(label="Solicitudes Cobro", emoji="💳", style=discord.ButtonStyle.secondary, custom_id="g3n:admin:withdrawals", row=1)
     async def withdrawals(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
         if await self.require_admin(interaction):
-            await dm_or_private(self.cog, interaction, self.cog.withdrawals_text(interaction.guild.id), "cobros_panel")
+            await private_response(
+                interaction,
+                self.cog.withdrawals_text(interaction.guild.id),
+                view=WithdrawalAdminView(self.cog),
+            )
 
     @discord.ui.button(label="Estado de Cuenta", emoji="👤", style=discord.ButtonStyle.secondary, custom_id="g3n:admin:statement", row=1)
     async def statement(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
@@ -536,9 +606,10 @@ class AdminPanelView(discord.ui.View):
     @discord.ui.button(label="Reportes", emoji="📊", style=discord.ButtonStyle.secondary, custom_id="g3n:admin:reports", row=2)
     async def reports(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
         if await self.require_admin(interaction):
+            await interaction.response.defer(ephemeral=True)
             path = self.cog.create_report(interaction.guild.id)
-            await interaction.response.send_message(
-                "Reporte generado.",
+            await interaction.followup.send(
+                "Reporte administrativo integral generado.",
                 file=discord.File(path),
                 ephemeral=True,
             )
@@ -738,7 +809,7 @@ class Admin(commands.Cog):
                 title="📣 Ranking de Callers G3NESYS",
                 description=(
                     "Clasificacion calculada con actividades, asistencia y cumplimiento.\n"
-                    "La plata incluye repartos aprobados y depositados."
+                    "La plata incluye Splits aprobados y depositados."
                 ),
                 color=discord.Color.gold(),
             )
@@ -771,16 +842,21 @@ class Admin(commands.Cog):
             (guild_id, code),
         )
         embed = discord.Embed(
-            title=f"📋 Reparto pendiente {code}",
-            description="Revisa el reparto y usa los botones para aprobar, rechazar o pedir correccion.",
+            title=f"📋 Split pendiente {code}",
+            description="Revisa el Split y usa los botones para aprobar, rechazar o pedir correccion.",
             color=discord.Color.gold(),
         )
         if payout is None:
-            embed.description = "No encontre los datos de este reparto."
+            embed.description = "No encontre los datos de este Split."
             return embed
         embed.add_field(name="Caller", value=f"<@{payout['caller_id']}>", inline=True)
         embed.add_field(name="Loot bruto", value=format_amount(payout["gross_loot"]), inline=True)
         embed.add_field(name="Aporte gremial", value=format_amount(payout["guild_amount"]), inline=True)
+        embed.add_field(
+            name="Porcentaje caller",
+            value=f"{float(payout['caller_percent'] or 0):.1f}% — {format_amount(payout['caller_amount'])}",
+            inline=True,
+        )
         embed.add_field(name="Monto repartible", value=format_amount(payout["distributable"]), inline=True)
         embed.add_field(name="Estado", value=payout["status"], inline=True)
         embed.add_field(
@@ -797,7 +873,7 @@ class Admin(commands.Cog):
             return
         embed = discord.Embed(
             title="Panel Administrativo G3NESYS",
-            description="Tesoreria, repartos, cobros, historial, rankings y configuracion.",
+            description="Tesoreria, Splits, cobros, historial, rankings y configuracion.",
             color=discord.Color.blurple(),
         )
         embed.set_image(url=ADMIN_PANEL_IMAGE)
@@ -965,12 +1041,12 @@ class Admin(commands.Cog):
             mention_author=False,
         )
 
-    @commands.command(name="aprobar_reparto")
+    @commands.command(name="aprobar_reparto", aliases=["aprobar_split"])
     async def aprobar_reparto(self, ctx: commands.Context, code: str) -> None:
         if not await require_admin_context(ctx, self.db):
             return
         await ctx.reply(
-            f"¿Confirmas esta operacion?\nAprobar reparto `{code}` y depositar saldos.",
+            f"¿Confirmas esta operacion?\nAprobar Split `{code}` y depositar saldos.",
             view=ConfirmAdminActionView(
                 self,
                 admin_id=ctx.author.id,
@@ -980,7 +1056,7 @@ class Admin(commands.Cog):
             mention_author=False,
         )
 
-    @commands.command(name="rechazar_reparto")
+    @commands.command(name="rechazar_reparto", aliases=["rechazar_split"])
     async def rechazar_reparto(self, ctx: commands.Context, code: str, *, reason: str) -> None:
         if not await require_admin_context(ctx, self.db):
             return
@@ -995,9 +1071,9 @@ class Admin(commands.Cog):
         except ValueError as exc:
             await ctx.reply(str(exc), mention_author=False)
             return
-        await ctx.reply(f"Reparto `{code}` rechazado.", mention_author=False)
+        await ctx.reply(f"Split `{code}` rechazado.", mention_author=False)
 
-    @commands.command(name="corregir_reparto")
+    @commands.command(name="corregir_reparto", aliases=["corregir_split"])
     async def corregir_reparto(self, ctx: commands.Context, code: str, *, reason: str) -> None:
         if not await require_admin_context(ctx, self.db):
             return
@@ -1291,9 +1367,9 @@ class Admin(commands.Cog):
             (guild.id, code),
         )
         if payout is None:
-            raise ValueError("No encontre ese reparto.")
+            raise ValueError("No encontre ese Split.")
         if payout["status"] != PAYOUT_PENDING:
-            raise ValueError("Ese reparto ya fue procesado o no esta pendiente.")
+            raise ValueError("Ese Split ya fue procesado o no esta pendiente.")
 
         if int(payout["guild_amount"]) > 0:
             register_guild_income(
@@ -1301,9 +1377,42 @@ class Admin(commands.Cog):
                 guild.id,
                 amount=int(payout["guild_amount"]),
                 category="Aporte por actividad",
-                description=f"Aporte gremial de reparto {code}",
+                description=f"Aporte gremial de Split {code}",
                 admin_id=admin_id,
             )
+        caller_amount = int(payout["caller_amount"] or 0)
+        if caller_amount > 0:
+            caller_id = int(payout["caller_id"])
+            fine_count, _ = pending_fines_total(self.db, guild.id, caller_id)
+            caller_balance_type = "retained" if fine_count > 0 else "available"
+            if caller_balance_type == "retained":
+                adjust_user_balance(self.db, guild.id, caller_id, retained_delta=caller_amount)
+            else:
+                adjust_user_balance(self.db, guild.id, caller_id, available_delta=caller_amount)
+            create_movement(
+                self.db,
+                guild.id,
+                movement_type="DEPOSITO",
+                category="Porcentaje de caller",
+                amount=caller_amount,
+                description=f"Porcentaje de caller del Split {code}",
+                created_by=admin_id,
+                user_id=caller_id,
+                source_table="payouts",
+                source_id=int(payout["id"]),
+            )
+            caller = guild.get_member(caller_id)
+            if caller is not None:
+                await send_dm_safe(
+                    self.db,
+                    guild_id=guild.id,
+                    user=caller,
+                    action="deposito_porcentaje_caller",
+                    content=(
+                        f"📣 Recibiste {format_amount(caller_amount)} por tu porcentaje de caller "
+                        f"en el Split `{code}`."
+                    ),
+                )
         participants = self.db.fetch_all(
             "SELECT * FROM payout_participants WHERE payout_id = ?",
             (int(payout["id"]),),
@@ -1321,9 +1430,9 @@ class Admin(commands.Cog):
                 self.db,
                 guild.id,
                 movement_type="DEPOSITO",
-                category="Reparto de actividad",
+                category="Split de actividad",
                 amount=amount,
-                description=f"Deposito por reparto {code}",
+                description=f"Deposito por Split {code}",
                 created_by=admin_id,
                 user_id=user_id,
                 source_table="payouts",
@@ -1343,12 +1452,12 @@ class Admin(commands.Cog):
                     self.db,
                     guild_id=guild.id,
                     user=member,
-                    action="deposito_reparto",
+                    action="deposito_split",
                     content=(
-                        "💰 Has recibido un deposito por reparto.\n\n"
+                        "💰 Has recibido un deposito por Split.\n\n"
                         f"Cantidad: {format_amount(amount)}\n"
                         f"Tipo: {self.readable_balance_type(balance_type)}\n"
-                        f"Reparto: {code}"
+                        f"Split: {code}"
                     ),
                 )
         self.db.execute(
@@ -1359,12 +1468,12 @@ class Admin(commands.Cog):
             self.db,
             guild.id,
             admin_id=admin_id,
-            action="Aprobar reparto",
-            system="Repartos",
-            amount=int(payout["distributable"]),
+            action="Aprobar Split",
+            system="Splits",
+            amount=int(payout["distributable"]) + caller_amount,
             observation=code,
         )
-        return f"Reparto `{code}` aprobado y saldos depositados."
+        return f"Split `{code}` aprobado y saldos depositados."
 
     async def update_payout_status(
         self,
@@ -1379,9 +1488,9 @@ class Admin(commands.Cog):
             (guild.id, code),
         )
         if payout is None:
-            raise ValueError("No encontre ese reparto.")
+            raise ValueError("No encontre ese Split.")
         if payout["status"] != PAYOUT_PENDING:
-            raise ValueError("Solo se pueden cambiar repartos pendientes.")
+            raise ValueError("Solo se pueden cambiar Splits pendientes.")
         self.db.execute(
             "UPDATE payouts SET status = ?, reviewed_by = ?, reviewed_at = ?, notes = ? WHERE id = ?",
             (status, admin_id, utc_now_iso(), reason, int(payout["id"])),
@@ -1390,8 +1499,8 @@ class Admin(commands.Cog):
             self.db,
             guild.id,
             admin_id=admin_id,
-            action=f"Actualizar reparto a {status}",
-            system="Repartos",
+            action=f"Actualizar Split a {status}",
+            system="Splits",
             amount=int(payout["distributable"]),
             observation=f"{code}: {reason}",
         )
@@ -1401,8 +1510,8 @@ class Admin(commands.Cog):
                 self.db,
                 guild_id=guild.id,
                 user=caller,
-                action="estado_reparto",
-                content=f"El reparto `{code}` cambio a `{status}`. Motivo: {reason}",
+                action="estado_split",
+                content=f"El Split `{code}` cambio a `{status}`. Motivo: {reason}",
             )
 
     def treasury_text(self, guild_id: int) -> str:
@@ -1471,7 +1580,7 @@ class Admin(commands.Cog):
     def pending_payouts_text(self, guild_id: int) -> str:
         rows = self.db.fetch_all(
             """
-            SELECT code, caller_id, distributable, guild_amount, status
+            SELECT code, caller_id, distributable, guild_amount, caller_amount, status
             FROM payouts
             WHERE guild_id = ? AND status = ? AND sent_to_admin_at IS NOT NULL
             ORDER BY id DESC LIMIT 15
@@ -1479,13 +1588,14 @@ class Admin(commands.Cog):
             (guild_id, PAYOUT_PENDING),
         )
         if not rows:
-            return "No hay repartos pendientes."
-        lines = ["**Repartos pendientes**"]
+            return "No hay Splits pendientes."
+        lines = ["**Splits pendientes**"]
         for row in rows:
             lines.append(
                 f"`{row['code']}` Caller <@{row['caller_id']}> "
                 f"Repartible {format_amount(row['distributable'])} "
-                f"Aporte {format_amount(row['guild_amount'])}"
+                f"Aporte {format_amount(row['guild_amount'])} "
+                f"Caller {format_amount(row['caller_amount'])}"
             )
         lines.append("Usa los botones del mensaje de revision para aprobar, rechazar o pedir correccion.")
         return "\n".join(lines)
@@ -1496,7 +1606,7 @@ class Admin(commands.Cog):
             (guild_id, code),
         )
         if payout is None:
-            return "No encontre ese reparto."
+            return "No encontre ese Split."
         rows = self.db.fetch_all(
             """
             SELECT user_id, participation_percent, amount
@@ -1514,10 +1624,11 @@ class Admin(commands.Cog):
                 for row in rows
             )
         lines = [
-            f"📋 **Detalle de reparto {code}**",
+            f"📋 **Detalle de Split {code}**",
             f"Caller: <@{payout['caller_id']}>",
             f"Loot bruto: {format_amount(payout['gross_loot'])}",
             f"Aporte gremial: {format_amount(payout['guild_amount'])}",
+            f"Pago caller: {float(payout['caller_percent'] or 0):.1f}% — {format_amount(payout['caller_amount'])}",
             f"Monto repartible: {format_amount(payout['distributable'])}",
             "",
             "**Participantes**",
@@ -1613,55 +1724,11 @@ class Admin(commands.Cog):
         )
 
     def create_report(self, guild_id: int) -> Path:
-        reports_dir = Path("data/reports")
-        reports_dir.mkdir(parents=True, exist_ok=True)
-        path = reports_dir / f"reporte-g3nesys-{guild_id}.xlsx"
-        wb = Workbook()
-        ws = wb.active
-        ws.title = "Movimientos"
-        ws.append(["Codigo", "Tipo", "Categoria", "Usuario", "Monto", "Descripcion", "Fecha"])
-        rows = self.db.fetch_all(
-            """
-            SELECT code, type, category, user_id, amount, description, created_at
-            FROM movements
-            WHERE guild_id = ?
-            ORDER BY id DESC
-            """,
-            (guild_id,),
+        return create_admin_report(
+            self.db,
+            guild_id,
+            self.bot.get_guild(guild_id),
         )
-        for row in rows:
-            ws.append([
-                row["code"],
-                row["type"],
-                row["category"],
-                row["user_id"],
-                row["amount"],
-                row["description"],
-                row["created_at"],
-            ])
-        ws2 = wb.create_sheet("Multas")
-        ws2.append(["Codigo", "Usuario", "Monto", "Estado", "Motivo", "Origen", "Fecha"])
-        fines = self.db.fetch_all(
-            """
-            SELECT code, user_id, amount, status, reason, origin, created_at
-            FROM fines
-            WHERE guild_id = ?
-            ORDER BY id DESC
-            """,
-            (guild_id,),
-        )
-        for row in fines:
-            ws2.append([
-                row["code"],
-                row["user_id"],
-                row["amount"],
-                row["status"],
-                row["reason"],
-                row["origin"],
-                row["created_at"],
-            ])
-        wb.save(path)
-        return path
 
     def normalize_balance_type(self, raw: str) -> str:
         value = raw.strip().lower()

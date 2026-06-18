@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import re
 from collections import defaultdict
+from datetime import datetime, timezone
 
 import discord
 from discord.ext import commands
@@ -37,6 +38,7 @@ from ..services.callers import (
 )
 from ..services.fines import create_fine
 from ..services.notifications import send_dm_safe
+from ..services.reports import create_caller_report
 from ..utils import format_amount, normalize_key, parse_channel_id, parse_int_amount, utc_now_iso
 
 
@@ -120,6 +122,24 @@ def parse_percent(raw: str) -> float:
     if value < 0 or value > 100:
         raise ValueError("El porcentaje debe estar entre 0 y 100.")
     return value
+
+
+def parse_cost_pair(raw: str) -> tuple[int, int]:
+    parts = [part.strip() for part in re.split(r"[|;]", raw or "")]
+    if len(parts) != 2:
+        raise ValueError("Escribe los gastos como `reparaciones | otros`, por ejemplo `6000000 | 0`.")
+    repairs = parse_int_amount(parts[0]) if parts[0] not in {"", "0"} else 0
+    expenses = parse_int_amount(parts[1]) if parts[1] not in {"", "0"} else 0
+    return repairs, expenses
+
+
+def parse_iso_datetime(value: str | None) -> datetime | None:
+    if not value:
+        return None
+    parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
 
 
 async def private_response(interaction: discord.Interaction, content: str, **kwargs) -> None:
@@ -238,20 +258,75 @@ class ActivityModal(discord.ui.Modal):
         await self.cog.publish_activity_from_modal(interaction, self)
 
 
-class PayoutModal(discord.ui.Modal, title="Generar reparto"):
+class PayoutModal(discord.ui.Modal, title="Splitear actividad"):
     gross_loot = discord.ui.TextInput(label="Loot bruto", placeholder="45000000")
     market_rate = discord.ui.TextInput(label="Tasa mercado %", placeholder="4", default="0")
-    repairs = discord.ui.TextInput(label="Reparaciones", placeholder="6000000", default="0")
-    expenses = discord.ui.TextInput(label="Otros gastos", placeholder="0", default="0")
+    costs = discord.ui.TextInput(
+        label="Reparaciones | otros gastos",
+        placeholder="6000000 | 0",
+        default="0 | 0",
+    )
     guild_percent = discord.ui.TextInput(label="Porcentaje gremial %", placeholder="10", default="10")
+    caller_percent = discord.ui.TextInput(label="Porcentaje para el caller %", placeholder="5", default="0")
 
     def __init__(self, cog: "Activities", activity_id: int):
         super().__init__(timeout=300)
         self.cog = cog
         self.activity_id = activity_id
+        activity = cog.get_activity(activity_id)
+        if activity is not None:
+            guild_id = int(activity["guild_id"])
+            self.market_rate.default = cog.db.get_setting(guild_id, "market_rate_default", "0")
+            self.guild_percent.default = cog.db.get_setting(
+                guild_id, "guild_percentage_default", "10"
+            )
+            self.caller_percent.default = cog.db.get_setting(
+                guild_id, "caller_percentage_default", "0"
+            )
 
     async def on_submit(self, interaction: discord.Interaction) -> None:
         await self.cog.create_payout_from_modal(interaction, self.activity_id, self)
+
+
+class EditCompositionModal(discord.ui.Modal, title="Modificar composicion"):
+    roles = discord.ui.TextInput(
+        label="Emoji | Rol/arma | Cantidad",
+        style=discord.TextStyle.paragraph,
+        max_length=1800,
+    )
+
+    def __init__(self, cog: "Activities", activity_id: int, current_roles: str):
+        super().__init__(timeout=300)
+        self.cog = cog
+        self.activity_id = activity_id
+        self.roles.default = current_roles
+
+    async def on_submit(self, interaction: discord.Interaction) -> None:
+        await self.cog.edit_composition_from_modal(
+            interaction,
+            self.activity_id,
+            str(self.roles.value),
+        )
+
+
+class JoinActivityRequestModal(discord.ui.Modal, title="Solicitar unirme"):
+    requested_role = discord.ui.TextInput(
+        label="Rol o arma solicitado",
+        placeholder="Falce",
+        max_length=80,
+    )
+
+    def __init__(self, cog: "Activities", activity_id: int):
+        super().__init__(timeout=180)
+        self.cog = cog
+        self.activity_id = activity_id
+
+    async def on_submit(self, interaction: discord.Interaction) -> None:
+        await self.cog.create_join_request(
+            interaction,
+            self.activity_id,
+            str(self.requested_role.value),
+        )
 
 
 class TemplateSelect(discord.ui.Select):
@@ -433,6 +508,40 @@ class PingsPanelView(discord.ui.View):
         )
 
     @discord.ui.button(
+        label="Mi reporte",
+        emoji="📊",
+        style=discord.ButtonStyle.success,
+        custom_id="g3n:pings:my_caller_report",
+    )
+    async def my_report(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
+        caller = self.cog.db.fetch_one(
+            "SELECT 1 FROM callers WHERE guild_id = ? AND user_id = ?",
+            (interaction.guild.id, interaction.user.id),
+        )
+        if caller is None:
+            await private_response(
+                interaction,
+                "Solo callers autorizados pueden descargar un reporte personal.",
+            )
+            return
+        await interaction.response.defer(ephemeral=True)
+        try:
+            path = create_caller_report(
+                self.cog.db,
+                interaction.guild.id,
+                interaction.user.id,
+                interaction.guild,
+            )
+        except ValueError as exc:
+            await interaction.followup.send(str(exc), ephemeral=True)
+            return
+        await interaction.followup.send(
+            "Tu reporte personal de caller esta listo.",
+            file=discord.File(path),
+            ephemeral=True,
+        )
+
+    @discord.ui.button(
         label="Configuracion",
         emoji="⚙️",
         style=discord.ButtonStyle.secondary,
@@ -454,85 +563,53 @@ class ActivityView(discord.ui.View):
         activity = cog.get_activity(activity_id)
         roles = cog.get_activity_roles(activity_id)
         status = activity["status"] if activity else ACTIVITY_CANCELLED
-        role_disabled = status not in {ACTIVITY_OPEN, ACTIVITY_NOTICE}
-        for index, row in enumerate(roles[:15]):
-            current = int(row["participant_count"])
-            slots = int(row["slots"])
-            counter = f" [{current}/{slots}]"
-            role_name = str(row["name"])
-            label = f"{role_name[:80 - len(counter)]}{counter}"
-            button = discord.ui.Button(
-                label=label,
-                style=discord.ButtonStyle.secondary,
-                custom_id=f"g3n:activity:role:{activity_id}:{row['id']}",
-                row=index // 5,
-                disabled=role_disabled or current >= slots,
-            )
-            if row["emoji"]:
-                try:
-                    button.emoji = discord.PartialEmoji.from_str(row["emoji"])
-                except ValueError:
-                    pass
-            button.callback = self.role_button
-            self.add_item(button)
+        if status in {ACTIVITY_OPEN, ACTIVITY_NOTICE}:
+            for index, row in enumerate(roles[:15]):
+                current = int(row["participant_count"])
+                slots = int(row["slots"])
+                counter = f" [{current}/{slots}]"
+                role_name = str(row["name"])
+                label = f"{role_name[:80 - len(counter)]}{counter}"
+                button = discord.ui.Button(
+                    label=label,
+                    style=discord.ButtonStyle.secondary,
+                    custom_id=f"g3n:activity:role:{activity_id}:{row['id']}",
+                    row=index // 5,
+                    disabled=current >= slots,
+                )
+                if row["emoji"]:
+                    try:
+                        button.emoji = discord.PartialEmoji.from_str(row["emoji"])
+                    except ValueError:
+                        pass
+                button.callback = self.role_button
+                self.add_item(button)
 
-        self.add_control_button("Salirme", "leave", discord.ButtonStyle.danger, 3, role_disabled, "🚪")
-        self.add_control_button(
-            "Iniciar",
-            "start",
-            discord.ButtonStyle.success,
-            3,
-            status not in {ACTIVITY_OPEN, ACTIVITY_NOTICE},
-            "▶️",
-        )
-        self.add_control_button(
-            "Aviso",
-            "notice",
-            discord.ButtonStyle.primary,
-            3,
-            status != ACTIVITY_OPEN,
-            "📣",
-        )
-        self.add_control_button(
-            "Mandar check",
-            "check",
-            discord.ButtonStyle.primary,
-            3,
-            status != ACTIVITY_IN_PROGRESS,
-            "✅",
-        )
-        self.add_control_button(
-            "Finalizar",
-            "finish",
-            discord.ButtonStyle.success,
-            3,
-            status != ACTIVITY_IN_PROGRESS,
-            "🏁",
-        )
-        self.add_control_button(
-            "Verificar asistencia",
-            "verify",
-            discord.ButtonStyle.secondary,
-            4,
-            status not in {ACTIVITY_IN_PROGRESS, ACTIVITY_FINISHED},
-            "🔍",
-        )
-        self.add_control_button(
-            "Generar reparto",
-            "payout",
-            discord.ButtonStyle.primary,
-            4,
-            status != ACTIVITY_FINISHED,
-            "💰",
-        )
-        self.add_control_button(
-            "Cancelar",
-            "cancel",
-            discord.ButtonStyle.danger,
-            4,
-            status in {ACTIVITY_CANCELLED, ACTIVITY_FINISHED, ACTIVITY_PAYOUT_CREATED},
-            "✖️",
-        )
+            self.add_control_button("Salirme", "leave", discord.ButtonStyle.danger, 3, False, "🚪")
+            self.add_control_button("Iniciar", "start", discord.ButtonStyle.success, 3, False, "▶️")
+            self.add_control_button(
+                "Aviso", "notice", discord.ButtonStyle.primary, 3, status != ACTIVITY_OPEN, "📣"
+            )
+            self.add_control_button("Mandar check", "check", discord.ButtonStyle.primary, 3, False, "✅")
+            self.add_control_button(
+                "Editar composicion", "edit_composition", discord.ButtonStyle.secondary, 3, False, "🛠️"
+            )
+            self.add_control_button("Cancelar", "cancel", discord.ButtonStyle.danger, 4, False, "✖️")
+        elif status == ACTIVITY_IN_PROGRESS:
+            self.add_control_button(
+                "Solicitar unirme", "request_join", discord.ButtonStyle.primary, 0, False, "🙋"
+            )
+            self.add_control_button("Monitorear", "monitor", discord.ButtonStyle.secondary, 0, False, "📡")
+            self.add_control_button("Mandar check", "check", discord.ButtonStyle.primary, 0, False, "✅")
+            self.add_control_button("Finalizar", "finish", discord.ButtonStyle.success, 0, False, "🏁")
+            self.add_control_button("Ver asistencia", "verify", discord.ButtonStyle.secondary, 0, False, "🔍")
+            self.add_control_button(
+                "Editar composicion", "edit_composition", discord.ButtonStyle.secondary, 1, False, "🛠️"
+            )
+            self.add_control_button("Cancelar", "cancel", discord.ButtonStyle.danger, 1, False, "✖️")
+        elif status == ACTIVITY_FINISHED:
+            self.add_control_button("Ver asistencia", "verify", discord.ButtonStyle.secondary, 0, False, "🔍")
+            self.add_control_button("Splitear", "payout", discord.ButtonStyle.primary, 0, False, "💰")
 
     def add_control_button(
         self,
@@ -583,6 +660,33 @@ class ConfirmAttendanceView(discord.ui.View):
         await self.cog.confirm_attendance(interaction, self.activity_id)
 
 
+class JoinRequestReviewView(discord.ui.View):
+    def __init__(self, cog: "Activities", request_id: int):
+        super().__init__(timeout=None)
+        self.cog = cog
+        self.request_id = request_id
+        for label, action, emoji, style in (
+            ("Aceptar", "accept", "✅", discord.ButtonStyle.success),
+            ("Rechazar", "reject", "❌", discord.ButtonStyle.danger),
+        ):
+            button = discord.ui.Button(
+                label=label,
+                emoji=emoji,
+                style=style,
+                custom_id=f"g3n:activity:join_request:{action}:{request_id}",
+            )
+            button.callback = self.handle
+            self.add_item(button)
+
+    async def handle(self, interaction: discord.Interaction) -> None:
+        action = str(interaction.data["custom_id"]).split(":")[3]
+        await self.cog.review_join_request(
+            interaction,
+            self.request_id,
+            accepted=action == "accept",
+        )
+
+
 class PayoutPercentModal(discord.ui.Modal, title="Editar participacion"):
     user = discord.ui.TextInput(label="Usuario (ID o mencion)")
     percent = discord.ui.TextInput(label="Participacion %", placeholder="100")
@@ -628,11 +732,11 @@ class PayoutEditView(discord.ui.View):
     async def edit_percent(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
         payout = self.cog.get_payout_by_code(self.guild_id, self.payout_code)
         if payout is None:
-            await private_response(interaction, "No encontre ese reparto.")
+            await private_response(interaction, "No encontre ese Split.")
             return
         is_admin = interaction.guild is not None and is_admin_subject(self.cog.db, interaction)
         if int(payout["caller_id"]) != interaction.user.id and not is_admin:
-            await private_response(interaction, "Solo el caller del reparto o un admin puede editarlo.")
+            await private_response(interaction, "Solo el caller del Split o un admin puede editarlo.")
             return
         await interaction.response.send_modal(
             PayoutPercentModal(self.cog, self.guild_id, self.payout_code)
@@ -672,6 +776,11 @@ class Activities(commands.Cog):
             self.bot.add_view(ActivityView(self, int(row["id"])))
             if row["status"] == ACTIVITY_IN_PROGRESS:
                 self.bot.add_view(ConfirmAttendanceView(self, int(row["id"])))
+        pending_requests = self.db.fetch_all(
+            "SELECT id FROM activity_join_requests WHERE status = 'Pendiente'"
+        )
+        for row in pending_requests:
+            self.bot.add_view(JoinRequestReviewView(self, int(row["id"])))
 
     @commands.Cog.listener()
     async def on_ready(self) -> None:
@@ -689,7 +798,89 @@ class Activities(commands.Cog):
         for row in active_rows:
             await self.update_activity_message(int(row["id"]))
         for guild in self.bot.guilds:
+            self.recover_voice_tracking(guild)
             await evaluate_caller_penalties(self.db, guild)
+
+    def recover_voice_tracking(self, guild: discord.Guild) -> None:
+        recovered_at = utc_now_iso()
+        recovered_time = parse_iso_datetime(recovered_at)
+        orphaned = self.db.fetch_all(
+            """
+            SELECT id, joined_at FROM activity_voice_sessions
+            WHERE guild_id = ? AND left_at IS NULL
+            """,
+            (guild.id,),
+        )
+        for row in orphaned:
+            joined_at = parse_iso_datetime(str(row["joined_at"]))
+            seconds = (
+                max(0, int((recovered_time - joined_at).total_seconds()))
+                if recovered_time and joined_at
+                else 0
+            )
+            self.db.execute(
+                "UPDATE activity_voice_sessions SET left_at = ?, seconds = ? WHERE id = ?",
+                (recovered_at, seconds, int(row["id"])),
+            )
+        activities = self.db.fetch_all(
+            """
+            SELECT id, caller_id, voice_channel_id FROM activities
+            WHERE guild_id = ? AND status = ? AND voice_channel_id IS NOT NULL
+            """,
+            (guild.id, ACTIVITY_IN_PROGRESS),
+        )
+        for activity in activities:
+            attendees = self.db.fetch_all(
+                """
+                SELECT usuario_id FROM asistencia_actividades
+                WHERE actividad_id = ? AND confirmo_boton = 1
+                """,
+                (int(activity["id"]),),
+            )
+            for attendee in attendees:
+                member = guild.get_member(int(attendee["usuario_id"]))
+                if (
+                    member is not None
+                    and member.voice is not None
+                    and member.voice.channel is not None
+                    and member.voice.channel.id == int(activity["voice_channel_id"])
+                ):
+                    self.start_voice_session(int(activity["id"]), guild.id, member.id)
+
+    @commands.Cog.listener()
+    async def on_voice_state_update(
+        self,
+        member: discord.Member,
+        before: discord.VoiceState,
+        after: discord.VoiceState,
+    ) -> None:
+        if member.bot:
+            return
+        before_id = before.channel.id if before.channel is not None else None
+        after_id = after.channel.id if after.channel is not None else None
+        if before_id == after_id:
+            return
+        activities = self.db.fetch_all(
+            """
+            SELECT id, caller_id, voice_channel_id FROM activities
+            WHERE guild_id = ? AND status = ?
+              AND voice_channel_id IN (?, ?)
+            """,
+            (member.guild.id, ACTIVITY_IN_PROGRESS, before_id or 0, after_id or 0),
+        )
+        for activity in activities:
+            activity_id = int(activity["id"])
+            registered = self.db.fetch_one(
+                "SELECT 1 FROM activity_participants WHERE activity_id = ? AND user_id = ?",
+                (activity_id, member.id),
+            )
+            if registered is None and member.id != int(activity["caller_id"]):
+                continue
+            channel_id = int(activity["voice_channel_id"])
+            if before_id == channel_id and after_id != channel_id:
+                self.close_voice_session(activity_id, member.guild.id, member.id)
+            elif after_id == channel_id and before_id != channel_id:
+                self.start_voice_session(activity_id, member.guild.id, member.id)
 
     @commands.command(name="panel_pings")
     async def panel_pings(self, ctx: commands.Context) -> None:
@@ -826,21 +1017,21 @@ class Activities(commands.Cog):
             lines.append(f"<@{row['usuario_id']}> - {row['motivo']} - {row['fecha_ingreso']}")
         await ctx.reply("\n".join(lines), mention_author=False)
 
-    @commands.command(name="reparto_participantes")
+    @commands.command(name="reparto_participantes", aliases=["split_participantes"])
     async def reparto_participantes(self, ctx: commands.Context, code: str) -> None:
         payout = self.get_payout_by_code(ctx.guild.id, code)
         if payout is None:
-            await ctx.reply("No encontre ese reparto.", mention_author=False)
+            await ctx.reply("No encontre ese Split.", mention_author=False)
             return
         if not self.can_manage_payout(ctx, payout):
-            await ctx.reply("Solo el caller del reparto o un admin puede verlo.", mention_author=False)
+            await ctx.reply("Solo el caller del Split o un admin puede verlo.", mention_author=False)
             return
         rows = self.db.fetch_all(
             "SELECT * FROM payout_participants WHERE payout_id = ? ORDER BY id ASC",
             (int(payout["id"]),),
         )
         if not rows:
-            await ctx.reply("Ese reparto no tiene participantes.", mention_author=False)
+            await ctx.reply("Ese Split no tiene participantes.", mention_author=False)
             return
         lines = [f"**Participantes de {code}**"]
         for row in rows:
@@ -848,7 +1039,7 @@ class Activities(commands.Cog):
             lines.append(f"<@{row['user_id']}> - {row['participation_percent']}% - {amount}")
         await ctx.reply("\n".join(lines), mention_author=False)
 
-    @commands.command(name="reparto_participacion")
+    @commands.command(name="reparto_participacion", aliases=["split_participacion"])
     async def reparto_participacion(
         self,
         ctx: commands.Context,
@@ -858,13 +1049,13 @@ class Activities(commands.Cog):
     ) -> None:
         payout = self.get_payout_by_code(ctx.guild.id, code)
         if payout is None:
-            await ctx.reply("No encontre ese reparto.", mention_author=False)
+            await ctx.reply("No encontre ese Split.", mention_author=False)
             return
         if not self.can_manage_payout(ctx, payout):
-            await ctx.reply("Solo el caller del reparto o un admin puede modificarlo.", mention_author=False)
+            await ctx.reply("Solo el caller del Split o un admin puede modificarlo.", mention_author=False)
             return
         if payout["status"] != PAYOUT_PENDING:
-            await ctx.reply("Solo se pueden modificar repartos pendientes.", mention_author=False)
+            await ctx.reply("Solo se pueden modificar Splits pendientes.", mention_author=False)
             return
         try:
             percent = parse_percent(percent_raw)
@@ -875,7 +1066,7 @@ class Activities(commands.Cog):
             return
         await ctx.reply(f"Participacion de {member.mention} actualizada a {percent}%.", mention_author=False)
 
-    @commands.command(name="reparto_agregar")
+    @commands.command(name="reparto_agregar", aliases=["split_agregar"])
     async def reparto_agregar(
         self,
         ctx: commands.Context,
@@ -885,13 +1076,13 @@ class Activities(commands.Cog):
     ) -> None:
         payout = self.get_payout_by_code(ctx.guild.id, code)
         if payout is None:
-            await ctx.reply("No encontre ese reparto.", mention_author=False)
+            await ctx.reply("No encontre ese Split.", mention_author=False)
             return
         if not self.can_manage_payout(ctx, payout):
-            await ctx.reply("Solo el caller del reparto o un admin puede modificarlo.", mention_author=False)
+            await ctx.reply("Solo el caller del Split o un admin puede modificarlo.", mention_author=False)
             return
         if payout["status"] != PAYOUT_PENDING:
-            await ctx.reply("Solo se pueden modificar repartos pendientes.", mention_author=False)
+            await ctx.reply("Solo se pueden modificar Splits pendientes.", mention_author=False)
             return
         try:
             percent = parse_percent(percent_raw)
@@ -900,7 +1091,7 @@ class Activities(commands.Cog):
                 (int(payout["id"]), member.id),
             )
             if exists:
-                raise ValueError("Ese usuario ya esta en el reparto.")
+                raise ValueError("Ese usuario ya esta en el Split.")
             self.db.execute(
                 """
                 INSERT INTO payout_participants (
@@ -914,19 +1105,19 @@ class Activities(commands.Cog):
         except ValueError as exc:
             await ctx.reply(str(exc), mention_author=False)
             return
-        await ctx.reply(f"{member.mention} agregado al reparto con {percent}%.", mention_author=False)
+        await ctx.reply(f"{member.mention} agregado al Split con {percent}%.", mention_author=False)
 
-    @commands.command(name="reparto_quitar")
+    @commands.command(name="reparto_quitar", aliases=["split_quitar"])
     async def reparto_quitar(self, ctx: commands.Context, code: str, member: discord.Member) -> None:
         payout = self.get_payout_by_code(ctx.guild.id, code)
         if payout is None:
-            await ctx.reply("No encontre ese reparto.", mention_author=False)
+            await ctx.reply("No encontre ese Split.", mention_author=False)
             return
         if not self.can_manage_payout(ctx, payout):
-            await ctx.reply("Solo el caller del reparto o un admin puede modificarlo.", mention_author=False)
+            await ctx.reply("Solo el caller del Split o un admin puede modificarlo.", mention_author=False)
             return
         if payout["status"] != PAYOUT_PENDING:
-            await ctx.reply("Solo se pueden modificar repartos pendientes.", mention_author=False)
+            await ctx.reply("Solo se pueden modificar Splits pendientes.", mention_author=False)
             return
         self.db.execute(
             "DELETE FROM payout_participants WHERE payout_id = ? AND user_id = ?",
@@ -937,7 +1128,7 @@ class Activities(commands.Cog):
         except ValueError as exc:
             await ctx.reply(str(exc), mention_author=False)
             return
-        await ctx.reply(f"{member.mention} fue retirado del reparto.", mention_author=False)
+        await ctx.reply(f"{member.mention} fue retirado del Split.", mention_author=False)
 
     def get_activity(self, activity_id: int):
         return self.db.fetch_one("SELECT * FROM activities WHERE id = ?", (activity_id,))
@@ -1150,7 +1341,10 @@ class Activities(commands.Cog):
         embed.add_field(name="Caller", value=f"<@{activity['caller_id']}>", inline=True)
         embed.add_field(name="Horario", value=activity["horario"], inline=True)
         embed.add_field(name="Canal de voz", value=voice_text, inline=True)
-        embed.add_field(name="Estado", value=activity["status"], inline=True)
+        display_status = (
+            "Split generado" if activity["status"] == ACTIVITY_PAYOUT_CREATED else activity["status"]
+        )
+        embed.add_field(name="Estado", value=display_status, inline=True)
         embed.add_field(name="ID", value=activity["code"], inline=True)
 
         for role in roles:
@@ -1158,7 +1352,12 @@ class Activities(commands.Cog):
             value = "\n".join(f"• {name}" for name in names) if names else "• Vacio"
             header = f"{role['emoji'] or ''} {role['name']} [{len(names)}/{role['slots']}]".strip()
             embed.add_field(name=header[:256], value=value[:1024], inline=True)
-        embed.set_footer(text="Los avisos y respuestas se envian por DM o mensajes privados.")
+        embed.set_footer(
+            text=(
+                "Debes confirmar el check y permanecer al menos 50% en voz; "
+                "de lo contrario puede aplicarse multa."
+            )
+        )
         return embed
 
     async def update_activity_message(self, activity_id: int) -> None:
@@ -1179,6 +1378,423 @@ class Activities(commands.Cog):
             )
         except discord.HTTPException:
             return
+
+    async def edit_composition_from_modal(
+        self,
+        interaction: discord.Interaction,
+        activity_id: int,
+        raw_roles: str,
+    ) -> None:
+        activity = self.get_activity(activity_id)
+        if (
+            activity is None
+            or interaction.guild is None
+            or int(activity["guild_id"]) != interaction.guild.id
+        ):
+            await private_response(interaction, "No encontre esta actividad en este servidor.")
+            return
+        if activity["status"] not in {ACTIVITY_OPEN, ACTIVITY_NOTICE, ACTIVITY_IN_PROGRESS}:
+            await private_response(interaction, "La composicion ya no se puede modificar en este estado.")
+            return
+        if not can_manage_activity(self.db, interaction, int(activity["caller_id"])):
+            await private_response(interaction, "Solo el caller creador o un admin puede modificar la composicion.")
+            return
+        try:
+            requested_roles = parse_role_lines(raw_roles)
+        except ValueError as exc:
+            await private_response(interaction, str(exc))
+            return
+
+        existing_roles = {str(row["key"]): row for row in self.get_activity_roles(activity_id)}
+        requested_by_key = {str(row["key"]): row for row in requested_roles}
+        for key, current in existing_roles.items():
+            participant_count = int(current["participant_count"])
+            if key not in requested_by_key and participant_count:
+                await private_response(
+                    interaction,
+                    f"No puedes eliminar **{current['name']}** porque tiene {participant_count} participante(s).",
+                )
+                return
+            if key in requested_by_key and int(requested_by_key[key]["slots"]) < participant_count:
+                await private_response(
+                    interaction,
+                    f"**{current['name']}** ya tiene {participant_count} participante(s); no puedes dejar menos cupos.",
+                )
+                return
+
+        with self.db.transaction() as cursor:
+            for role in requested_roles:
+                current = existing_roles.get(str(role["key"]))
+                if current is None:
+                    cursor.execute(
+                        """
+                        INSERT INTO activity_roles (activity_id, key, name, slots, emoji, position)
+                        VALUES (?, ?, ?, ?, ?, ?)
+                        """,
+                        (
+                            activity_id,
+                            role["key"],
+                            role["name"],
+                            role["slots"],
+                            role["emoji"],
+                            role["position"],
+                        ),
+                    )
+                else:
+                    cursor.execute(
+                        """
+                        UPDATE activity_roles
+                        SET name = ?, slots = ?, emoji = ?, position = ?
+                        WHERE id = ?
+                        """,
+                        (
+                            role["name"],
+                            role["slots"],
+                            role["emoji"],
+                            role["position"],
+                            int(current["id"]),
+                        ),
+                    )
+            for key, current in existing_roles.items():
+                if key not in requested_by_key:
+                    cursor.execute("DELETE FROM activity_roles WHERE id = ?", (int(current["id"]),))
+
+        log_action(
+            self.db,
+            interaction.guild.id,
+            admin_id=interaction.user.id,
+            action="Modificar composicion de actividad",
+            system="Actividades",
+            observation=str(activity["code"]),
+        )
+        await self.update_activity_message(activity_id)
+        await private_response(interaction, "Composicion actualizada y ping refrescado.")
+
+    async def create_join_request(
+        self,
+        interaction: discord.Interaction,
+        activity_id: int,
+        requested_role: str,
+    ) -> None:
+        activity = self.get_activity(activity_id)
+        if (
+            activity is None
+            or interaction.guild is None
+            or int(activity["guild_id"]) != interaction.guild.id
+            or activity["status"] != ACTIVITY_IN_PROGRESS
+        ):
+            await private_response(interaction, "Esta actividad ya no acepta solicitudes.")
+            return
+        if not isinstance(interaction.user, discord.Member) or not has_bank_access(
+            self.db, interaction.user
+        ):
+            await private_response(
+                interaction,
+                "Necesitas el rol configurado de miembro o invitado para solicitar unirte.",
+            )
+            return
+        penalty = self.ensure_penalty_for_user(interaction.guild.id, interaction.user.id)
+        if penalty:
+            await private_response(
+                interaction,
+                f"No puedes solicitar unirte porque estas penalizado. Motivo: {penalty}",
+            )
+            return
+        already_joined = self.db.fetch_one(
+            "SELECT 1 FROM activity_participants WHERE activity_id = ? AND user_id = ?",
+            (activity_id, interaction.user.id),
+        )
+        if already_joined is not None:
+            await private_response(interaction, "Ya estas registrado en esta actividad.")
+            return
+        pending = self.db.fetch_one(
+            """
+            SELECT 1 FROM activity_join_requests
+            WHERE guild_id = ? AND activity_id = ? AND user_id = ? AND status = 'Pendiente'
+            """,
+            (interaction.guild.id, activity_id, interaction.user.id),
+        )
+        if pending is not None:
+            await private_response(interaction, "Ya tienes una solicitud pendiente con el caller.")
+            return
+        role_name = requested_role.strip()
+        if not role_name:
+            await private_response(interaction, "Indica el rol o arma con el que quieres entrar.")
+            return
+        request_id = self.db.execute(
+            """
+            INSERT INTO activity_join_requests (
+                guild_id, activity_id, user_id, display_name, requested_role,
+                status, requested_at
+            )
+            VALUES (?, ?, ?, ?, ?, 'Pendiente', ?)
+            """,
+            (
+                interaction.guild.id,
+                activity_id,
+                interaction.user.id,
+                interaction.user.display_name,
+                role_name[:80],
+                utc_now_iso(),
+            ),
+        )
+        view = JoinRequestReviewView(self, request_id)
+        self.bot.add_view(view)
+        caller = interaction.guild.get_member(int(activity["caller_id"]))
+        if caller is not None:
+            await send_dm_safe(
+                self.db,
+                guild_id=interaction.guild.id,
+                user=caller,
+                action="solicitud_unirse_actividad",
+                content=(
+                    f"🙋 **Solicitud para unirse a {activity['name']}**\n"
+                    f"Usuario: {interaction.user.mention}\n"
+                    f"Rol solicitado: **{role_name}**"
+                ),
+                view=view,
+            )
+        await private_response(interaction, "Solicitud enviada al caller. Recibiras la respuesta por DM.")
+
+    async def review_join_request(
+        self,
+        interaction: discord.Interaction,
+        request_id: int,
+        *,
+        accepted: bool,
+    ) -> None:
+        request = self.db.fetch_one(
+            """
+            SELECT jr.*, ac.caller_id, ac.code AS activity_code,
+                   ac.status AS activity_status, ac.name AS activity_name,
+                   ac.voice_channel_id
+            FROM activity_join_requests jr
+            JOIN activities ac ON ac.id = jr.activity_id
+            WHERE jr.id = ?
+            """,
+            (request_id,),
+        )
+        if request is None or request["status"] != "Pendiente":
+            await private_response(interaction, "Esta solicitud ya fue procesada.")
+            return
+        guild = interaction.guild or self.bot.get_guild(int(request["guild_id"]))
+        if guild is None or int(request["guild_id"]) != guild.id:
+            await private_response(interaction, "Esta solicitud pertenece a otro servidor.")
+            return
+        if (
+            interaction.user.id != int(request["caller_id"])
+            and not (interaction.guild is not None and is_admin_subject(self.db, interaction))
+        ):
+            await private_response(interaction, "Solo el caller de la actividad o un admin puede responder.")
+            return
+        if accepted and request["activity_status"] != ACTIVITY_IN_PROGRESS:
+            await private_response(interaction, "La actividad ya no esta en curso.")
+            return
+
+        now = utc_now_iso()
+        if accepted:
+            role_key = normalize_key(str(request["requested_role"]))
+            role = self.db.fetch_one(
+                "SELECT * FROM activity_roles WHERE activity_id = ? AND key = ?",
+                (int(request["activity_id"]), role_key),
+            )
+            if role is None:
+                position_row = self.db.fetch_one(
+                    "SELECT COALESCE(MAX(position), 0) AS position FROM activity_roles WHERE activity_id = ?",
+                    (int(request["activity_id"]),),
+                )
+                role_id = self.db.execute(
+                    """
+                    INSERT INTO activity_roles (activity_id, key, name, slots, emoji, position)
+                    VALUES (?, ?, ?, 1, '', ?)
+                    """,
+                    (
+                        int(request["activity_id"]),
+                        role_key,
+                        str(request["requested_role"])[:80],
+                        int(position_row["position"]) + 1,
+                    ),
+                )
+            else:
+                role_id = int(role["id"])
+                count = self.db.fetch_one(
+                    "SELECT COUNT(*) AS total FROM activity_participants WHERE role_id = ?",
+                    (role_id,),
+                )
+                if int(count["total"]) >= int(role["slots"]):
+                    self.db.execute(
+                        "UPDATE activity_roles SET slots = slots + 1 WHERE id = ?",
+                        (role_id,),
+                    )
+            self.db.execute(
+                """
+                INSERT OR IGNORE INTO activity_participants (
+                    activity_id, role_id, user_id, display_name, joined_at
+                ) VALUES (?, ?, ?, ?, ?)
+                """,
+                (
+                    int(request["activity_id"]),
+                    role_id,
+                    int(request["user_id"]),
+                    str(request["display_name"]),
+                    now,
+                ),
+            )
+            self.db.execute(
+                """
+                INSERT INTO asistencia_actividades (
+                    actividad_id, usuario_id, estado, confirmo_boton, confirmo_voz
+                ) VALUES (?, ?, ?, 0, 0)
+                ON CONFLICT(actividad_id, usuario_id) DO NOTHING
+                """,
+                (int(request["activity_id"]), int(request["user_id"]), ATTENDANCE_PENDING),
+            )
+        self.db.execute(
+            """
+            UPDATE activity_join_requests
+            SET status = ?, reviewed_by = ?, reviewed_at = ?
+            WHERE id = ?
+            """,
+            ("Aceptada" if accepted else "Rechazada", interaction.user.id, now, request_id),
+        )
+        log_action(
+            self.db,
+            guild.id,
+            admin_id=interaction.user.id,
+            action="Aceptar solicitud tardia" if accepted else "Rechazar solicitud tardia",
+            system="Actividades",
+            affected_user_id=int(request["user_id"]),
+            observation=f"{request['activity_code']} — {request['requested_role']}",
+        )
+        member = guild.get_member(int(request["user_id"]))
+        if member is not None:
+            if accepted:
+                await send_dm_safe(
+                    self.db,
+                    guild_id=guild.id,
+                    user=member,
+                    action="solicitud_actividad_aceptada",
+                    content=(
+                        f"✅ Tu solicitud para **{request['activity_name']}** fue aceptada.\n"
+                        "Entra al canal de voz y pulsa **Aqui estoy**. Si permaneces menos del 50% "
+                        "de la actividad, se aplicara la sancion configurada."
+                    ),
+                    view=ConfirmAttendanceView(self, int(request["activity_id"])),
+                )
+            else:
+                await send_dm_safe(
+                    self.db,
+                    guild_id=guild.id,
+                    user=member,
+                    action="solicitud_actividad_rechazada",
+                    content=f"❌ Tu solicitud para **{request['activity_name']}** fue rechazada.",
+                )
+        await self.update_activity_message(int(request["activity_id"]))
+        await private_response(
+            interaction,
+            "Solicitud aceptada y usuario notificado." if accepted else "Solicitud rechazada y usuario notificado.",
+        )
+
+    def start_voice_session(self, activity_id: int, guild_id: int, user_id: int) -> None:
+        attendance = self.db.fetch_one(
+            """
+            SELECT confirmo_boton FROM asistencia_actividades
+            WHERE actividad_id = ? AND usuario_id = ?
+            """,
+            (activity_id, user_id),
+        )
+        if attendance is None or int(attendance["confirmo_boton"]) != 1:
+            return
+        open_session = self.db.fetch_one(
+            """
+            SELECT 1 FROM activity_voice_sessions
+            WHERE guild_id = ? AND activity_id = ? AND user_id = ? AND left_at IS NULL
+            """,
+            (guild_id, activity_id, user_id),
+        )
+        if open_session is None:
+            self.db.execute(
+                """
+                INSERT INTO activity_voice_sessions (guild_id, activity_id, user_id, joined_at)
+                VALUES (?, ?, ?, ?)
+                """,
+                (guild_id, activity_id, user_id, utc_now_iso()),
+            )
+
+    def close_voice_session(
+        self,
+        activity_id: int,
+        guild_id: int,
+        user_id: int,
+        ended_at: str | None = None,
+    ) -> None:
+        end_iso = ended_at or utc_now_iso()
+        end_time = parse_iso_datetime(end_iso)
+        sessions = self.db.fetch_all(
+            """
+            SELECT id, joined_at FROM activity_voice_sessions
+            WHERE guild_id = ? AND activity_id = ? AND user_id = ? AND left_at IS NULL
+            """,
+            (guild_id, activity_id, user_id),
+        )
+        for session in sessions:
+            joined_at = parse_iso_datetime(str(session["joined_at"]))
+            seconds = max(0, int((end_time - joined_at).total_seconds())) if end_time and joined_at else 0
+            self.db.execute(
+                "UPDATE activity_voice_sessions SET left_at = ?, seconds = ? WHERE id = ?",
+                (end_iso, seconds, int(session["id"])),
+            )
+
+    def voice_stats(self, activity_id: int, user_id: int, at: str | None = None) -> tuple[int, float]:
+        activity = self.get_activity(activity_id)
+        if activity is None or not activity["started_at"]:
+            return 0, 0.0
+        start = parse_iso_datetime(str(activity["started_at"]))
+        end = parse_iso_datetime(str(activity["ended_at"] or at or utc_now_iso()))
+        duration = max(1, int((end - start).total_seconds())) if start and end else 1
+        rows = self.db.fetch_all(
+            """
+            SELECT joined_at, left_at, seconds FROM activity_voice_sessions
+            WHERE activity_id = ? AND user_id = ?
+            """,
+            (activity_id, user_id),
+        )
+        total = 0
+        for row in rows:
+            if row["left_at"] is not None:
+                total += int(row["seconds"] or 0)
+            else:
+                joined = parse_iso_datetime(str(row["joined_at"]))
+                total += max(0, int((end - joined).total_seconds())) if end and joined else 0
+        total = min(total, duration)
+        return total, round((total / duration) * 100, 2)
+
+    def voice_monitor_text(self, activity_id: int) -> str:
+        activity = self.get_activity(activity_id)
+        if activity is None:
+            return "No encontre esta actividad."
+        users = {
+            int(row["user_id"]): str(row["display_name"])
+            for row in self.get_activity_participants(activity_id)
+        }
+        caller_id = int(activity["caller_id"])
+        users.setdefault(caller_id, "Caller")
+        lines = [f"📡 **Monitoreo de voz — {activity['name']}**"]
+        for user_id, display_name in users.items():
+            seconds, percent = self.voice_stats(activity_id, user_id)
+            open_session = self.db.fetch_one(
+                """
+                SELECT 1 FROM activity_voice_sessions
+                WHERE activity_id = ? AND user_id = ? AND left_at IS NULL
+                """,
+                (activity_id, user_id),
+            )
+            state = "🟢 En voz" if open_session is not None else "🔴 Fuera"
+            minutes, remainder = divmod(seconds, 60)
+            lines.append(
+                f"{state} — <@{user_id}> ({display_name}): {minutes}m {remainder}s — {percent:.1f}%"
+            )
+        return "\n".join(lines)[:1900]
 
     async def join_role(
         self,
@@ -1250,11 +1866,43 @@ class Activities(commands.Cog):
                 utc_now_iso(),
             ),
         )
+        check_view = None
+        if activity["check_sent_at"]:
+            self.db.execute(
+                """
+                INSERT INTO asistencia_actividades (
+                    actividad_id, usuario_id, estado, confirmo_boton, confirmo_voz
+                ) VALUES (?, ?, ?, 0, 0)
+                ON CONFLICT(actividad_id, usuario_id) DO NOTHING
+                """,
+                (activity_id, interaction.user.id, ATTENDANCE_PENDING),
+            )
+            check_view = ConfirmAttendanceView(self, activity_id)
+        await send_dm_safe(
+            self.db,
+            guild_id=interaction.guild.id,
+            user=interaction.user,
+            action="registro_actividad",
+            content=(
+                f"⚔️ Te registraste en **{activity['name']}** como **{role['name']}**.\n"
+                "Debes confirmar el check y permanecer al menos el 50% de la actividad "
+                "en el canal de voz; de lo contrario puede aplicarse la multa configurada."
+            ),
+            view=check_view,
+        )
         await self.update_activity_message(activity_id)
         if current and int(current["role_id"]) != role_id:
-            await interaction.followup.send(f"Te movi a **{role['name']}**.", ephemeral=True)
+            await interaction.followup.send(
+                f"Te movi a **{role['name']}**. Recuerda confirmar el check y permanecer "
+                "al menos el 50% de la actividad en voz para evitar sanciones.",
+                ephemeral=True,
+            )
         else:
-            await interaction.followup.send(f"Quedaste anotado en **{role['name']}**.", ephemeral=True)
+            await interaction.followup.send(
+                f"Quedaste anotado en **{role['name']}**. Debes confirmar el check y permanecer "
+                "al menos el 50% de la actividad en voz; de lo contrario puede aplicarse multa.",
+                ephemeral=True,
+            )
 
     async def leave_activity(self, interaction: discord.Interaction, activity_id: int) -> None:
         activity = self.get_activity(activity_id)
@@ -1291,6 +1939,12 @@ class Activities(commands.Cog):
         if action == "leave":
             await self.leave_activity(interaction, activity_id)
             return
+        if action == "request_join":
+            if activity["status"] != ACTIVITY_IN_PROGRESS:
+                await private_response(interaction, "Las solicitudes solo estan disponibles durante la actividad.")
+                return
+            await interaction.response.send_modal(JoinActivityRequestModal(self, activity_id))
+            return
         if not can_manage_activity(self.db, interaction, int(activity["caller_id"])):
             if interaction.guild is not None and is_caller_penalized(
                 self.db,
@@ -1304,6 +1958,15 @@ class Activities(commands.Cog):
         if action == "payout":
             await interaction.response.send_modal(PayoutModal(self, activity_id))
             return
+        if action == "edit_composition":
+            current_roles = "\n".join(
+                f"{row['emoji'] or ''} | {row['name']} | {row['slots']}"
+                for row in self.get_activity_roles(activity_id)
+            )
+            await interaction.response.send_modal(
+                EditCompositionModal(self, activity_id, current_roles)
+            )
+            return
         await interaction.response.defer(ephemeral=True)
         if action == "notice":
             await self.send_notice(interaction, activity_id)
@@ -1313,6 +1976,11 @@ class Activities(commands.Cog):
             await self.send_attendance_check(interaction, activity_id)
         elif action == "verify":
             await self.verify_attendance(interaction, activity_id)
+        elif action == "monitor":
+            await interaction.followup.send(
+                self.voice_monitor_text(activity_id),
+                ephemeral=True,
+            )
         elif action == "finish":
             await self.finish_activity(interaction, activity_id)
         elif action == "cancel":
@@ -1340,7 +2008,8 @@ class Activities(commands.Cog):
                     action="aviso_actividad",
                     content=(
                         f"La actividad **{activity['name']}** esta por iniciar. "
-                        "Por favor entra al canal de voz y preparate."
+                        "Por favor entra al canal de voz y preparate. Debes confirmar el check "
+                        "y permanecer al menos el 50% para evitar sanciones."
                     ),
                 )
         await self.update_activity_message(activity_id)
@@ -1351,9 +2020,22 @@ class Activities(commands.Cog):
         if activity["status"] not in {ACTIVITY_OPEN, ACTIVITY_NOTICE}:
             await interaction.followup.send("Esta actividad no puede iniciarse en su estado actual.", ephemeral=True)
             return
+        if not activity["voice_channel_id"]:
+            await interaction.followup.send(
+                "Configura un canal de voz antes de iniciar; se necesita para medir la participacion.",
+                ephemeral=True,
+            )
+            return
+        if not activity["check_sent_at"]:
+            await interaction.followup.send(
+                "Antes de iniciar debes usar **Mandar check** para avisar a los participantes.",
+                ephemeral=True,
+            )
+            return
+        started_at = utc_now_iso()
         self.db.execute(
             "UPDATE activities SET status = ?, started_at = ? WHERE id = ?",
-            (ACTIVITY_IN_PROGRESS, utc_now_iso(), activity_id),
+            (ACTIVITY_IN_PROGRESS, started_at, activity_id),
         )
         participant_ids = {
             int(participant["user_id"])
@@ -1371,20 +2053,46 @@ class Activities(commands.Cog):
                 """,
                 (activity_id, user_id, ATTENDANCE_PENDING),
             )
+            member = interaction.guild.get_member(user_id)
+            if (
+                member is not None
+                and member.voice is not None
+                and member.voice.channel is not None
+                and member.voice.channel.id == int(activity["voice_channel_id"])
+            ):
+                self.start_voice_session(activity_id, interaction.guild.id, user_id)
         self.bot.add_view(ConfirmAttendanceView(self, activity_id))
         await self.update_activity_message(activity_id)
-        await interaction.followup.send("Actividad iniciada. Inscripciones cerradas.", ephemeral=True)
+        await interaction.followup.send(
+            "Actividad iniciada. El conteo de permanencia en voz ya esta activo y se aceptan solicitudes tardias.",
+            ephemeral=True,
+        )
 
     async def send_attendance_check(self, interaction: discord.Interaction, activity_id: int) -> None:
         activity = self.get_activity(activity_id)
-        if activity["status"] != ACTIVITY_IN_PROGRESS:
-            await interaction.followup.send("El check solo aplica en actividades en curso.", ephemeral=True)
+        if activity["status"] not in {ACTIVITY_OPEN, ACTIVITY_NOTICE, ACTIVITY_IN_PROGRESS}:
+            await interaction.followup.send("El check ya no esta disponible para esta actividad.", ephemeral=True)
             return
         participant_ids = {
             int(participant["user_id"])
             for participant in self.get_activity_participants(activity_id)
         }
         recipient_ids = participant_ids | {int(activity["caller_id"])}
+        for user_id in recipient_ids:
+            self.db.execute(
+                """
+                INSERT INTO asistencia_actividades (
+                    actividad_id, usuario_id, estado, confirmo_boton, confirmo_voz
+                ) VALUES (?, ?, ?, 0, 0)
+                ON CONFLICT(actividad_id, usuario_id) DO NOTHING
+                """,
+                (activity_id, user_id, ATTENDANCE_PENDING),
+            )
+        if not activity["check_sent_at"]:
+            self.db.execute(
+                "UPDATE activities SET check_sent_at = ? WHERE id = ?",
+                (utc_now_iso(), activity_id),
+            )
         for user_id in recipient_ids:
             member = interaction.guild.get_member(user_id)
             if member:
@@ -1400,11 +2108,17 @@ class Activities(commands.Cog):
                     action="check_asistencia",
                     content=(
                         f"Confirma tu asistencia a **{activity['name']}**. "
-                        f"{caller_note}"
+                        f"{caller_note}\n\n"
+                        "El tiempo en el canal de voz define tu porcentaje del Split. "
+                        "Permanecer menos del 50% cuenta como inasistencia y puede generar multa."
                     ),
                     view=ConfirmAttendanceView(self, activity_id),
                 )
-        await interaction.followup.send("Check enviado por DM.", ephemeral=True)
+        await self.update_activity_message(activity_id)
+        await interaction.followup.send(
+            "Check enviado por DM. La actividad ya cumple el requisito previo para iniciar.",
+            ephemeral=True,
+        )
 
     async def verify_attendance(self, interaction: discord.Interaction, activity_id: int) -> None:
         activity = self.get_activity(activity_id)
@@ -1465,7 +2179,7 @@ class Activities(commands.Cog):
         if not activity:
             await private_response(interaction, "No encontre esta actividad.")
             return
-        if activity["status"] != ACTIVITY_IN_PROGRESS:
+        if activity["status"] not in {ACTIVITY_OPEN, ACTIVITY_NOTICE, ACTIVITY_IN_PROGRESS}:
             await private_response(interaction, "El check de esta actividad ya no esta disponible.")
             return
         participant = self.db.fetch_one(
@@ -1514,50 +2228,85 @@ class Activities(commands.Cog):
                 utc_now_iso(),
             ),
         )
-        await private_response(interaction, "Asistencia confirmada.")
+        if activity["status"] == ACTIVITY_IN_PROGRESS:
+            self.start_voice_session(activity_id, int(activity["guild_id"]), interaction.user.id)
+        await private_response(
+            interaction,
+            "Asistencia confirmada. Recuerda permanecer al menos el 50% de la actividad en voz.",
+        )
 
     async def finish_activity(self, interaction: discord.Interaction, activity_id: int) -> None:
         activity = self.get_activity(activity_id)
         if activity["status"] != ACTIVITY_IN_PROGRESS:
             await interaction.followup.send("Solo puedes finalizar actividades en curso.", ephemeral=True)
             return
+        ended_at = utc_now_iso()
+        participants = self.get_activity_participants(activity_id)
+        participant_ids = {int(participant["user_id"]) for participant in participants}
+        caller_id = int(activity["caller_id"])
+        tracked_users = participant_ids | {caller_id}
+        for user_id in tracked_users:
+            self.close_voice_session(
+                activity_id,
+                interaction.guild.id,
+                user_id,
+                ended_at,
+            )
         self.db.execute(
             "UPDATE activities SET status = ?, ended_at = ? WHERE id = ?",
-            (ACTIVITY_FINISHED, utc_now_iso(), activity_id),
+            (ACTIVITY_FINISHED, ended_at, activity_id),
         )
         attendance_rows = self.db.fetch_all(
             "SELECT * FROM asistencia_actividades WHERE actividad_id = ?",
             (activity_id,),
         )
         known = {int(row["usuario_id"]): row for row in attendance_rows}
-        participants = self.get_activity_participants(activity_id)
         absence_fine_enabled = self.db.get_int_setting(interaction.guild.id, "absence_fine_enabled", 0) == 1
         absence_fine_amount = self.db.get_int_setting(interaction.guild.id, "absence_fine_amount", 0)
+        minimum_percent = self.db.get_int_setting(interaction.guild.id, "voice_minimum_percent", 50)
         absences = []
         for participant in participants:
             user_id = int(participant["user_id"])
             row = known.get(user_id)
-            if row is None or row["estado"] == ATTENDANCE_PENDING:
-                self.db.execute(
-                    """
-                    INSERT INTO asistencia_actividades (
-                        actividad_id, usuario_id, estado, confirmo_boton, confirmo_voz, fecha_check
-                    )
-                    VALUES (?, ?, ?, 0, 0, ?)
-                    ON CONFLICT(actividad_id, usuario_id)
-                    DO UPDATE SET estado = excluded.estado,
-                                  fecha_check = excluded.fecha_check
-                    """,
-                    (activity_id, user_id, ATTENDANCE_ABSENT, utc_now_iso()),
+            voice_seconds, participation_percent = self.voice_stats(activity_id, user_id, ended_at)
+            justified = row is not None and row["estado"] == "Justificado"
+            checked = row is not None and int(row["confirmo_boton"]) == 1
+            attendance_state = (
+                "Justificado"
+                if justified
+                else ATTENDANCE_CONFIRMED
+                if checked and participation_percent >= minimum_percent
+                else ATTENDANCE_ABSENT
+            )
+            self.db.execute(
+                """
+                INSERT INTO asistencia_actividades (
+                    actividad_id, usuario_id, estado, confirmo_boton, confirmo_voz,
+                    fecha_check, voice_seconds, participation_percent
                 )
-                row = self.db.fetch_one(
-                    """
-                    SELECT * FROM asistencia_actividades
-                    WHERE actividad_id = ? AND usuario_id = ?
-                    """,
-                    (activity_id, user_id),
-                )
-            if row and row["estado"] == ATTENDANCE_ABSENT and int(row["genero_multa"]) == 0:
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(actividad_id, usuario_id)
+                DO UPDATE SET estado = excluded.estado,
+                              confirmo_voz = excluded.confirmo_voz,
+                              voice_seconds = excluded.voice_seconds,
+                              participation_percent = excluded.participation_percent
+                """,
+                (
+                    activity_id,
+                    user_id,
+                    attendance_state,
+                    1 if checked else 0,
+                    1 if voice_seconds > 0 else 0,
+                    row["fecha_check"] if row is not None else ended_at,
+                    voice_seconds,
+                    participation_percent,
+                ),
+            )
+            updated = self.db.fetch_one(
+                "SELECT * FROM asistencia_actividades WHERE actividad_id = ? AND usuario_id = ?",
+                (activity_id, user_id),
+            )
+            if attendance_state == ATTENDANCE_ABSENT and int(updated["genero_multa"]) == 0:
                 absences.append(user_id)
                 member = interaction.guild.get_member(user_id)
                 if member and absence_fine_enabled and absence_fine_amount > 0:
@@ -1566,7 +2315,10 @@ class Activities(commands.Cog):
                         guild_id=interaction.guild.id,
                         user=member,
                         amount=absence_fine_amount,
-                        reason=f"Inasistencia a actividad {activity['code']}",
+                        reason=(
+                            f"Permanencia de {participation_percent:.1f}% en actividad "
+                            f"{activity['code']} (minimo {minimum_percent}%)"
+                        ),
                         origin="Sistema de Ping Actividades",
                         created_by=self.bot.user.id if self.bot.user else interaction.user.id,
                     )
@@ -1589,45 +2341,47 @@ class Activities(commands.Cog):
                         amount=absence_fine_amount,
                         observation=fine_code,
                     )
-        participant_ids = {int(participant["user_id"]) for participant in participants}
-        caller_id = int(activity["caller_id"])
         if caller_id not in participant_ids:
-            caller_attendance = self.db.fetch_one(
-                """
-                SELECT * FROM asistencia_actividades
-                WHERE actividad_id = ? AND usuario_id = ?
-                """,
-                (activity_id, caller_id),
+            caller_row = known.get(caller_id)
+            caller_seconds, caller_percent = self.voice_stats(activity_id, caller_id, ended_at)
+            caller_checked = caller_row is not None and int(caller_row["confirmo_boton"]) == 1
+            caller_state = (
+                ATTENDANCE_CONFIRMED
+                if caller_checked and caller_percent >= minimum_percent
+                else ATTENDANCE_ABSENT
             )
-            if caller_attendance is None or caller_attendance["estado"] == ATTENDANCE_PENDING:
-                self.db.execute(
-                    """
-                    INSERT INTO asistencia_actividades (
-                        actividad_id, usuario_id, estado, confirmo_boton,
-                        confirmo_voz, fecha_check
-                    )
-                    VALUES (?, ?, ?, 0, 0, ?)
-                    ON CONFLICT(actividad_id, usuario_id)
-                    DO UPDATE SET estado = excluded.estado,
-                                  confirmo_boton = 0,
-                                  confirmo_voz = 0,
-                                  fecha_check = excluded.fecha_check
-                    """,
-                    (activity_id, caller_id, ATTENDANCE_ABSENT, utc_now_iso()),
-                )
-                caller_attendance = self.db.fetch_one(
-                    """
-                    SELECT * FROM asistencia_actividades
-                    WHERE actividad_id = ? AND usuario_id = ?
-                    """,
-                    (activity_id, caller_id),
-                )
-            if caller_attendance and caller_attendance["estado"] == ATTENDANCE_ABSENT:
+            self.db.execute(
+                """
+                INSERT INTO asistencia_actividades (
+                    actividad_id, usuario_id, estado, confirmo_boton, confirmo_voz,
+                    fecha_check, voice_seconds, participation_percent
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(actividad_id, usuario_id)
+                DO UPDATE SET estado = excluded.estado,
+                              confirmo_voz = excluded.confirmo_voz,
+                              voice_seconds = excluded.voice_seconds,
+                              participation_percent = excluded.participation_percent
+                """,
+                (
+                    activity_id,
+                    caller_id,
+                    caller_state,
+                    1 if caller_checked else 0,
+                    1 if caller_seconds > 0 else 0,
+                    caller_row["fecha_check"] if caller_row is not None else ended_at,
+                    caller_seconds,
+                    caller_percent,
+                ),
+            )
+            if caller_state == ATTENDANCE_ABSENT:
                 absences.append(caller_id)
         await self.update_activity_message(activity_id)
         await evaluate_caller_penalties(self.db, interaction.guild)
         await interaction.followup.send(
-            f"Actividad finalizada. Ausentes registrados: {len(absences)}.",
+            (
+                f"Actividad finalizada. Ausentes o permanencia menor a {minimum_percent}%: "
+                f"{len(absences)}. Los porcentajes quedaron listos para Splitear."
+            ),
             ephemeral=True,
         )
 
@@ -1653,6 +2407,18 @@ class Activities(commands.Cog):
             )
         else:
             cancellation_reason = "Cancelacion del caller con composicion completa."
+        cancelled_at = utc_now_iso()
+        if activity["status"] == ACTIVITY_IN_PROGRESS:
+            tracked_users = {
+                int(row["user_id"]) for row in self.get_activity_participants(activity_id)
+            } | {int(activity["caller_id"])}
+            for user_id in tracked_users:
+                self.close_voice_session(
+                    activity_id,
+                    interaction.guild.id,
+                    user_id,
+                    cancelled_at,
+                )
         self.db.execute(
             """
             UPDATE activities
@@ -1662,7 +2428,7 @@ class Activities(commands.Cog):
             """,
             (
                 ACTIVITY_CANCELLED,
-                utc_now_iso(),
+                cancelled_at,
                 interaction.user.id,
                 1 if reputation_exempt else 0,
                 cancellation_reason,
@@ -1707,17 +2473,17 @@ class Activities(commands.Cog):
             await private_response(interaction, "No encontre esta actividad.")
             return
         if activity["status"] != ACTIVITY_FINISHED:
-            await private_response(interaction, "Solo se puede generar reparto desde actividad finalizada.")
+            await private_response(interaction, "Solo se puede Splitear una actividad finalizada.")
             return
         if not can_manage_activity(self.db, interaction, int(activity["caller_id"])):
-            await private_response(interaction, "Solo el caller creador o un admin puede generar el reparto.")
+            await private_response(interaction, "Solo el caller creador o un admin puede crear el Split.")
             return
         try:
             gross = parse_int_amount(str(modal.gross_loot.value))
             market_rate = parse_percent(str(modal.market_rate.value))
-            repairs = parse_int_amount(str(modal.repairs.value)) if str(modal.repairs.value).strip() != "0" else 0
-            expenses = parse_int_amount(str(modal.expenses.value)) if str(modal.expenses.value).strip() != "0" else 0
+            repairs, expenses = parse_cost_pair(str(modal.costs.value))
             guild_percent = parse_percent(str(modal.guild_percent.value))
+            caller_percent = parse_percent(str(modal.caller_percent.value))
         except ValueError as exc:
             await private_response(interaction, str(exc))
             return
@@ -1727,11 +2493,15 @@ class Activities(commands.Cog):
             await private_response(interaction, "Los gastos superan el loot disponible.")
             return
         guild_amount = int(round(after_expenses * (guild_percent / 100)))
-        distributable = after_expenses - guild_amount
+        after_guild = after_expenses - guild_amount
+        caller_amount = int(round(after_guild * (caller_percent / 100)))
+        distributable = after_guild - caller_amount
         participants = self.db.fetch_all(
             """
             SELECT a.*
             FROM asistencia_actividades a
+            JOIN activity_participants ap
+              ON ap.activity_id = a.actividad_id AND ap.user_id = a.usuario_id
             WHERE a.actividad_id = ? AND a.estado = ?
             """,
             (activity_id, ATTENDANCE_CONFIRMED),
@@ -1739,15 +2509,15 @@ class Activities(commands.Cog):
         if not participants:
             await private_response(interaction, "No hay participantes confirmados para repartir.")
             return
-        code = self.db.next_code(interaction.guild.id, "REP")
+        code = self.db.next_code(interaction.guild.id, "SPLIT")
         payout_id = self.db.execute(
             """
             INSERT INTO payouts (
                 code, guild_id, activity_id, caller_id, status, gross_loot,
                 market_rate_percent, repairs, other_expenses, guild_percent,
-                guild_amount, distributable, created_at
+                guild_amount, distributable, caller_percent, caller_amount, created_at
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 code,
@@ -1762,6 +2532,8 @@ class Activities(commands.Cog):
                 guild_percent,
                 guild_amount,
                 distributable,
+                caller_percent,
+                caller_amount,
                 utc_now_iso(),
             ),
         )
@@ -1771,9 +2543,13 @@ class Activities(commands.Cog):
                 INSERT INTO payout_participants (
                     payout_id, user_id, participation_percent, amount
                 )
-                VALUES (?, ?, 100, 0)
+                VALUES (?, ?, ?, 0)
                 """,
-                (payout_id, int(participant["usuario_id"])),
+                (
+                    payout_id,
+                    int(participant["usuario_id"]),
+                    max(0.01, float(participant["participation_percent"] or 0)),
+                ),
             )
         self.recalculate_payout_amounts(payout_id)
         self.db.execute(
@@ -1782,9 +2558,10 @@ class Activities(commands.Cog):
         )
         await self.update_activity_message(activity_id)
         dm_content = (
-            f"💰 **Reparto preliminar creado:** `{code}`\n\n"
-            "Todos los participantes confirmados quedaron con **100%** por defecto.\n"
-            "Usa el boton **Editar %** para ajustar casos como 10%, 50%, etc.\n"
+            f"💰 **Split preliminar creado:** `{code}`\n\n"
+            "Los porcentajes se calcularon con el tiempo permanecido en el canal de voz.\n"
+            "Usa **Editar %** solo si necesitas una correccion manual.\n"
+            f"Porcentaje del caller: **{caller_percent:.1f}%** ({format_amount(caller_amount)}).\n"
             "Cuando este listo, presiona **Enviar a revision**.\n\n"
             f"{self.payout_participants_text(interaction.guild.id, code)}"
         )
@@ -1797,7 +2574,7 @@ class Activities(commands.Cog):
             view=PayoutEditView(self, interaction.guild.id, code),
         )
         if sent:
-            await private_response(interaction, f"Reparto preliminar `{code}` creado. Te envie la lista por DM.")
+            await private_response(interaction, f"Split preliminar `{code}` creado. Te envie la lista por DM.")
         else:
             await private_response(
                 interaction,
@@ -1820,7 +2597,7 @@ class Activities(commands.Cog):
             (payout_id, user_id),
         )
         if row is None:
-            raise ValueError("Ese usuario no esta en el reparto. Usa `!reparto_agregar`.")
+            raise ValueError("Ese usuario no esta en el Split. Usa `!split_agregar`.")
         self.db.execute(
             """
             UPDATE payout_participants
@@ -1837,7 +2614,7 @@ class Activities(commands.Cog):
             (payout_id,),
         )
         if not rows:
-            raise ValueError("El reparto debe tener al menos un participante.")
+            raise ValueError("El Split debe tener al menos un participante.")
         total_percent = sum(float(row["participation_percent"]) for row in rows)
         if total_percent <= 0:
             raise ValueError("La participacion total debe ser mayor que cero.")
@@ -1857,13 +2634,13 @@ class Activities(commands.Cog):
     def payout_participants_text(self, guild_id: int, code: str) -> str:
         payout = self.get_payout_by_code(guild_id, code)
         if payout is None:
-            return "No encontre ese reparto."
+            return "No encontre ese Split."
         rows = self.db.fetch_all(
             "SELECT * FROM payout_participants WHERE payout_id = ? ORDER BY id ASC",
             (int(payout["id"]),),
         )
         if not rows:
-            return "Ese reparto no tiene participantes."
+            return "Ese Split no tiene participantes."
         lines = [f"📋 **Participantes de {code}**"]
         for row in rows:
             amount = f"{int(row['amount']):,}".replace(",", ".")
@@ -1888,13 +2665,13 @@ class Activities(commands.Cog):
     ) -> None:
         payout = self.get_payout_by_code(guild_id, code)
         if payout is None:
-            await private_response(interaction, "No encontre ese reparto.")
+            await private_response(interaction, "No encontre ese Split.")
             return
         if payout["status"] != PAYOUT_PENDING:
-            await private_response(interaction, "Solo se pueden modificar repartos pendientes.")
+            await private_response(interaction, "Solo se pueden modificar Splits pendientes.")
             return
         if int(payout["caller_id"]) != interaction.user.id and not is_admin_subject(self.db, interaction):
-            await private_response(interaction, "Solo el caller del reparto o un admin puede modificarlo.")
+            await private_response(interaction, "Solo el caller del Split o un admin puede modificarlo.")
             return
         user_id = parse_channel_id(user_raw)
         if user_id is None:
@@ -1921,31 +2698,31 @@ class Activities(commands.Cog):
     ) -> None:
         payout = self.get_payout_by_code(guild_id, code)
         if payout is None:
-            await private_response(interaction, "No encontre ese reparto.")
+            await private_response(interaction, "No encontre ese Split.")
             return
         is_admin = interaction.guild is not None and is_admin_subject(self.db, interaction)
         if int(payout["caller_id"]) != interaction.user.id and not is_admin:
-            await private_response(interaction, "Solo el caller del reparto o un admin puede enviarlo a revision.")
+            await private_response(interaction, "Solo el caller del Split o un admin puede enviarlo a revision.")
             return
         if payout["status"] != PAYOUT_PENDING:
-            await private_response(interaction, "Ese reparto ya no esta pendiente.")
+            await private_response(interaction, "Ese Split ya no esta pendiente.")
             return
         if payout["sent_to_admin_at"]:
-            await private_response(interaction, f"El reparto `{code}` ya fue enviado a revision.")
+            await private_response(interaction, f"El Split `{code}` ya fue enviado a revision.")
             return
         guild = self.bot.get_guild(guild_id)
         if guild is None:
-            await private_response(interaction, "No pude encontrar el servidor para enviar el reparto.")
+            await private_response(interaction, "No pude encontrar el servidor para enviar el Split.")
             return
         sent = await self.send_payout_to_admins(guild, int(payout["id"]))
         if not sent:
-            await private_response(interaction, "No encontre canal de repartos/admins configurado.")
+            await private_response(interaction, "No encontre canal de Splits/admins configurado.")
             return
         self.db.execute(
             "UPDATE payouts SET sent_to_admin_at = ? WHERE id = ?",
             (utc_now_iso(), int(payout["id"])),
         )
-        await private_response(interaction, f"📤 Reparto `{code}` enviado a revision admin.")
+        await private_response(interaction, f"📤 Split `{code}` enviado a revision admin.")
 
     async def send_payout_to_admins(self, guild: discord.Guild, payout_id: int) -> bool:
         payout = self.db.fetch_one("SELECT * FROM payouts WHERE id = ?", (payout_id,))
@@ -1966,12 +2743,19 @@ class Activities(commands.Cog):
             view = admin_cog.build_payout_review_view(payout["code"])
         else:
             embed = discord.Embed(
-                title=f"📋 Reparto pendiente {payout['code']}",
+                title=f"📋 Split pendiente {payout['code']}",
                 description="Requiere revision y aprobacion admin antes de depositar saldos.",
                 color=discord.Color.gold(),
             )
             embed.add_field(name="Loot bruto", value=f"{payout['gross_loot']:,}".replace(",", "."))
             embed.add_field(name="Aporte gremial", value=f"{payout['guild_amount']:,}".replace(",", "."))
+            embed.add_field(
+                name="Pago caller",
+                value=(
+                    f"{float(payout['caller_percent'] or 0):.1f}% — "
+                    f"{int(payout['caller_amount'] or 0):,}"
+                ).replace(",", "."),
+            )
             embed.add_field(name="Monto repartible", value=f"{payout['distributable']:,}".replace(",", "."))
             embed.add_field(
                 name="Participantes confirmados",
