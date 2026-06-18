@@ -673,7 +673,7 @@ class Activities(commands.Cog):
             """
             UPDATE penalizacion_actividades
             SET activo = 0, removido_por = ?, fecha_remocion = ?, observaciones = ?
-            WHERE servidor_id = ? AND usuario_id = ? AND activo = 1
+            WHERE guild_id = ? AND usuario_id = ? AND activo = 1
             """,
             (ctx.author.id, utc_now_iso(), reason, ctx.guild.id, member.id),
         )
@@ -696,7 +696,7 @@ class Activities(commands.Cog):
             """
             SELECT usuario_id, motivo, fecha_ingreso
             FROM penalizacion_actividades
-            WHERE servidor_id = ? AND activo = 1
+            WHERE guild_id = ? AND activo = 1
             ORDER BY id DESC LIMIT 20
             """,
             (ctx.guild.id,),
@@ -1132,7 +1132,14 @@ class Activities(commands.Cog):
 
     async def leave_activity(self, interaction: discord.Interaction, activity_id: int) -> None:
         activity = self.get_activity(activity_id)
-        if not activity or activity["status"] not in {ACTIVITY_OPEN, ACTIVITY_NOTICE}:
+        if (
+            not activity
+            or interaction.guild is None
+            or int(activity["guild_id"]) != interaction.guild.id
+        ):
+            await private_response(interaction, "No encontre esta actividad en este servidor.")
+            return
+        if activity["status"] not in {ACTIVITY_OPEN, ACTIVITY_NOTICE}:
             await private_response(interaction, "No puedes salirte en este estado.")
             return
         self.db.execute(
@@ -1151,6 +1158,9 @@ class Activities(commands.Cog):
         activity = self.get_activity(activity_id)
         if not activity:
             await private_response(interaction, "No encontre esta actividad.")
+            return
+        if interaction.guild is None or int(activity["guild_id"]) != interaction.guild.id:
+            await private_response(interaction, "Esta actividad pertenece a otro servidor.")
             return
         if action == "leave":
             await self.leave_activity(interaction, activity_id)
@@ -1720,6 +1730,8 @@ class Activities(commands.Cog):
 
     async def send_payout_to_admins(self, guild: discord.Guild, payout_id: int) -> bool:
         payout = self.db.fetch_one("SELECT * FROM payouts WHERE id = ?", (payout_id,))
+        if payout is None or int(payout["guild_id"]) != guild.id:
+            return False
         channel_id = self.db.get_setting(guild.id, "channel_repartos_id") or self.db.get_setting(
             guild.id,
             "channel_admin_id",
@@ -1756,7 +1768,7 @@ class Activities(commands.Cog):
         active = self.db.fetch_one(
             """
             SELECT motivo FROM penalizacion_actividades
-            WHERE servidor_id = ? AND usuario_id = ? AND activo = 1
+            WHERE guild_id = ? AND usuario_id = ? AND activo = 1
             ORDER BY id DESC LIMIT 1
             """,
             (guild_id, user_id),
@@ -1811,7 +1823,7 @@ class Activities(commands.Cog):
         self.db.execute(
             """
             INSERT INTO penalizacion_actividades (
-                servidor_id, usuario_id, motivo, origen, fecha_ingreso, activo
+                guild_id, usuario_id, motivo, origen, fecha_ingreso, activo
             )
             VALUES (?, ?, ?, ?, ?, 1)
             """,

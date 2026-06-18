@@ -38,6 +38,212 @@ class Database:
         if "sent_to_admin_at" not in payout_columns:
             self._conn.execute("ALTER TABLE payouts ADD COLUMN sent_to_admin_at TEXT")
 
+        penalty_columns = {
+            row["name"]
+            for row in self._conn.execute("PRAGMA table_info(penalizacion_actividades)").fetchall()
+        }
+        if "servidor_id" in penalty_columns and "guild_id" not in penalty_columns:
+            self._conn.execute(
+                "ALTER TABLE penalizacion_actividades RENAME COLUMN servidor_id TO guild_id"
+            )
+
+        scoped_tables = {
+            "activities": (
+                """
+                CREATE TABLE activities__guild_migration (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    code TEXT NOT NULL,
+                    guild_id INTEGER NOT NULL,
+                    template_id INTEGER,
+                    name TEXT NOT NULL,
+                    caller_id INTEGER NOT NULL,
+                    horario TEXT NOT NULL,
+                    voice_channel_id INTEGER,
+                    notes TEXT,
+                    status TEXT NOT NULL,
+                    channel_id INTEGER,
+                    message_id INTEGER,
+                    created_at TEXT NOT NULL,
+                    started_at TEXT,
+                    ended_at TEXT,
+                    UNIQUE(guild_id, code)
+                )
+                """,
+                "id, code, guild_id, template_id, name, caller_id, horario, "
+                "voice_channel_id, notes, status, channel_id, message_id, "
+                "created_at, started_at, ended_at",
+            ),
+            "fines": (
+                """
+                CREATE TABLE fines__guild_migration (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    code TEXT NOT NULL,
+                    guild_id INTEGER NOT NULL,
+                    user_id INTEGER NOT NULL,
+                    amount INTEGER NOT NULL,
+                    reason TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    origin TEXT NOT NULL,
+                    created_by INTEGER NOT NULL,
+                    paid_by INTEGER,
+                    payment_method TEXT,
+                    movement_id INTEGER,
+                    created_at TEXT NOT NULL,
+                    paid_at TEXT,
+                    cancelled_by INTEGER,
+                    cancelled_at TEXT,
+                    cancel_reason TEXT,
+                    UNIQUE(guild_id, code)
+                )
+                """,
+                "id, code, guild_id, user_id, amount, reason, status, origin, "
+                "created_by, paid_by, payment_method, movement_id, created_at, "
+                "paid_at, cancelled_by, cancelled_at, cancel_reason",
+            ),
+            "withdrawals": (
+                """
+                CREATE TABLE withdrawals__guild_migration (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    code TEXT NOT NULL,
+                    guild_id INTEGER NOT NULL,
+                    user_id INTEGER NOT NULL,
+                    amount_requested INTEGER NOT NULL,
+                    amount_liquidated INTEGER,
+                    status TEXT NOT NULL,
+                    reason TEXT,
+                    created_at TEXT NOT NULL,
+                    approved_by INTEGER,
+                    approved_at TEXT,
+                    liquidated_by INTEGER,
+                    liquidated_at TEXT,
+                    rejected_by INTEGER,
+                    rejected_at TEXT,
+                    rejection_reason TEXT,
+                    UNIQUE(guild_id, code)
+                )
+                """,
+                "id, code, guild_id, user_id, amount_requested, amount_liquidated, "
+                "status, reason, created_at, approved_by, approved_at, "
+                "liquidated_by, liquidated_at, rejected_by, rejected_at, rejection_reason",
+            ),
+            "payouts": (
+                """
+                CREATE TABLE payouts__guild_migration (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    code TEXT NOT NULL,
+                    guild_id INTEGER NOT NULL,
+                    activity_id INTEGER,
+                    caller_id INTEGER NOT NULL,
+                    status TEXT NOT NULL,
+                    gross_loot INTEGER NOT NULL DEFAULT 0,
+                    market_rate_percent REAL NOT NULL DEFAULT 0,
+                    repairs INTEGER NOT NULL DEFAULT 0,
+                    other_expenses INTEGER NOT NULL DEFAULT 0,
+                    guild_percent REAL NOT NULL DEFAULT 0,
+                    guild_amount INTEGER NOT NULL DEFAULT 0,
+                    distributable INTEGER NOT NULL DEFAULT 0,
+                    notes TEXT,
+                    created_at TEXT NOT NULL,
+                    sent_to_admin_at TEXT,
+                    reviewed_by INTEGER,
+                    reviewed_at TEXT,
+                    UNIQUE(guild_id, code)
+                )
+                """,
+                "id, code, guild_id, activity_id, caller_id, status, gross_loot, "
+                "market_rate_percent, repairs, other_expenses, guild_percent, "
+                "guild_amount, distributable, notes, created_at, sent_to_admin_at, "
+                "reviewed_by, reviewed_at",
+            ),
+            "movements": (
+                """
+                CREATE TABLE movements__guild_migration (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    code TEXT NOT NULL,
+                    guild_id INTEGER NOT NULL,
+                    type TEXT NOT NULL,
+                    category TEXT NOT NULL,
+                    user_id INTEGER,
+                    counterparty_id INTEGER,
+                    amount INTEGER NOT NULL,
+                    source_table TEXT,
+                    source_id INTEGER,
+                    description TEXT NOT NULL,
+                    created_by INTEGER NOT NULL,
+                    created_at TEXT NOT NULL,
+                    UNIQUE(guild_id, code)
+                )
+                """,
+                "id, code, guild_id, type, category, user_id, counterparty_id, "
+                "amount, source_table, source_id, description, created_by, created_at",
+            ),
+        }
+        rebuild = [
+            table
+            for table in scoped_tables
+            if not self._has_unique_index(table, ("guild_id", "code"))
+        ]
+        if rebuild:
+            self._conn.commit()
+            self._conn.execute("PRAGMA foreign_keys = OFF")
+            try:
+                self._conn.execute("BEGIN IMMEDIATE")
+                for table in rebuild:
+                    create_sql, columns = scoped_tables[table]
+                    temporary = f"{table}__guild_migration"
+                    self._conn.execute(f"DROP TABLE IF EXISTS {temporary}")
+                    self._conn.execute(create_sql)
+                    self._conn.execute(
+                        f"INSERT INTO {temporary} ({columns}) SELECT {columns} FROM {table}"
+                    )
+                    self._conn.execute(f"DROP TABLE {table}")
+                    self._conn.execute(f"ALTER TABLE {temporary} RENAME TO {table}")
+                self._conn.commit()
+            except Exception:
+                self._conn.rollback()
+                raise
+            finally:
+                self._conn.execute("PRAGMA foreign_keys = ON")
+
+        self._conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_fines_user_status "
+            "ON fines(guild_id, user_id, status)"
+        )
+        self._conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_movements_guild_created "
+            "ON movements(guild_id, created_at)"
+        )
+        self._conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_activities_guild_status "
+            "ON activities(guild_id, status)"
+        )
+        self._conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_payouts_guild_status "
+            "ON payouts(guild_id, status)"
+        )
+        self._conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_withdrawals_guild_status "
+            "ON withdrawals(guild_id, status)"
+        )
+        self._conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_penalties_guild_user_active "
+            "ON penalizacion_actividades(guild_id, usuario_id, activo)"
+        )
+
+    def _has_unique_index(self, table: str, columns: tuple[str, ...]) -> bool:
+        for index in self._conn.execute(f"PRAGMA index_list({table})").fetchall():
+            if not int(index["unique"]):
+                continue
+            indexed_columns = tuple(
+                row["name"]
+                for row in self._conn.execute(
+                    f"PRAGMA index_info('{index['name']}')"
+                ).fetchall()
+            )
+            if indexed_columns == columns:
+                return True
+        return False
+
     def execute(self, query: str, params: Iterable = ()) -> int:
         with self._lock:
             cursor = self._conn.execute(query, tuple(params))
@@ -168,7 +374,7 @@ CREATE TABLE IF NOT EXISTS template_roles (
 
 CREATE TABLE IF NOT EXISTS activities (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
-    code TEXT NOT NULL UNIQUE,
+    code TEXT NOT NULL,
     guild_id INTEGER NOT NULL,
     template_id INTEGER,
     name TEXT NOT NULL,
@@ -181,7 +387,8 @@ CREATE TABLE IF NOT EXISTS activities (
     message_id INTEGER,
     created_at TEXT NOT NULL,
     started_at TEXT,
-    ended_at TEXT
+    ended_at TEXT,
+    UNIQUE(guild_id, code)
 );
 
 CREATE TABLE IF NOT EXISTS activity_roles (
@@ -220,7 +427,7 @@ CREATE TABLE IF NOT EXISTS asistencia_actividades (
 
 CREATE TABLE IF NOT EXISTS penalizacion_actividades (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
-    servidor_id INTEGER NOT NULL,
+    guild_id INTEGER NOT NULL,
     usuario_id INTEGER NOT NULL,
     motivo TEXT NOT NULL,
     origen TEXT NOT NULL,
@@ -249,7 +456,7 @@ CREATE TABLE IF NOT EXISTS treasury (
 
 CREATE TABLE IF NOT EXISTS fines (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
-    code TEXT NOT NULL UNIQUE,
+    code TEXT NOT NULL,
     guild_id INTEGER NOT NULL,
     user_id INTEGER NOT NULL,
     amount INTEGER NOT NULL,
@@ -264,12 +471,13 @@ CREATE TABLE IF NOT EXISTS fines (
     paid_at TEXT,
     cancelled_by INTEGER,
     cancelled_at TEXT,
-    cancel_reason TEXT
+    cancel_reason TEXT,
+    UNIQUE(guild_id, code)
 );
 
 CREATE TABLE IF NOT EXISTS withdrawals (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
-    code TEXT NOT NULL UNIQUE,
+    code TEXT NOT NULL,
     guild_id INTEGER NOT NULL,
     user_id INTEGER NOT NULL,
     amount_requested INTEGER NOT NULL,
@@ -283,12 +491,13 @@ CREATE TABLE IF NOT EXISTS withdrawals (
     liquidated_at TEXT,
     rejected_by INTEGER,
     rejected_at TEXT,
-    rejection_reason TEXT
+    rejection_reason TEXT,
+    UNIQUE(guild_id, code)
 );
 
 CREATE TABLE IF NOT EXISTS payouts (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
-    code TEXT NOT NULL UNIQUE,
+    code TEXT NOT NULL,
     guild_id INTEGER NOT NULL,
     activity_id INTEGER,
     caller_id INTEGER NOT NULL,
@@ -304,7 +513,8 @@ CREATE TABLE IF NOT EXISTS payouts (
     created_at TEXT NOT NULL,
     sent_to_admin_at TEXT,
     reviewed_by INTEGER,
-    reviewed_at TEXT
+    reviewed_at TEXT,
+    UNIQUE(guild_id, code)
 );
 
 CREATE TABLE IF NOT EXISTS payout_participants (
@@ -320,7 +530,7 @@ CREATE TABLE IF NOT EXISTS payout_participants (
 
 CREATE TABLE IF NOT EXISTS movements (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
-    code TEXT NOT NULL UNIQUE,
+    code TEXT NOT NULL,
     guild_id INTEGER NOT NULL,
     type TEXT NOT NULL,
     category TEXT NOT NULL,
@@ -331,7 +541,8 @@ CREATE TABLE IF NOT EXISTS movements (
     source_id INTEGER,
     description TEXT NOT NULL,
     created_by INTEGER NOT NULL,
-    created_at TEXT NOT NULL
+    created_at TEXT NOT NULL,
+    UNIQUE(guild_id, code)
 );
 
 CREATE TABLE IF NOT EXISTS audit_logs (
@@ -364,4 +575,14 @@ ON movements(guild_id, created_at);
 
 CREATE INDEX IF NOT EXISTS idx_activity_participants_activity
 ON activity_participants(activity_id);
+
+CREATE INDEX IF NOT EXISTS idx_activities_guild_status
+ON activities(guild_id, status);
+
+CREATE INDEX IF NOT EXISTS idx_payouts_guild_status
+ON payouts(guild_id, status);
+
+CREATE INDEX IF NOT EXISTS idx_withdrawals_guild_status
+ON withdrawals(guild_id, status);
+
 """

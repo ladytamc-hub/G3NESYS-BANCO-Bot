@@ -106,6 +106,11 @@ Cada comando se ejecuta en el canal que quieres configurar.
 ## Reglas importantes implementadas
 
 - Los paneles quedan fijos y las respuestas de botones son privadas cuando Discord lo permite.
+- El panel administrativo incluye `📣 Callers` para consultar el ranking, agregar y eliminar callers.
+- Al agregar un caller se envia una bienvenida formal por DM con funciones y responsabilidades; al eliminarlo no se envia DM.
+- El ranking muestra plata repartida, actividades creadas/completadas/canceladas y asistencias/ausencias.
+- Cada servidor Discord mantiene independientes sus configuraciones, callers, saldos, tesoreria, movimientos, multas, actividades, cobros y repartos.
+- Los codigos pueden comenzar desde `000001` en cada servidor sin chocar con los datos de otros servidores.
 - El caller crea actividades y genera reparto, pero no deposita saldos.
 - En actividades, "Mandar check" envia el check por DM y "Verificar asistencia" manda al caller la lista de quienes dieron check.
 - Al generar reparto, el caller recibe por DM la lista de participantes confirmados con 100% de participacion por defecto, puede editar porcentajes y luego enviarlo a revision con boton.

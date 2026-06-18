@@ -4,7 +4,10 @@ import discord
 from discord.ext import commands
 
 from ..permissions import require_admin_context
-from ..utils import join_csv_ids, split_csv_ids, utc_now_iso
+from ..services.audit import log_action
+from ..services.callers import authorize_caller, caller_welcome_embed, revoke_caller
+from ..services.notifications import send_dm_safe
+from ..utils import join_csv_ids, split_csv_ids
 
 
 class Settings(commands.Cog):
@@ -147,26 +150,61 @@ class Settings(commands.Cog):
     async def caller_set(self, ctx: commands.Context, member: discord.Member) -> None:
         if not await require_admin_context(ctx, self.db):
             return
-        self.db.execute(
-            """
-            INSERT INTO callers (guild_id, user_id, added_by, created_at)
-            VALUES (?, ?, ?, ?)
-            ON CONFLICT(guild_id, user_id)
-            DO UPDATE SET added_by = excluded.added_by, created_at = excluded.created_at
-            """,
-            (ctx.guild.id, member.id, ctx.author.id, utc_now_iso()),
+        if member.bot:
+            await ctx.reply("Un bot no puede registrarse como caller.", mention_author=False)
+            return
+        created = authorize_caller(
+            self.db,
+            ctx.guild.id,
+            member.id,
+            ctx.author.id,
         )
-        await ctx.reply(f"{member.mention} ahora es caller autorizado.", mention_author=False)
+        if not created:
+            await ctx.reply(f"{member.mention} ya es caller autorizado.", mention_author=False)
+            return
+        delivered = await send_dm_safe(
+            self.db,
+            guild_id=ctx.guild.id,
+            user=member,
+            action="bienvenida_caller",
+            embed=caller_welcome_embed(ctx.guild.name),
+        )
+        log_action(
+            self.db,
+            ctx.guild.id,
+            admin_id=ctx.author.id,
+            action="Agregar caller",
+            affected_user_id=member.id,
+            system="Callers",
+            observation="Caller autorizado con el comando caller_set.",
+        )
+        dm_status = "Bienvenida enviada por DM." if delivered else "No pude enviarle DM."
+        await ctx.reply(
+            f"📣 {member.mention} ahora es caller autorizado. {dm_status}",
+            mention_author=False,
+        )
 
     @commands.command(name="caller_remove")
     async def caller_remove(self, ctx: commands.Context, member: discord.Member) -> None:
         if not await require_admin_context(ctx, self.db):
             return
-        self.db.execute(
-            "DELETE FROM callers WHERE guild_id = ? AND user_id = ?",
-            (ctx.guild.id, member.id),
+        removed = revoke_caller(self.db, ctx.guild.id, member.id)
+        if not removed:
+            await ctx.reply(f"{member.mention} no estaba registrado como caller.", mention_author=False)
+            return
+        log_action(
+            self.db,
+            ctx.guild.id,
+            admin_id=ctx.author.id,
+            action="Eliminar caller",
+            affected_user_id=member.id,
+            system="Callers",
+            observation="Caller eliminado con caller_remove; sin notificacion por DM.",
         )
-        await ctx.reply(f"{member.mention} ya no es caller autorizado.", mention_author=False)
+        await ctx.reply(
+            f"➖ {member.mention} ya no es caller autorizado. No se envio ningun DM.",
+            mention_author=False,
+        )
 
     @commands.command(name="config_ver")
     async def config_ver(self, ctx: commands.Context) -> None:

@@ -20,6 +20,12 @@ from ..constants import (
 )
 from ..permissions import is_admin_subject, require_admin_context
 from ..services.audit import log_action
+from ..services.callers import (
+    authorize_caller,
+    caller_ranking,
+    caller_welcome_embed,
+    revoke_caller,
+)
 from ..services.economy import (
     adjust_user_balance,
     create_movement,
@@ -248,6 +254,106 @@ class FineAdminView(discord.ui.View):
             await private_response(interaction, self.cog.pending_fines_text(interaction.guild.id))
 
 
+class CallerMemberSelect(discord.ui.UserSelect):
+    def __init__(self, cog: "Admin", *, action: str, admin_id: int):
+        label = "agregar" if action == "add" else "eliminar"
+        super().__init__(
+            placeholder=f"Selecciona a quien quieres {label} como caller",
+            min_values=1,
+            max_values=1,
+        )
+        self.cog = cog
+        self.action = action
+        self.admin_id = admin_id
+
+    async def callback(self, interaction: discord.Interaction) -> None:
+        if interaction.user.id != self.admin_id or not is_admin_subject(self.cog.db, interaction):
+            await private_response(interaction, "Solo el admin que abrio este menu puede usarlo.")
+            return
+        if interaction.guild is None:
+            await private_response(interaction, "Este menu solo funciona dentro del servidor.")
+            return
+        selected = self.values[0]
+        member = selected if isinstance(selected, discord.Member) else interaction.guild.get_member(selected.id)
+        if member is None:
+            try:
+                member = await interaction.guild.fetch_member(selected.id)
+            except discord.HTTPException:
+                member = None
+        if member is None:
+            await private_response(interaction, "No encontre a ese usuario dentro del servidor.")
+            return
+        if member.bot:
+            await private_response(interaction, "Un bot no puede registrarse como caller.")
+            return
+        if self.action == "add":
+            await self.cog.add_caller_interaction(interaction, member)
+        else:
+            await self.cog.remove_caller_interaction(interaction, member)
+
+
+class CallerSelectionView(discord.ui.View):
+    def __init__(self, cog: "Admin", *, action: str, admin_id: int):
+        super().__init__(timeout=180)
+        self.add_item(CallerMemberSelect(cog, action=action, admin_id=admin_id))
+
+
+class CallersAdminView(discord.ui.View):
+    def __init__(self, cog: "Admin"):
+        super().__init__(timeout=300)
+        self.cog = cog
+
+    async def require_admin(self, interaction: discord.Interaction) -> bool:
+        if is_admin_subject(self.cog.db, interaction):
+            return True
+        await private_response(interaction, "Solo admins autorizados pueden gestionar callers.")
+        return False
+
+    @discord.ui.button(label="Lista de callers", emoji="🏆", style=discord.ButtonStyle.primary)
+    async def list_callers(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
+        if not await self.require_admin(interaction):
+            return
+        embeds = self.cog.caller_ranking_embeds(interaction.guild)
+        sent = True
+        for embed in embeds:
+            delivered = await send_dm_safe(
+                self.cog.db,
+                guild_id=interaction.guild.id,
+                user=interaction.user,
+                action="ranking_callers",
+                embed=embed,
+            )
+            if not delivered:
+                sent = False
+                break
+        if sent:
+            await private_response(interaction, "Te envie la lista y el ranking de callers por DM.")
+        else:
+            await private_response(
+                interaction,
+                "No pude enviarte un DM. Te muestro la primera pagina aqui.",
+                embed=embeds[0],
+            )
+
+    @discord.ui.button(label="Agregar caller", emoji="➕", style=discord.ButtonStyle.success)
+    async def add_caller(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
+        if await self.require_admin(interaction):
+            await private_response(
+                interaction,
+                "Selecciona al nuevo caller:",
+                view=CallerSelectionView(self.cog, action="add", admin_id=interaction.user.id),
+            )
+
+    @discord.ui.button(label="Eliminar caller", emoji="➖", style=discord.ButtonStyle.danger)
+    async def remove_caller(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
+        if await self.require_admin(interaction):
+            await private_response(
+                interaction,
+                "Selecciona al caller que quieres eliminar. No se enviara ningun DM:",
+                view=CallerSelectionView(self.cog, action="remove", admin_id=interaction.user.id),
+            )
+
+
 class PayoutReasonModal(discord.ui.Modal):
     reason = discord.ui.TextInput(label="Motivo", style=discord.TextStyle.paragraph, max_length=600)
 
@@ -415,6 +521,20 @@ class AdminPanelView(discord.ui.View):
         if await self.require_admin(interaction):
             await private_response(interaction, "Usa `!config_ver`, comandos `!canal_*_set`, `!caller_set` y `!economia_set`.")
 
+    @discord.ui.button(label="Callers", emoji="📣", style=discord.ButtonStyle.primary, custom_id="g3n:admin:callers", row=3)
+    async def callers(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
+        if await self.require_admin(interaction):
+            embed = discord.Embed(
+                title="📣 Gestion de Callers G3NESYS",
+                description=(
+                    "Consulta el ranking o administra quienes pueden dirigir actividades.\n\n"
+                    "**Puntuacion:** +10 por actividad completada, +2 por asistencia, "
+                    "-4 por cancelacion y -6 por ausencia."
+                ),
+                color=discord.Color.magenta(),
+            )
+            await private_response(interaction, "Menu de callers:", embed=embed, view=CallersAdminView(self.cog))
+
 
 class Admin(commands.Cog):
     def __init__(self, bot: commands.Bot):
@@ -425,7 +545,7 @@ class Admin(commands.Cog):
         self.bot.add_view(AdminPanelView(self))
         rows = self.db.fetch_all(
             """
-            SELECT code
+            SELECT DISTINCT code
             FROM payouts
             WHERE status = ? AND sent_to_admin_at IS NOT NULL
             """,
@@ -436,6 +556,106 @@ class Admin(commands.Cog):
 
     def build_payout_review_view(self, code: str) -> PayoutReviewView:
         return PayoutReviewView(self, code)
+
+    async def add_caller_interaction(
+        self,
+        interaction: discord.Interaction,
+        member: discord.Member,
+    ) -> None:
+        created = authorize_caller(
+            self.db,
+            interaction.guild.id,
+            member.id,
+            interaction.user.id,
+        )
+        if not created:
+            await private_response(interaction, f"{member.mention} ya es caller autorizado.")
+            return
+        delivered = await send_dm_safe(
+            self.db,
+            guild_id=interaction.guild.id,
+            user=member,
+            action="bienvenida_caller",
+            embed=caller_welcome_embed(interaction.guild.name),
+        )
+        log_action(
+            self.db,
+            interaction.guild.id,
+            admin_id=interaction.user.id,
+            action="Agregar caller",
+            affected_user_id=member.id,
+            system="Callers",
+            observation="Caller autorizado desde el panel administrativo.",
+        )
+        dm_status = "Le envie la bienvenida formal por DM." if delivered else "No pude enviarle DM, pero el acceso quedo activo."
+        await private_response(interaction, f"📣 {member.mention} ahora es caller autorizado. {dm_status}")
+
+    async def remove_caller_interaction(
+        self,
+        interaction: discord.Interaction,
+        member: discord.Member,
+    ) -> None:
+        removed = revoke_caller(self.db, interaction.guild.id, member.id)
+        if not removed:
+            await private_response(interaction, f"{member.mention} no estaba registrado como caller.")
+            return
+        log_action(
+            self.db,
+            interaction.guild.id,
+            admin_id=interaction.user.id,
+            action="Eliminar caller",
+            affected_user_id=member.id,
+            system="Callers",
+            observation="Acceso de caller retirado desde el panel administrativo; sin notificacion por DM.",
+        )
+        await private_response(
+            interaction,
+            f"➖ {member.mention} ya no es caller autorizado. No se envio ningun DM.",
+        )
+
+    def caller_ranking_embeds(self, guild: discord.Guild) -> list[discord.Embed]:
+        rows = caller_ranking(self.db, guild.id)
+        if not rows:
+            return [
+                discord.Embed(
+                    title="📣 Callers de G3NESYS",
+                    description="Todavia no hay callers autorizados.",
+                    color=discord.Color.magenta(),
+                )
+            ]
+        pages: list[discord.Embed] = []
+        page_size = 5
+        total_pages = (len(rows) + page_size - 1) // page_size
+        medals = {1: "🥇", 2: "🥈", 3: "🥉"}
+        for page_index in range(total_pages):
+            embed = discord.Embed(
+                title="📣 Ranking de Callers G3NESYS",
+                description=(
+                    "Clasificacion calculada con actividades, asistencia y cumplimiento.\n"
+                    "La plata incluye repartos aprobados y depositados."
+                ),
+                color=discord.Color.gold(),
+            )
+            start = page_index * page_size
+            for index, row in enumerate(rows[start : start + page_size], start=start + 1):
+                member = guild.get_member(int(row["user_id"]))
+                name = member.display_name if member else f"Usuario {row['user_id']}"
+                badge = medals.get(index, f"#{index}")
+                embed.add_field(
+                    name=f"{badge} {name} • {row['score']} puntos",
+                    value=(
+                        f"💰 Repartido: **{format_amount(row['distributed'])}**\n"
+                        f"⚔️ Creadas: **{row['activities_created']}** • "
+                        f"✅ Completadas: **{row['activities_completed']}**\n"
+                        f"❌ Canceladas: **{row['activities_cancelled']}** • "
+                        f"🙋 Asistencias: **{row['attendances']}** • "
+                        f"🚫 Ausencias: **{row['absences']}**"
+                    ),
+                    inline=False,
+                )
+            embed.set_footer(text=f"Pagina {page_index + 1}/{total_pages} • {len(rows)} callers autorizados")
+            pages.append(embed)
+        return pages
 
     def build_payout_review_embed(self, guild_id: int, code: str) -> discord.Embed:
         payout = self.db.fetch_one(
