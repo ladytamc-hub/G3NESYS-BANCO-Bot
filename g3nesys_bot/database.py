@@ -87,6 +87,19 @@ class Database:
                 "ADD COLUMN participation_percent REAL NOT NULL DEFAULT 0"
             )
 
+        movement_columns = {
+            row["name"]
+            for row in self._conn.execute("PRAGMA table_info(movements)").fetchall()
+        }
+        if "fee_amount" not in movement_columns:
+            self._conn.execute(
+                "ALTER TABLE movements ADD COLUMN fee_amount INTEGER NOT NULL DEFAULT 0"
+            )
+        if "net_amount" not in movement_columns:
+            self._conn.execute(
+                "ALTER TABLE movements ADD COLUMN net_amount INTEGER"
+            )
+
         caller_penalty_columns = {
             row["name"]
             for row in self._conn.execute("PRAGMA table_info(caller_penalties)").fetchall()
@@ -269,11 +282,14 @@ class Database:
                     description TEXT NOT NULL,
                     created_by INTEGER NOT NULL,
                     created_at TEXT NOT NULL,
+                    fee_amount INTEGER NOT NULL DEFAULT 0,
+                    net_amount INTEGER,
                     UNIQUE(guild_id, code)
                 )
                 """,
                 "id, code, guild_id, type, category, user_id, counterparty_id, "
-                "amount, source_table, source_id, description, created_by, created_at",
+                "amount, source_table, source_id, description, created_by, created_at, "
+                "fee_amount, net_amount",
             ),
         }
         rebuild = [
@@ -665,6 +681,16 @@ CREATE TABLE IF NOT EXISTS payouts (
     UNIQUE(guild_id, code)
 );
 
+CREATE TABLE IF NOT EXISTS payout_audit_logs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    guild_id INTEGER NOT NULL,
+    payout_id INTEGER NOT NULL REFERENCES payouts(id) ON DELETE CASCADE,
+    actor_id INTEGER,
+    action TEXT NOT NULL,
+    details TEXT,
+    created_at TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS payout_participants (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     payout_id INTEGER NOT NULL REFERENCES payouts(id) ON DELETE CASCADE,
@@ -690,6 +716,8 @@ CREATE TABLE IF NOT EXISTS movements (
     description TEXT NOT NULL,
     created_by INTEGER NOT NULL,
     created_at TEXT NOT NULL,
+    fee_amount INTEGER NOT NULL DEFAULT 0,
+    net_amount INTEGER,
     UNIQUE(guild_id, code)
 );
 
@@ -735,6 +763,9 @@ ON activities(guild_id, status);
 
 CREATE INDEX IF NOT EXISTS idx_payouts_guild_status
 ON payouts(guild_id, status);
+
+CREATE INDEX IF NOT EXISTS idx_payout_audit_guild_payout
+ON payout_audit_logs(guild_id, payout_id, created_at);
 
 CREATE INDEX IF NOT EXISTS idx_withdrawals_guild_status
 ON withdrawals(guild_id, status);

@@ -62,15 +62,18 @@ def create_movement(
     source_table: str | None = None,
     source_id: int | None = None,
     code_prefix: str = "MOV",
+    fee_amount: int = 0,
+    net_amount: int | None = None,
 ) -> int:
     code = db.next_code(guild_id, code_prefix)
     return db.execute(
         """
         INSERT INTO movements (
             code, guild_id, type, category, user_id, counterparty_id, amount,
-            source_table, source_id, description, created_by, created_at
+            source_table, source_id, description, created_by, created_at,
+            fee_amount, net_amount
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             code,
@@ -85,7 +88,26 @@ def create_movement(
             description,
             created_by,
             utc_now_iso(),
+            fee_amount,
+            net_amount,
         ),
+    )
+
+
+def movement_history_line(row) -> str:
+    identifier = f"`{row['code']}` (#{row['id']})"
+    if row["type"] == "TRANSFERENCIA":
+        net_amount = int(row["net_amount"] if row["net_amount"] is not None else row["amount"])
+        return (
+            f"{identifier} TRANSFERENCIA | Remitente <@{row['user_id']}> → "
+            f"Destinatario <@{row['counterparty_id']}> | "
+            f"Bruto {format_amount(row['amount'])} | "
+            f"Comision {format_amount(row['fee_amount'] or 0)} | "
+            f"Neto {format_amount(net_amount)} | {row['created_at']}"
+        )
+    return (
+        f"{identifier} {row['type']} | {format_amount(row['amount'])} | "
+        f"{row['description']} | {row['created_at']}"
     )
 
 
@@ -283,6 +305,8 @@ def transfer_between_members(
         created_by=sender_id,
         user_id=sender_id,
         counterparty_id=receiver_id,
+        fee_amount=fee,
+        net_amount=receiver_amount,
     )
     log_action(
         db,

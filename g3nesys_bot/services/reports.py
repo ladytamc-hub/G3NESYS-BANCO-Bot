@@ -306,7 +306,7 @@ def _fetch_user_stats(db: Database, guild_id: int):
             (SELECT COUNT(*) FROM movements m, params WHERE m.guild_id = gid AND m.type = 'TRANSFERENCIA' AND m.user_id = u.user_id) AS transfers_sent,
             COALESCE((SELECT SUM(amount) FROM movements m, params WHERE m.guild_id = gid AND m.type = 'TRANSFERENCIA' AND m.user_id = u.user_id), 0) AS transfers_sent_amount,
             (SELECT COUNT(*) FROM movements m, params WHERE m.guild_id = gid AND m.type = 'TRANSFERENCIA' AND m.counterparty_id = u.user_id) AS transfers_received,
-            COALESCE((SELECT SUM(amount) FROM movements m, params WHERE m.guild_id = gid AND m.type = 'TRANSFERENCIA' AND m.counterparty_id = u.user_id), 0) AS transfers_received_amount,
+            COALESCE((SELECT SUM(COALESCE(net_amount, amount)) FROM movements m, params WHERE m.guild_id = gid AND m.type = 'TRANSFERENCIA' AND m.counterparty_id = u.user_id), 0) AS transfers_received_amount,
             EXISTS(SELECT 1 FROM callers c, params WHERE c.guild_id = gid AND c.user_id = u.user_id) AS is_caller,
             EXISTS(SELECT 1 FROM caller_penalties cp, params WHERE cp.guild_id = gid AND cp.user_id = u.user_id AND cp.active = 1) AS caller_penalized
         FROM users u
@@ -489,6 +489,8 @@ def create_admin_report(db: Database, guild_id: int, guild=None) -> Path:
             row["code"], row["type"], row["category"], _id(row["user_id"]),
             _member_name(guild, row["user_id"]), _id(row["counterparty_id"]),
             _member_name(guild, row["counterparty_id"]), int(row["amount"]),
+            int(row["fee_amount"] or 0),
+            int(row["net_amount"] if row["net_amount"] is not None else row["amount"]),
             row["source_table"], row["source_id"], row["description"],
             _id(row["created_by"]), _member_name(guild, row["created_by"]), row["created_at"],
         ]
@@ -496,7 +498,7 @@ def create_admin_report(db: Database, guild_id: int, guild=None) -> Path:
     ]
     movement_headers = [
         "Codigo", "Tipo", "Categoria", "Usuario ID", "Usuario", "Contraparte ID",
-        "Contraparte", "Monto", "Tabla origen", "ID origen", "Descripcion",
+        "Contraparte", "Monto bruto", "Comision", "Monto neto", "Tabla origen", "ID origen", "Descripcion",
         "Creado por ID", "Creado por", "Fecha",
     ]
     _add_detail_sheet(
@@ -506,7 +508,7 @@ def create_admin_report(db: Database, guild_id: int, guild=None) -> Path:
         subtitle=subtitle,
         headers=movement_headers,
         rows=movement_rows,
-        currency_headers={"Monto"},
+        currency_headers={"Monto bruto", "Comision", "Monto neto"},
         date_headers={"Fecha"},
     )
     transaction_rows = [row for row, source in zip(movement_rows, movements) if source["user_id"] or source["counterparty_id"]]
@@ -517,7 +519,7 @@ def create_admin_report(db: Database, guild_id: int, guild=None) -> Path:
         subtitle=subtitle,
         headers=movement_headers,
         rows=transaction_rows,
-        currency_headers={"Monto"},
+        currency_headers={"Monto bruto", "Comision", "Monto neto"},
         date_headers={"Fecha"},
     )
 
@@ -745,6 +747,32 @@ def create_admin_report(db: Database, guild_id: int, guild=None) -> Path:
         currency_headers={"Monto"},
         percent_headers={"Participacion"},
         date_headers={"Fecha deposito"},
+    )
+
+    payout_audit_rows = db.fetch_all(
+        """
+        SELECT p.code, pal.actor_id, pal.action, pal.details, pal.created_at
+        FROM payout_audit_logs pal
+        JOIN payouts p ON p.id = pal.payout_id AND p.guild_id = pal.guild_id
+        WHERE pal.guild_id = ?
+        ORDER BY pal.id DESC
+        """,
+        (guild_id,),
+    )
+    _add_detail_sheet(
+        workbook,
+        name="Auditoria Splits",
+        title="Historial de cambios de Splits",
+        subtitle=subtitle,
+        headers=["Split", "Actor ID", "Actor", "Accion", "Detalles", "Fecha"],
+        rows=[
+            [
+                row["code"], _id(row["actor_id"]), _member_name(guild, row["actor_id"]),
+                row["action"], row["details"], row["created_at"],
+            ]
+            for row in payout_audit_rows
+        ],
+        date_headers={"Fecha"},
     )
 
     _add_detail_sheet(

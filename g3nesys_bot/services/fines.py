@@ -6,7 +6,7 @@ from ..constants import FINE_CANCELLED, FINE_PENDING
 from ..database import Database
 from ..utils import format_amount, utc_now_iso
 from .audit import log_action
-from .notifications import send_dm_safe
+from .notifications import send_admin_notification, send_dm_safe
 
 
 async def create_fine(
@@ -65,6 +65,17 @@ async def create_fine(
             "Puedes consultar tus multas con `!mis_multas`."
         ),
     )
+    guild = getattr(user, "guild", None)
+    if guild is not None and guild.id == guild_id:
+        await send_admin_notification(
+            db,
+            guild=guild,
+            category="fines",
+            content=(
+                f"🚨 Multa `{code}` creada para <@{user.id}> por <@{created_by}>. "
+                f"Monto: {format_amount(amount)} · Origen: {origin} · Motivo: {reason}"
+            ),
+        )
     return code
 
 
@@ -118,3 +129,12 @@ async def cancel_fine(
                 f"Estado: {FINE_CANCELLED}"
             ),
         )
+    await send_admin_notification(
+        db,
+        guild=guild,
+        category="fines",
+        content=(
+            f"🟢 Multa `{fine_code}` cancelada por <@{admin_id}> para "
+            f"<@{fine['user_id']}>. Motivo: {reason}"
+        ),
+    )

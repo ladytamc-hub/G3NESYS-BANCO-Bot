@@ -7,6 +7,7 @@ from discord.ext import commands
 
 from ..constants import (
     ADMIN_PANEL_IMAGE,
+    PAYOUT_APPROVED,
     PAYOUT_DEPOSITED,
     PAYOUT_CORRECTION,
     PAYOUT_PENDING,
@@ -34,12 +35,14 @@ from ..services.economy import (
     deposit_to_user_from_treasury,
     ensure_treasury,
     get_account,
+    movement_history_line,
     pending_fines_total,
     register_guild_expense,
     register_guild_income,
 )
 from ..services.fines import cancel_fine, create_fine
-from ..services.notifications import send_dm_safe
+from ..services.notifications import send_admin_notification, send_dm_safe
+from ..services.payout_audit import log_payout_action, payout_audit_text
 from ..services.reports import create_admin_report
 from ..utils import format_amount, parse_channel_id, parse_int_amount, utc_now_iso
 
@@ -490,6 +493,7 @@ class PayoutReviewView(discord.ui.View):
         self.add_button("Rechazar", "reject", "❌", discord.ButtonStyle.danger)
         self.add_button("Corregir", "correction", "🛠️", discord.ButtonStyle.secondary)
         self.add_button("Ver detalle", "detail", "📋", discord.ButtonStyle.primary)
+        self.add_button("Auditoria", "audit", "🧾", discord.ButtonStyle.secondary)
 
     def add_button(self, label: str, action: str, emoji: str, style: discord.ButtonStyle) -> None:
         button = discord.ui.Button(
@@ -532,6 +536,82 @@ class PayoutReviewView(discord.ui.View):
                 self.cog.payout_detail_text(interaction.guild.id, self.code),
                 "detalle_reparto_admin",
             )
+            return
+        if action == "audit":
+            payout = self.cog.db.fetch_one(
+                "SELECT id FROM payouts WHERE guild_id = ? AND code = ?",
+                (interaction.guild.id, self.code),
+            )
+            if payout is None:
+                await private_response(interaction, "No encontre ese Split.")
+                return
+            await dm_or_private(
+                self.cog,
+                interaction,
+                payout_audit_text(
+                    self.cog.db,
+                    interaction.guild.id,
+                    int(payout["id"]),
+                ),
+                "auditoria_split_admin",
+            )
+
+
+class SplitsAdminView(discord.ui.View):
+    def __init__(self, cog: "Admin"):
+        super().__init__(timeout=300)
+        self.cog = cog
+
+    async def require_admin(self, interaction: discord.Interaction) -> bool:
+        if is_admin_subject(self.cog.db, interaction):
+            return True
+        await private_response(interaction, "Solo admins autorizados pueden revisar Splits.")
+        return False
+
+    @discord.ui.button(
+        label="Pendientes de aprobación",
+        emoji="⏳",
+        style=discord.ButtonStyle.primary,
+        custom_id="g3n:admin:splits:pending",
+    )
+    async def pending(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
+        if await self.require_admin(interaction):
+            await dm_or_private(
+                self.cog,
+                interaction,
+                self.cog.pending_payouts_text(interaction.guild.id),
+                "splits_pendientes_admin",
+            )
+
+    @discord.ui.button(
+        label="Aprobados",
+        emoji="✅",
+        style=discord.ButtonStyle.success,
+        custom_id="g3n:admin:splits:approved",
+    )
+    async def approved(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
+        if await self.require_admin(interaction):
+            await dm_or_private(
+                self.cog,
+                interaction,
+                self.cog.approved_payouts_text(interaction.guild.id),
+                "splits_aprobados_admin",
+            )
+
+    @discord.ui.button(
+        label="Lista general",
+        emoji="📚",
+        style=discord.ButtonStyle.secondary,
+        custom_id="g3n:admin:splits:all",
+    )
+    async def all_splits(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
+        if await self.require_admin(interaction):
+            await dm_or_private(
+                self.cog,
+                interaction,
+                self.cog.all_payouts_text(interaction.guild.id),
+                "splits_lista_general_admin",
+            )
 
 
 class AdminPanelView(discord.ui.View):
@@ -568,7 +648,11 @@ class AdminPanelView(discord.ui.View):
     @discord.ui.button(label="Revisar Splits", emoji="📋", style=discord.ButtonStyle.secondary, custom_id="g3n:admin:payouts", row=1)
     async def payouts(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
         if await self.require_admin(interaction):
-            await dm_or_private(self.cog, interaction, self.cog.pending_payouts_text(interaction.guild.id), "repartos_panel")
+            await private_response(
+                interaction,
+                "Selecciona la lista de Splits que deseas consultar:",
+                view=SplitsAdminView(self.cog),
+            )
 
     @discord.ui.button(label="Multas", emoji="🚨", style=discord.ButtonStyle.danger, custom_id="g3n:admin:fines", row=1)
     async def fines(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
@@ -593,10 +677,20 @@ class AdminPanelView(discord.ui.View):
         if await self.require_admin(interaction):
             await interaction.response.send_modal(UserStatementModal(self.cog))
 
-    @discord.ui.button(label="Historial", emoji="📜", style=discord.ButtonStyle.secondary, custom_id="g3n:admin:history", row=2)
+    @discord.ui.button(label="Edo. Cta. Gremio", emoji="📜", style=discord.ButtonStyle.secondary, custom_id="g3n:admin:history", row=2)
     async def history(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
         if await self.require_admin(interaction):
             await dm_or_private(self.cog, interaction, self.cog.history_text(interaction.guild.id), "historial_panel")
+
+    @discord.ui.button(label="Historial de liquidaciones", emoji="🧾", style=discord.ButtonStyle.secondary, custom_id="g3n:admin:liquidation_history", row=2)
+    async def liquidation_history(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
+        if await self.require_admin(interaction):
+            await dm_or_private(
+                self.cog,
+                interaction,
+                self.cog.liquidation_history_text(interaction.guild.id),
+                "historial_liquidaciones_admin",
+            )
 
     @discord.ui.button(label="Rankings", emoji="🏆", style=discord.ButtonStyle.secondary, custom_id="g3n:admin:rankings", row=2)
     async def rankings(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
@@ -920,6 +1014,15 @@ class Admin(commands.Cog):
         except ValueError as exc:
             await ctx.reply(str(exc), mention_author=False)
             return
+        await send_admin_notification(
+            self.db,
+            guild=ctx.guild,
+            category="general_admin",
+            content=(
+                f"📈 Ingreso registrado por <@{ctx.author.id}>: {format_amount(amount)} · "
+                f"{category} · {description}"
+            ),
+        )
         await ctx.reply("Ingreso registrado.", mention_author=False)
 
     @commands.command(name="registrar_egreso")
@@ -1019,6 +1122,15 @@ class Admin(commands.Cog):
                 action="rechazar_cobro",
                 content=f"Tu solicitud de cobro `{code}` fue rechazada. Motivo: {reason}",
             )
+        await send_admin_notification(
+            self.db,
+            guild=ctx.guild,
+            category="withdrawals",
+            content=(
+                f"❌ Cobro `{code}` rechazado por <@{ctx.author.id}> para "
+                f"<@{withdrawal['user_id']}>. Motivo: {reason}"
+            ),
+        )
         await ctx.reply(f"Solicitud `{code}` rechazada.", mention_author=False)
 
     @commands.command(name="liquidar_cobro")
@@ -1090,6 +1202,22 @@ class Admin(commands.Cog):
             return
         await ctx.reply(f"Correccion solicitada para `{code}`.", mention_author=False)
 
+    @commands.command(name="auditoria_split", aliases=["auditoria_reparto"])
+    async def auditoria_split(self, ctx: commands.Context, code: str) -> None:
+        if not await require_admin_context(ctx, self.db):
+            return
+        payout = self.db.fetch_one(
+            "SELECT id FROM payouts WHERE guild_id = ? AND code = ?",
+            (ctx.guild.id, code.upper()),
+        )
+        if payout is None:
+            await ctx.reply("No encontre ese Split.", mention_author=False)
+            return
+        await ctx.reply(
+            payout_audit_text(self.db, ctx.guild.id, int(payout["id"])),
+            mention_author=False,
+        )
+
     @commands.command(name="reporte_excel")
     async def reporte_excel(self, ctx: commands.Context) -> None:
         if not await require_admin_context(ctx, self.db):
@@ -1111,6 +1239,15 @@ class Admin(commands.Cog):
         except ValueError as exc:
             await private_response(interaction, str(exc))
             return
+        await send_admin_notification(
+            self.db,
+            guild=interaction.guild,
+            category="general_admin",
+            content=(
+                f"📈 Ingreso registrado por <@{interaction.user.id}>: {format_amount(amount)} · "
+                f"{modal.category.value} · {modal.description.value}"
+            ),
+        )
         await private_response(interaction, "Ingreso registrado.")
 
     async def register_expense_interaction(self, interaction: discord.Interaction, modal: ExpenseModal) -> None:
@@ -1189,6 +1326,16 @@ class Admin(commands.Cog):
                 description=str(payload["description"]),
                 admin_id=interaction.user.id,
             )
+            await send_admin_notification(
+                self.db,
+                guild=guild,
+                category="general_admin",
+                content=(
+                    f"📉 Egreso registrado por <@{interaction.user.id}>: "
+                    f"{format_amount(payload['amount'])} · {payload['category']} · "
+                    f"{payload['description']}"
+                ),
+            )
             return "Egreso registrado."
         if action == "deposit":
             movement_id = deposit_to_user_from_treasury(
@@ -1214,6 +1361,16 @@ class Admin(commands.Cog):
                         f"Motivo: {payload['reason']}\n"
                         f"Realizado por: {interaction.user.display_name}"
                     ),
+            )
+            await send_admin_notification(
+                self.db,
+                guild=guild,
+                category="general_admin",
+                content=(
+                    f"💰 Deposito administrativo por <@{interaction.user.id}> a "
+                    f"<@{payload['user_id']}>: {format_amount(payload['amount'])} · "
+                    f"{payload['reason']} · Movimiento #{movement_id}."
+                ),
             )
             return f"Deposito registrado. Movimiento #{movement_id}."
         if action == "create_fine":
@@ -1290,6 +1447,15 @@ class Admin(commands.Cog):
                     "Queda pendiente por liquidar."
                 ),
             )
+        await send_admin_notification(
+            self.db,
+            guild=guild,
+            category="withdrawals",
+            content=(
+                f"✅ Cobro `{code}` aprobado por <@{admin_id}> para "
+                f"<@{withdrawal['user_id']}> por {format_amount(withdrawal['amount_requested'])}."
+            ),
+        )
 
     async def liquidate_withdrawal(
         self,
@@ -1359,6 +1525,17 @@ class Admin(commands.Cog):
                     f"Estado: {status}"
                 ),
             )
+        await send_admin_notification(
+            self.db,
+            guild=guild,
+            category="withdrawals",
+            content=(
+                f"💵 Cobro `{code}` liquidado por <@{admin_id}>. "
+                f"Usuario: <@{withdrawal['user_id']}> · "
+                f"Monto: {format_amount(amount)} · Estado: {status} · "
+                f"Movimiento #{movement_id}."
+            ),
+        )
         return f"Cobro `{code}` liquidado por {format_amount(amount)}. Movimiento #{movement_id}."
 
     async def approve_payout(self, guild: discord.Guild, code: str, admin_id: int) -> str:
@@ -1464,6 +1641,25 @@ class Admin(commands.Cog):
             "UPDATE payouts SET status = ?, reviewed_by = ?, reviewed_at = ? WHERE id = ?",
             (PAYOUT_DEPOSITED, admin_id, utc_now_iso(), int(payout["id"])),
         )
+        log_payout_action(
+            self.db,
+            guild.id,
+            int(payout["id"]),
+            actor_id=admin_id,
+            action="Split aprobado",
+            details=f"Monto repartible: {int(payout['distributable'])}",
+        )
+        log_payout_action(
+            self.db,
+            guild.id,
+            int(payout["id"]),
+            actor_id=admin_id,
+            action="Depositos del Split realizados",
+            details=(
+                f"Participantes: {len(participants)}; repartible: {int(payout['distributable'])}; "
+                f"caller: {caller_amount}; gremio: {int(payout['guild_amount'])}"
+            ),
+        )
         log_action(
             self.db,
             guild.id,
@@ -1472,6 +1668,18 @@ class Admin(commands.Cog):
             system="Splits",
             amount=int(payout["distributable"]) + caller_amount,
             observation=code,
+        )
+        await send_admin_notification(
+            self.db,
+            guild=guild,
+            category="splits",
+            content=(
+                f"✅ Split `{code}` aprobado y depositado por <@{admin_id}>. "
+                f"Participantes: {len(participants)} · "
+                f"Repartible: {format_amount(payout['distributable'])} · "
+                f"Caller: {format_amount(caller_amount)} · "
+                f"Gremio: {format_amount(payout['guild_amount'])}."
+            ),
         )
         return f"Split `{code}` aprobado y saldos depositados."
 
@@ -1495,6 +1703,21 @@ class Admin(commands.Cog):
             "UPDATE payouts SET status = ?, reviewed_by = ?, reviewed_at = ?, notes = ? WHERE id = ?",
             (status, admin_id, utc_now_iso(), reason, int(payout["id"])),
         )
+        audit_action = (
+            "Split rechazado"
+            if status == PAYOUT_REJECTED
+            else "Correccion solicitada"
+            if status == PAYOUT_CORRECTION
+            else f"Estado actualizado a {status}"
+        )
+        log_payout_action(
+            self.db,
+            guild.id,
+            int(payout["id"]),
+            actor_id=admin_id,
+            action=audit_action,
+            details=reason,
+        )
         log_action(
             self.db,
             guild.id,
@@ -1513,6 +1736,15 @@ class Admin(commands.Cog):
                 action="estado_split",
                 content=f"El Split `{code}` cambio a `{status}`. Motivo: {reason}",
             )
+        await send_admin_notification(
+            self.db,
+            guild=guild,
+            category="splits",
+            content=(
+                f"📋 Split `{code}` actualizado a **{status}** por <@{admin_id}>. "
+                f"Motivo: {reason}"
+            ),
+        )
 
     def treasury_text(self, guild_id: int) -> str:
         ensure_treasury(self.db, guild_id)
@@ -1558,6 +1790,34 @@ class Admin(commands.Cog):
         lines.append("Comandos: `!aprobar_cobro CODIGO`, `!liquidar_cobro CODIGO monto`.")
         return "\n".join(lines)
 
+    def liquidation_history_text(self, guild_id: int) -> str:
+        rows = self.db.fetch_all(
+            """
+            SELECT code, user_id, amount_requested, amount_liquidated, status,
+                   liquidated_by, liquidated_at
+            FROM withdrawals
+            WHERE guild_id = ? AND status IN (?, ?) AND liquidated_at IS NOT NULL
+            ORDER BY liquidated_at DESC, id DESC LIMIT 15
+            """,
+            (guild_id, WITHDRAWAL_LIQUIDATED, WITHDRAWAL_PARTIAL),
+        )
+        if not rows:
+            return "No hay liquidaciones registradas."
+        lines = ["🧾 **Historial de liquidaciones**"]
+        for row in rows:
+            liquidator = (
+                f"<@{row['liquidated_by']}>"
+                if row["liquidated_by"] is not None
+                else "Sistema"
+            )
+            lines.append(
+                f"`{row['code']}` <@{row['user_id']}> · "
+                f"{format_amount(row['amount_liquidated'] or 0)} de "
+                f"{format_amount(row['amount_requested'])} · {row['status']} · "
+                f"Por {liquidator} · {row['liquidated_at']}"
+            )
+        return "\n".join(lines)[:1900]
+
     def pending_fines_text(self, guild_id: int) -> str:
         rows = self.db.fetch_all(
             """
@@ -1578,27 +1838,76 @@ class Admin(commands.Cog):
         return "\n".join(lines)
 
     def pending_payouts_text(self, guild_id: int) -> str:
-        rows = self.db.fetch_all(
-            """
-            SELECT code, caller_id, distributable, guild_amount, caller_amount, status
-            FROM payouts
-            WHERE guild_id = ? AND status = ? AND sent_to_admin_at IS NOT NULL
-            ORDER BY id DESC LIMIT 15
-            """,
-            (guild_id, PAYOUT_PENDING),
+        return self.payouts_list_text(
+            guild_id,
+            mode="pending",
         )
+
+    def approved_payouts_text(self, guild_id: int) -> str:
+        return self.payouts_list_text(
+            guild_id,
+            mode="approved",
+        )
+
+    def all_payouts_text(self, guild_id: int) -> str:
+        return self.payouts_list_text(
+            guild_id,
+            mode="all",
+        )
+
+    def payouts_list_text(self, guild_id: int, *, mode: str) -> str:
+        if mode == "pending":
+            title = "⏳ **Splits pendientes de aprobación**"
+            empty = "No hay Splits pendientes de aprobación."
+            query = """
+                SELECT code, caller_id, distributable, guild_amount,
+                       caller_amount, status, created_at, reviewed_at
+                FROM payouts
+                WHERE guild_id = ? AND status = ? AND sent_to_admin_at IS NOT NULL
+                ORDER BY id DESC LIMIT 15
+            """
+            params = (guild_id, PAYOUT_PENDING)
+        elif mode == "approved":
+            title = "✅ **Splits aprobados**"
+            empty = "No hay Splits aprobados."
+            query = """
+                SELECT code, caller_id, distributable, guild_amount,
+                       caller_amount, status, created_at, reviewed_at
+                FROM payouts
+                WHERE guild_id = ? AND status IN (?, ?)
+                ORDER BY COALESCE(reviewed_at, created_at) DESC, id DESC LIMIT 15
+            """
+            params = (guild_id, PAYOUT_APPROVED, PAYOUT_DEPOSITED)
+        elif mode == "all":
+            title = "📚 **Lista general de Splits**"
+            empty = "No hay Splits registrados."
+            query = """
+                SELECT code, caller_id, distributable, guild_amount,
+                       caller_amount, status, created_at, reviewed_at
+                FROM payouts
+                WHERE guild_id = ?
+                ORDER BY id DESC LIMIT 20
+            """
+            params = (guild_id,)
+        else:
+            raise ValueError("Vista de Splits no reconocida.")
+
+        rows = self.db.fetch_all(query, params)
         if not rows:
-            return "No hay Splits pendientes."
-        lines = ["**Splits pendientes**"]
+            return empty
+        lines = [title]
         for row in rows:
             lines.append(
-                f"`{row['code']}` Caller <@{row['caller_id']}> "
-                f"Repartible {format_amount(row['distributable'])} "
-                f"Aporte {format_amount(row['guild_amount'])} "
+                f"`{row['code']}` · **{row['status']}** · Caller <@{row['caller_id']}> · "
+                f"Repartible {format_amount(row['distributable'])} · "
+                f"Gremio {format_amount(row['guild_amount'])} · "
                 f"Caller {format_amount(row['caller_amount'])}"
             )
-        lines.append("Usa los botones del mensaje de revision para aprobar, rechazar o pedir correccion.")
-        return "\n".join(lines)
+        if mode == "pending":
+            lines.append(
+                "Usa los botones del mensaje de revisión para aprobar, rechazar o pedir corrección."
+            )
+        return "\n".join(lines)[:1900]
 
     def payout_detail_text(self, guild_id: int, code: str, *, compact: bool = False) -> str:
         payout = self.db.fetch_one(
@@ -1644,7 +1953,7 @@ class Admin(commands.Cog):
     def history_text(self, guild_id: int) -> str:
         rows = self.db.fetch_all(
             """
-            SELECT code, type, category, amount, description
+            SELECT *
             FROM movements
             WHERE guild_id = ?
             ORDER BY id DESC LIMIT 15
@@ -1655,8 +1964,8 @@ class Admin(commands.Cog):
             return "No hay movimientos registrados."
         lines = ["**Historial gremial**"]
         for row in rows:
-            lines.append(f"`{row['code']}` {row['type']} {format_amount(row['amount'])} - {row['description']}")
-        return "\n".join(lines)
+            lines.append(movement_history_line(row))
+        return "\n".join(lines)[:1900]
 
     def audit_text(self, guild_id: int) -> str:
         rows = self.db.fetch_all(
@@ -1713,15 +2022,27 @@ class Admin(commands.Cog):
     def user_statement_text(self, guild_id: int, member: discord.Member) -> str:
         account = get_account(self.db, guild_id, member.id)
         fine_count, fine_total = pending_fines_total(self.db, guild_id, member.id)
-        return "\n".join(
-            [
-                f"**Estado de cuenta de {member.display_name}**",
-                f"Disponible: {format_amount(account['available'])}",
-                f"Retenido: {format_amount(account['retained'])}",
-                f"Decomisado: {format_amount(account['seized'])}",
-                f"Multas pendientes: {fine_count} ({format_amount(fine_total)})",
-            ]
+        movements = self.db.fetch_all(
+            """
+            SELECT * FROM movements
+            WHERE guild_id = ? AND (user_id = ? OR counterparty_id = ?)
+            ORDER BY id DESC LIMIT 8
+            """,
+            (guild_id, member.id, member.id),
         )
+        lines = [
+            f"**Estado de cuenta de {member.display_name}**",
+            f"Disponible: {format_amount(account['available'])}",
+            f"Retenido: {format_amount(account['retained'])}",
+            f"Decomisado: {format_amount(account['seized'])}",
+            f"Multas pendientes: {fine_count} ({format_amount(fine_total)})",
+            "",
+            "**Movimientos recientes**",
+        ]
+        lines.extend(movement_history_line(row) for row in movements)
+        if not movements:
+            lines.append("Sin movimientos.")
+        return "\n".join(lines)
 
     def create_report(self, guild_id: int) -> Path:
         return create_admin_report(

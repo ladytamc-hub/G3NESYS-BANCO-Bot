@@ -95,23 +95,31 @@ def remove_caller_penalty(
     return True
 
 
-def cancellation_capacity(db: Database, activity_id: int) -> tuple[int, int, bool]:
+def cancellation_capacity(
+    db: Database,
+    guild_id: int,
+    activity_id: int,
+) -> tuple[int, int, bool]:
     row = db.fetch_one(
         """
         SELECT
             COALESCE((
                 SELECT SUM(slots)
                 FROM activity_roles
-                WHERE activity_id = ?
+                WHERE activity_id = activities.id
             ), 0) AS required_slots,
             COALESCE((
                 SELECT COUNT(*)
                 FROM activity_participants
-                WHERE activity_id = ?
+                WHERE activity_id = activities.id
             ), 0) AS registered_slots
+        FROM activities
+        WHERE guild_id = ? AND id = ?
         """,
-        (activity_id, activity_id),
+        (guild_id, activity_id),
     )
+    if row is None:
+        return 0, 0, False
     required = int(row["required_slots"])
     registered = int(row["registered_slots"])
     return required, registered, required > registered

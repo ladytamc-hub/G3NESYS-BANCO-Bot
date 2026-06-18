@@ -7,7 +7,7 @@ from ..constants import FINE_PENDING
 from ..permissions import is_admin_subject, require_admin_context
 from ..services.economy import pay_fine_from_balance
 from ..services.fines import cancel_fine, create_fine
-from ..services.notifications import send_dm_safe
+from ..services.notifications import send_admin_notification, send_dm_safe
 from ..utils import format_amount, parse_int_amount
 
 
@@ -216,6 +216,15 @@ class Fines(commands.Cog):
                     f"Monto: {format_amount(fine['amount'])}"
                 ),
             )
+        await send_admin_notification(
+            self.db,
+            guild=ctx.guild,
+            category="fines",
+            content=(
+                f"✅ Multa `{fine_code}` pagada por <@{ctx.author.id}> para "
+                f"<@{fine['user_id']}>. Monto: {format_amount(fine['amount'])}."
+            ),
+        )
         await ctx.reply(f"Multa `{fine_code}` pagada.", mention_author=False)
 
 

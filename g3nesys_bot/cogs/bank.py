@@ -8,10 +8,11 @@ from ..permissions import has_bank_access, is_admin_subject, is_full_member, req
 from ..services.economy import (
     create_withdrawal_request,
     get_account,
+    movement_history_line,
     pending_fines_total,
     transfer_between_members,
 )
-from ..services.notifications import send_dm_safe
+from ..services.notifications import send_admin_notification, send_dm_safe
 from ..utils import format_amount, parse_channel_id, parse_int_amount, utc_now_iso
 
 
@@ -273,7 +274,7 @@ class Bank(commands.Cog):
         try:
             amount = parse_int_amount(amount_raw)
             fee_percent = self.db.get_int_setting(ctx.guild.id, "transfer_fee_percent", 3)
-            transfer_between_members(
+            movement_id = transfer_between_members(
                 self.db,
                 ctx.guild.id,
                 sender_id=ctx.author.id,
@@ -284,14 +285,30 @@ class Bank(commands.Cog):
         except ValueError as exc:
             await ctx.reply(str(exc), mention_author=False)
             return
+        movement = self.db.fetch_one(
+            "SELECT * FROM movements WHERE guild_id = ? AND id = ?",
+            (ctx.guild.id, movement_id),
+        )
         await send_dm_safe(
             self.db,
             guild_id=ctx.guild.id,
             user=member,
             action="transferencia_recibida",
-            content=f"Has recibido una transferencia de {format_amount(amount)} de {ctx.author.display_name}.",
+            content=(
+                f"Has recibido una transferencia de {ctx.author.display_name}.\n\n"
+                f"{movement_history_line(movement)}"
+            ),
         )
-        await ctx.reply("Transferencia realizada.", mention_author=False)
+        await send_admin_notification(
+            self.db,
+            guild=ctx.guild,
+            category="general_admin",
+            content=f"🔁 {movement_history_line(movement)}",
+        )
+        await ctx.reply(
+            f"Transferencia realizada.\n{movement_history_line(movement)}",
+            mention_author=False,
+        )
 
     @commands.command(name="cobrar")
     async def cobrar(self, ctx: commands.Context, amount_raw: str, *, reason: str = "") -> None:
@@ -381,6 +398,15 @@ class Bank(commands.Cog):
         except ValueError as exc:
             await private_response(interaction, str(exc))
             return
+        await send_admin_notification(
+            self.db,
+            guild=interaction.guild,
+            category="fines",
+            content=(
+                f"✅ Multa `{fine_code}` pagada por <@{interaction.user.id}> para "
+                f"<@{fine['user_id']}>. Monto: {format_amount(fine['amount'])}."
+            ),
+        )
         await private_response(interaction, f"Multa `{fine_code}` pagada.")
 
     async def withdraw_interaction(
@@ -430,7 +456,7 @@ class Bank(commands.Cog):
         try:
             amount = parse_int_amount(amount_raw)
             fee_percent = self.db.get_int_setting(interaction.guild.id, "transfer_fee_percent", 3)
-            transfer_between_members(
+            movement_id = transfer_between_members(
                 self.db,
                 interaction.guild.id,
                 sender_id=interaction.user.id,
@@ -441,7 +467,30 @@ class Bank(commands.Cog):
         except ValueError as exc:
             await private_response(interaction, str(exc))
             return
-        await private_response(interaction, "Transferencia realizada.")
+        movement = self.db.fetch_one(
+            "SELECT * FROM movements WHERE guild_id = ? AND id = ?",
+            (interaction.guild.id, movement_id),
+        )
+        await send_dm_safe(
+            self.db,
+            guild_id=interaction.guild.id,
+            user=receiver,
+            action="transferencia_recibida",
+            content=(
+                f"Has recibido una transferencia de {interaction.user.display_name}.\n\n"
+                f"{movement_history_line(movement)}"
+            ),
+        )
+        await send_admin_notification(
+            self.db,
+            guild=interaction.guild,
+            category="general_admin",
+            content=f"🔁 {movement_history_line(movement)}",
+        )
+        await private_response(
+            interaction,
+            f"Transferencia realizada.\n{movement_history_line(movement)}",
+        )
 
     async def create_withdrawal_and_notify(
         self,
@@ -473,14 +522,7 @@ class Bank(commands.Cog):
             "SELECT * FROM withdrawals WHERE guild_id = ? AND code = ?",
             (guild.id, code),
         )
-        channel_id = self.db.get_setting(guild.id, "channel_cobros_id") or self.db.get_setting(
-            guild.id,
-            "channel_admin_id",
-        )
-        if not channel_id or row is None:
-            return
-        channel = guild.get_channel(int(channel_id))
-        if channel is None:
+        if row is None:
             return
         embed = discord.Embed(
             title=f"💳 Solicitud de cobro {code}",
@@ -492,7 +534,13 @@ class Bank(commands.Cog):
         embed.add_field(name="Nota", value=row["reason"] or "Sin nota", inline=False)
         view = WithdrawalReviewView(self, guild.id, code)
         self.bot.add_view(view)
-        await channel.send(embed=embed, view=view)
+        await send_admin_notification(
+            self.db,
+            guild=guild,
+            category="withdrawals",
+            embed=embed,
+            view=view,
+        )
 
     def balance_text(self, guild_id: int, member: discord.Member) -> str:
         account = get_account(self.db, guild_id, member.id)
@@ -512,7 +560,7 @@ class Bank(commands.Cog):
         fine_count, fine_total = pending_fines_total(self.db, guild_id, member.id)
         movements = self.db.fetch_all(
             """
-            SELECT code, type, category, amount, description
+            SELECT *
             FROM movements
             WHERE guild_id = ? AND (user_id = ? OR counterparty_id = ?)
             ORDER BY id DESC LIMIT 8
@@ -531,9 +579,7 @@ class Bank(commands.Cog):
         if not movements:
             lines.append("Sin movimientos.")
         for row in movements:
-            lines.append(
-                f"`{row['code']}` {row['type']} {format_amount(row['amount'])} - {row['description']}"
-            )
+            lines.append(movement_history_line(row))
         return "\n".join(lines)
 
 
