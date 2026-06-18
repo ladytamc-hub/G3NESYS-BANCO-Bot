@@ -34,6 +34,9 @@ from ..services.notifications import send_dm_safe
 from ..utils import normalize_key, parse_channel_id, parse_int_amount, utc_now_iso
 
 
+MAX_ACTIVITY_ROLES = 15
+
+
 def parse_role_lines(raw: str) -> list[dict]:
     roles: list[dict] = []
     for position, raw_line in enumerate(raw.splitlines(), start=1):
@@ -41,21 +44,52 @@ def parse_role_lines(raw: str) -> list[dict]:
         if not line:
             continue
         emoji = ""
+        name = ""
+        slots = 0
         if "|" in line:
             parts = [part.strip() for part in line.split("|")]
-            name = parts[0]
-            slots = int(parts[1]) if len(parts) > 1 and parts[1].isdigit() else 1
-            emoji = parts[2] if len(parts) > 2 else ""
-        else:
-            match = re.match(r"(.+?)(?::|-)\s*(\d+)$", line)
-            if match:
-                name = match.group(1).strip()
-                slots = int(match.group(2))
+            if len(parts) == 3 and parts[2].isdigit():
+                emoji, name, slots_raw = parts
+            elif len(parts) in {2, 3} and parts[1].isdigit():
+                # Compatibilidad con plantillas escritas como nombre|cantidad|emoji.
+                name, slots_raw = parts[:2]
+                emoji = parts[2] if len(parts) == 3 else ""
             else:
-                name = line
-                slots = 1
+                raise ValueError(
+                    f"Linea {position}: usa Emoji | Rol/arma | Cantidad. "
+                    "Ejemplo: 🌾 | Falce | 2"
+                )
+            slots = int(slots_raw)
+        else:
+            equals_match = re.fullmatch(r"(.+?)\s*=\s*(\d+)", line)
+            if equals_match:
+                name_part = equals_match.group(1).strip()
+                slots = int(equals_match.group(2))
+                first_part, separator, remaining = name_part.partition(" ")
+                if separator and (
+                    first_part.startswith(("<:", "<a:"))
+                    or not any(character.isalnum() for character in first_part)
+                ):
+                    emoji = first_part
+                    name = remaining.strip()
+                else:
+                    name = name_part
+            else:
+                legacy_match = re.fullmatch(r"(.+?)(?::|-)\s*(\d+)", line)
+                if legacy_match:
+                    name = legacy_match.group(1).strip()
+                    slots = int(legacy_match.group(2))
+                else:
+                    raise ValueError(
+                        f"Linea {position}: falta la cantidad requerida. "
+                        "Ejemplo: 🌾 | Falce | 2"
+                    )
+        name = name.strip()
+        emoji = emoji.strip()
+        if not name:
+            raise ValueError(f"Linea {position}: escribe el nombre del rol o arma.")
         if slots <= 0:
-            raise ValueError("Los cupos deben ser mayores que cero.")
+            raise ValueError(f"Linea {position}: la cantidad debe ser mayor que cero.")
         roles.append(
             {
                 "key": normalize_key(name),
@@ -67,6 +101,11 @@ def parse_role_lines(raw: str) -> list[dict]:
         )
     if not roles:
         raise ValueError("Debes agregar al menos un rol o arma.")
+    if len(roles) > MAX_ACTIVITY_ROLES:
+        raise ValueError(f"Puedes configurar hasta {MAX_ACTIVITY_ROLES} roles o armas por actividad.")
+    keys = [role["key"] for role in roles]
+    if len(keys) != len(set(keys)):
+        raise ValueError("No puedes repetir el mismo nombre de rol o arma.")
     return roles
 
 
@@ -105,9 +144,9 @@ class TemplateModal(discord.ui.Modal, title="Crear plantilla"):
     activity_name = discord.ui.TextInput(label="Nombre base de actividad", max_length=100)
     default_time = discord.ui.TextInput(label="Horario base", max_length=40)
     roles = discord.ui.TextInput(
-        label="Roles/armas",
+        label="Emoji | rol/arma | cantidad",
         style=discord.TextStyle.paragraph,
-        placeholder="Falce|1|<:falce:123>\nHealer|1\nDPS Rango|2",
+        placeholder="🌾 | Falce | 2\n🔮 | Prisma | 2\n🛡️ | Tanque | 1",
         max_length=1800,
     )
 
@@ -160,9 +199,9 @@ class ActivityModal(discord.ui.Modal):
         self.roles = None
         if template_id is None:
             self.roles = discord.ui.TextInput(
-                label="Roles/armas",
+                label="Emoji | rol/arma | cantidad",
                 style=discord.TextStyle.paragraph,
-                placeholder="Falce|1|<:falce:123>\nHealer|1\nDPS Rango|2",
+                placeholder="🌾 | Falce | 2\n🔮 | Prisma | 2\n🛡️ | Tanque | 1",
                 max_length=1800,
             )
             self.add_item(self.roles)
@@ -360,12 +399,17 @@ class ActivityView(discord.ui.View):
         status = activity["status"] if activity else ACTIVITY_CANCELLED
         role_disabled = status not in {ACTIVITY_OPEN, ACTIVITY_NOTICE}
         for index, row in enumerate(roles[:15]):
+            current = int(row["participant_count"])
+            slots = int(row["slots"])
+            counter = f" [{current}/{slots}]"
+            role_name = str(row["name"])
+            label = f"{role_name[:80 - len(counter)]}{counter}"
             button = discord.ui.Button(
-                label=row["name"][:80],
+                label=label,
                 style=discord.ButtonStyle.secondary,
                 custom_id=f"g3n:activity:role:{activity_id}:{row['id']}",
                 row=index // 5,
-                disabled=role_disabled,
+                disabled=role_disabled or current >= slots,
             )
             if row["emoji"]:
                 try:
@@ -529,11 +573,25 @@ class PayoutEditView(discord.ui.View):
         if payout is None:
             await private_response(interaction, "No encontre ese reparto.")
             return
-        if int(payout["caller_id"]) != interaction.user.id and interaction.guild is None:
-            await private_response(interaction, "Solo el caller puede editar este reparto desde DM.")
+        is_admin = interaction.guild is not None and is_admin_subject(self.cog.db, interaction)
+        if int(payout["caller_id"]) != interaction.user.id and not is_admin:
+            await private_response(interaction, "Solo el caller del reparto o un admin puede editarlo.")
             return
         await interaction.response.send_modal(
             PayoutPercentModal(self.cog, self.guild_id, self.payout_code)
+        )
+
+    @discord.ui.button(
+        label="Enviar a revision",
+        emoji="📤",
+        style=discord.ButtonStyle.success,
+        custom_id="g3n:payout:send_review",
+    )
+    async def send_review(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
+        await self.cog.send_payout_to_review_interaction(
+            interaction,
+            self.guild_id,
+            self.payout_code,
         )
 
 
@@ -541,6 +599,7 @@ class Activities(commands.Cog):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
         self.db = bot.db
+        self._activity_messages_refreshed = False
 
     async def cog_load(self) -> None:
         self.bot.add_view(PingsPanelView(self))
@@ -556,6 +615,22 @@ class Activities(commands.Cog):
             self.bot.add_view(ActivityView(self, int(row["id"])))
             if row["status"] == ACTIVITY_IN_PROGRESS:
                 self.bot.add_view(ConfirmAttendanceView(self, int(row["id"])))
+
+    @commands.Cog.listener()
+    async def on_ready(self) -> None:
+        if self._activity_messages_refreshed:
+            return
+        self._activity_messages_refreshed = True
+        active_rows = self.db.fetch_all(
+            """
+            SELECT id
+            FROM activities
+            WHERE status IN (?, ?, ?, ?) AND message_id IS NOT NULL
+            """,
+            (ACTIVITY_OPEN, ACTIVITY_NOTICE, ACTIVITY_IN_PROGRESS, ACTIVITY_FINISHED),
+        )
+        for row in active_rows:
+            await self.update_activity_message(int(row["id"]))
 
     @commands.command(name="panel_pings")
     async def panel_pings(self, ctx: commands.Context) -> None:
@@ -752,7 +827,14 @@ class Activities(commands.Cog):
 
     def get_activity_roles(self, activity_id: int):
         return self.db.fetch_all(
-            "SELECT * FROM activity_roles WHERE activity_id = ? ORDER BY position ASC",
+            """
+            SELECT r.*, COUNT(p.id) AS participant_count
+            FROM activity_roles r
+            LEFT JOIN activity_participants p ON p.role_id = r.id
+            WHERE r.activity_id = ?
+            GROUP BY r.id
+            ORDER BY r.position ASC
+            """,
             (activity_id,),
         )
 
@@ -810,7 +892,14 @@ class Activities(commands.Cog):
                     role["position"],
                 ),
             )
-        await private_response(interaction, f"Plantilla guardada con {len(roles)} roles.")
+        preview = "\n".join(
+            f"{role['emoji']} **{role['name']}** [0/{role['slots']}]".strip()
+            for role in roles
+        )
+        await private_response(
+            interaction,
+            f"Plantilla guardada con {len(roles)} roles:\n\n{preview}",
+        )
 
     async def publish_activity_from_modal(
         self,
@@ -941,7 +1030,7 @@ class Activities(commands.Cog):
         for role in roles:
             names = by_role.get(int(role["id"]), [])
             value = "\n".join(f"• {name}" for name in names) if names else "• Vacio"
-            header = f"{role['emoji'] or ''} {role['name']} ({len(names)}/{role['slots']})".strip()
+            header = f"{role['emoji'] or ''} {role['name']} [{len(names)}/{role['slots']}]".strip()
             embed.add_field(name=header[:256], value=value[:1024], inline=True)
         embed.set_footer(text="Los avisos y respuestas se envian por DM o mensajes privados.")
         return embed
@@ -1013,7 +1102,10 @@ class Activities(commands.Cog):
             (activity_id, role_id, interaction.user.id),
         )
         if int(count_row["total"]) >= int(role["slots"]):
-            await interaction.followup.send("Ese rol ya no tiene cupo.", ephemeral=True)
+            await interaction.followup.send(
+                f"**{role['name']}** ya esta completo [{role['slots']}/{role['slots']}].",
+                ephemeral=True,
+            )
             return
         self.db.execute(
             """
@@ -1219,14 +1311,35 @@ class Activities(commands.Cog):
         if not activity:
             await private_response(interaction, "No encontre esta actividad.")
             return
+        if activity["status"] != ACTIVITY_IN_PROGRESS:
+            await private_response(interaction, "El check de esta actividad ya no esta disponible.")
+            return
+        participant = self.db.fetch_one(
+            "SELECT 1 FROM activity_participants WHERE activity_id = ? AND user_id = ?",
+            (activity_id, interaction.user.id),
+        )
+        if participant is None:
+            await private_response(interaction, "No estas registrado en esta actividad.")
+            return
         guild = self.bot.get_guild(int(activity["guild_id"]))
-        confirm_voice = 0
-        if guild is not None and activity["voice_channel_id"]:
-            member = guild.get_member(interaction.user.id)
-            if member and member.voice and member.voice.channel:
-                confirm_voice = 1 if member.voice.channel.id == int(activity["voice_channel_id"]) else 0
-        has_voice_channel = bool(activity["voice_channel_id"])
-        status = ATTENDANCE_CONFIRMED if confirm_voice or not has_voice_channel else ATTENDANCE_ABSENT
+        member = guild.get_member(interaction.user.id) if guild is not None else None
+        if member is None or member.voice is None or member.voice.channel is None:
+            await private_response(
+                interaction,
+                "Debes estar conectado a un canal de voz para confirmar. "
+                "Entra a voz y vuelve a pulsar **Aqui estoy**.",
+            )
+            return
+        if (
+            activity["voice_channel_id"]
+            and member.voice.channel.id != int(activity["voice_channel_id"])
+        ):
+            await private_response(
+                interaction,
+                f"Debes estar en <#{activity['voice_channel_id']}> para confirmar. "
+                "Entra al canal y vuelve a pulsar **Aqui estoy**.",
+            )
+            return
         self.db.execute(
             """
             INSERT INTO asistencia_actividades (
@@ -1239,16 +1352,15 @@ class Activities(commands.Cog):
                           confirmo_voz = excluded.confirmo_voz,
                           fecha_check = excluded.fecha_check
             """,
-            (activity_id, interaction.user.id, status, confirm_voice, utc_now_iso()),
+            (
+                activity_id,
+                interaction.user.id,
+                ATTENDANCE_CONFIRMED,
+                1,
+                utc_now_iso(),
+            ),
         )
-        if status == ATTENDANCE_CONFIRMED:
-            await private_response(interaction, "Asistencia confirmada.")
-        else:
-            await private_response(
-                interaction,
-                "Recibi tu boton, pero no estas en el canal de voz configurado. "
-                "La asistencia quedo como ausente.",
-            )
+        await private_response(interaction, "Asistencia confirmada.")
 
     async def finish_activity(self, interaction: discord.Interaction, activity_id: int) -> None:
         activity = self.get_activity(activity_id)
@@ -1440,11 +1552,11 @@ class Activities(commands.Cog):
             (ACTIVITY_PAYOUT_CREATED, activity_id),
         )
         await self.update_activity_message(activity_id)
-        await self.send_payout_to_admins(interaction.guild, payout_id)
         dm_content = (
             f"💰 **Reparto preliminar creado:** `{code}`\n\n"
             "Todos los participantes confirmados quedaron con **100%** por defecto.\n"
-            "Usa el boton **Editar %** para ajustar casos como 10%, 50%, etc.\n\n"
+            "Usa el boton **Editar %** para ajustar casos como 10%, 50%, etc.\n"
+            "Cuando este listo, presiona **Enviar a revision**.\n\n"
             f"{self.payout_participants_text(interaction.guild.id, code)}"
         )
         sent = await send_dm_safe(
@@ -1572,32 +1684,73 @@ class Activities(commands.Cog):
             view=PayoutEditView(self, guild_id, code),
         )
 
-    async def send_payout_to_admins(self, guild: discord.Guild, payout_id: int) -> None:
+    async def send_payout_to_review_interaction(
+        self,
+        interaction: discord.Interaction,
+        guild_id: int,
+        code: str,
+    ) -> None:
+        payout = self.get_payout_by_code(guild_id, code)
+        if payout is None:
+            await private_response(interaction, "No encontre ese reparto.")
+            return
+        is_admin = interaction.guild is not None and is_admin_subject(self.db, interaction)
+        if int(payout["caller_id"]) != interaction.user.id and not is_admin:
+            await private_response(interaction, "Solo el caller del reparto o un admin puede enviarlo a revision.")
+            return
+        if payout["status"] != PAYOUT_PENDING:
+            await private_response(interaction, "Ese reparto ya no esta pendiente.")
+            return
+        if payout["sent_to_admin_at"]:
+            await private_response(interaction, f"El reparto `{code}` ya fue enviado a revision.")
+            return
+        guild = self.bot.get_guild(guild_id)
+        if guild is None:
+            await private_response(interaction, "No pude encontrar el servidor para enviar el reparto.")
+            return
+        sent = await self.send_payout_to_admins(guild, int(payout["id"]))
+        if not sent:
+            await private_response(interaction, "No encontre canal de repartos/admins configurado.")
+            return
+        self.db.execute(
+            "UPDATE payouts SET sent_to_admin_at = ? WHERE id = ?",
+            (utc_now_iso(), int(payout["id"])),
+        )
+        await private_response(interaction, f"📤 Reparto `{code}` enviado a revision admin.")
+
+    async def send_payout_to_admins(self, guild: discord.Guild, payout_id: int) -> bool:
         payout = self.db.fetch_one("SELECT * FROM payouts WHERE id = ?", (payout_id,))
         channel_id = self.db.get_setting(guild.id, "channel_repartos_id") or self.db.get_setting(
             guild.id,
             "channel_admin_id",
         )
         if not channel_id:
-            return
+            return False
         channel = guild.get_channel(int(channel_id))
         if channel is None:
-            return
-        embed = discord.Embed(
-            title=f"📋 Reparto pendiente {payout['code']}",
-            description="Requiere revision y aprobacion admin antes de depositar saldos.",
-            color=discord.Color.gold(),
-        )
-        embed.add_field(name="Loot bruto", value=f"{payout['gross_loot']:,}".replace(",", "."))
-        embed.add_field(name="Aporte gremial", value=f"{payout['guild_amount']:,}".replace(",", "."))
-        embed.add_field(name="Monto repartible", value=f"{payout['distributable']:,}".replace(",", "."))
-        embed.add_field(
-            name="Participantes confirmados",
-            value=self.payout_participants_text(guild.id, payout["code"])[:1024],
-            inline=False,
-        )
-        embed.set_image(url=ADMIN_PANEL_IMAGE)
-        await channel.send(embed=embed)
+            return False
+        admin_cog = self.bot.get_cog("Admin")
+        if admin_cog and hasattr(admin_cog, "build_payout_review_embed"):
+            embed = admin_cog.build_payout_review_embed(guild.id, payout["code"])
+            view = admin_cog.build_payout_review_view(payout["code"])
+        else:
+            embed = discord.Embed(
+                title=f"📋 Reparto pendiente {payout['code']}",
+                description="Requiere revision y aprobacion admin antes de depositar saldos.",
+                color=discord.Color.gold(),
+            )
+            embed.add_field(name="Loot bruto", value=f"{payout['gross_loot']:,}".replace(",", "."))
+            embed.add_field(name="Aporte gremial", value=f"{payout['guild_amount']:,}".replace(",", "."))
+            embed.add_field(name="Monto repartible", value=f"{payout['distributable']:,}".replace(",", "."))
+            embed.add_field(
+                name="Participantes confirmados",
+                value=self.payout_participants_text(guild.id, payout["code"])[:1024],
+                inline=False,
+            )
+            embed.set_image(url=ADMIN_PANEL_IMAGE)
+            view = None
+        await channel.send(embed=embed, view=view)
+        return True
 
     def ensure_penalty_for_user(self, guild_id: int, user_id: int) -> str | None:
         active = self.db.fetch_one(

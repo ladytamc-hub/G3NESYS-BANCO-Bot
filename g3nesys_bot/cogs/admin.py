@@ -248,6 +248,88 @@ class FineAdminView(discord.ui.View):
             await private_response(interaction, self.cog.pending_fines_text(interaction.guild.id))
 
 
+class PayoutReasonModal(discord.ui.Modal):
+    reason = discord.ui.TextInput(label="Motivo", style=discord.TextStyle.paragraph, max_length=600)
+
+    def __init__(self, cog: "Admin", code: str, target_status: str):
+        title = "Rechazar reparto" if target_status == PAYOUT_REJECTED else "Solicitar correccion"
+        super().__init__(title=title, timeout=180)
+        self.cog = cog
+        self.code = code
+        self.target_status = target_status
+
+    async def on_submit(self, interaction: discord.Interaction) -> None:
+        if not is_admin_subject(self.cog.db, interaction):
+            await private_response(interaction, "Solo admins autorizados pueden hacer esto.")
+            return
+        try:
+            await self.cog.update_payout_status(
+                interaction.guild,
+                self.code,
+                self.target_status,
+                interaction.user.id,
+                str(self.reason.value),
+            )
+        except ValueError as exc:
+            await private_response(interaction, str(exc))
+            return
+        label = "rechazado" if self.target_status == PAYOUT_REJECTED else "marcado para correccion"
+        await private_response(interaction, f"Reparto `{self.code}` {label}.")
+
+
+class PayoutReviewView(discord.ui.View):
+    def __init__(self, cog: "Admin", code: str):
+        super().__init__(timeout=None)
+        self.cog = cog
+        self.code = code
+        self.add_button("Aprobar", "approve", "✅", discord.ButtonStyle.success)
+        self.add_button("Rechazar", "reject", "❌", discord.ButtonStyle.danger)
+        self.add_button("Corregir", "correction", "🛠️", discord.ButtonStyle.secondary)
+        self.add_button("Ver detalle", "detail", "📋", discord.ButtonStyle.primary)
+
+    def add_button(self, label: str, action: str, emoji: str, style: discord.ButtonStyle) -> None:
+        button = discord.ui.Button(
+            label=label,
+            emoji=emoji,
+            style=style,
+            custom_id=f"g3n:admin:payout:{action}:{self.code}",
+        )
+        button.callback = self.handle_button
+        self.add_item(button)
+
+    async def handle_button(self, interaction: discord.Interaction) -> None:
+        if not is_admin_subject(self.cog.db, interaction):
+            await private_response(interaction, "Solo admins autorizados pueden revisar repartos.")
+            return
+        custom_id = str(interaction.data["custom_id"])
+        action = custom_id.split(":")[3]
+        if action == "approve":
+            await private_response(
+                interaction,
+                f"¿Confirmas esta operacion?\nAprobar reparto `{self.code}` y depositar saldos.",
+                view=ConfirmAdminActionView(
+                    self.cog,
+                    admin_id=interaction.user.id,
+                    action="approve_payout",
+                    payload={"code": self.code},
+                ),
+            )
+            return
+        if action == "reject":
+            await interaction.response.send_modal(PayoutReasonModal(self.cog, self.code, PAYOUT_REJECTED))
+            return
+        if action == "correction":
+            await interaction.response.send_modal(PayoutReasonModal(self.cog, self.code, PAYOUT_CORRECTION))
+            return
+        if action == "detail":
+            await dm_or_private(
+                self.cog,
+                interaction,
+                self.cog.payout_detail_text(interaction.guild.id, self.code),
+                "detalle_reparto_admin",
+            )
+
+
 class AdminPanelView(discord.ui.View):
     def __init__(self, cog: "Admin"):
         super().__init__(timeout=None)
@@ -341,6 +423,45 @@ class Admin(commands.Cog):
 
     async def cog_load(self) -> None:
         self.bot.add_view(AdminPanelView(self))
+        rows = self.db.fetch_all(
+            """
+            SELECT code
+            FROM payouts
+            WHERE status = ? AND sent_to_admin_at IS NOT NULL
+            """,
+            (PAYOUT_PENDING,),
+        )
+        for row in rows:
+            self.bot.add_view(PayoutReviewView(self, row["code"]))
+
+    def build_payout_review_view(self, code: str) -> PayoutReviewView:
+        return PayoutReviewView(self, code)
+
+    def build_payout_review_embed(self, guild_id: int, code: str) -> discord.Embed:
+        payout = self.db.fetch_one(
+            "SELECT * FROM payouts WHERE guild_id = ? AND code = ?",
+            (guild_id, code),
+        )
+        embed = discord.Embed(
+            title=f"📋 Reparto pendiente {code}",
+            description="Revisa el reparto y usa los botones para aprobar, rechazar o pedir correccion.",
+            color=discord.Color.gold(),
+        )
+        if payout is None:
+            embed.description = "No encontre los datos de este reparto."
+            return embed
+        embed.add_field(name="Caller", value=f"<@{payout['caller_id']}>", inline=True)
+        embed.add_field(name="Loot bruto", value=format_amount(payout["gross_loot"]), inline=True)
+        embed.add_field(name="Aporte gremial", value=format_amount(payout["guild_amount"]), inline=True)
+        embed.add_field(name="Monto repartible", value=format_amount(payout["distributable"]), inline=True)
+        embed.add_field(name="Estado", value=payout["status"], inline=True)
+        embed.add_field(
+            name="Participantes",
+            value=self.payout_detail_text(guild_id, code, compact=True)[:1024],
+            inline=False,
+        )
+        embed.set_image(url=ADMIN_PANEL_IMAGE)
+        return embed
 
     @commands.command(name="panel_admin")
     async def panel_admin(self, ctx: commands.Context) -> None:
@@ -1024,7 +1145,7 @@ class Admin(commands.Cog):
             """
             SELECT code, caller_id, distributable, guild_amount, status
             FROM payouts
-            WHERE guild_id = ? AND status = ?
+            WHERE guild_id = ? AND status = ? AND sent_to_admin_at IS NOT NULL
             ORDER BY id DESC LIMIT 15
             """,
             (guild_id, PAYOUT_PENDING),
@@ -1038,7 +1159,47 @@ class Admin(commands.Cog):
                 f"Repartible {format_amount(row['distributable'])} "
                 f"Aporte {format_amount(row['guild_amount'])}"
             )
-        lines.append("Comandos: `!aprobar_reparto CODIGO`, `!rechazar_reparto CODIGO motivo`, `!corregir_reparto CODIGO motivo`.")
+        lines.append("Usa los botones del mensaje de revision para aprobar, rechazar o pedir correccion.")
+        return "\n".join(lines)
+
+    def payout_detail_text(self, guild_id: int, code: str, *, compact: bool = False) -> str:
+        payout = self.db.fetch_one(
+            "SELECT * FROM payouts WHERE guild_id = ? AND code = ?",
+            (guild_id, code),
+        )
+        if payout is None:
+            return "No encontre ese reparto."
+        rows = self.db.fetch_all(
+            """
+            SELECT user_id, participation_percent, amount
+            FROM payout_participants
+            WHERE payout_id = ?
+            ORDER BY id ASC
+            """,
+            (int(payout["id"]),),
+        )
+        if compact:
+            if not rows:
+                return "Sin participantes."
+            return "\n".join(
+                f"• <@{row['user_id']}> - {row['participation_percent']}% - {format_amount(row['amount'])}"
+                for row in rows
+            )
+        lines = [
+            f"📋 **Detalle de reparto {code}**",
+            f"Caller: <@{payout['caller_id']}>",
+            f"Loot bruto: {format_amount(payout['gross_loot'])}",
+            f"Aporte gremial: {format_amount(payout['guild_amount'])}",
+            f"Monto repartible: {format_amount(payout['distributable'])}",
+            "",
+            "**Participantes**",
+        ]
+        if not rows:
+            lines.append("Sin participantes.")
+        for row in rows:
+            lines.append(
+                f"• <@{row['user_id']}> - {row['participation_percent']}% - {format_amount(row['amount'])}"
+            )
         return "\n".join(lines)
 
     def history_text(self, guild_id: int) -> str:

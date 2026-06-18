@@ -27,7 +27,16 @@ class Database:
     def init_schema(self) -> None:
         with self._lock:
             self._conn.executescript(SCHEMA)
+            self._apply_migrations()
             self._conn.commit()
+
+    def _apply_migrations(self) -> None:
+        payout_columns = {
+            row["name"]
+            for row in self._conn.execute("PRAGMA table_info(payouts)").fetchall()
+        }
+        if "sent_to_admin_at" not in payout_columns:
+            self._conn.execute("ALTER TABLE payouts ADD COLUMN sent_to_admin_at TEXT")
 
     def execute(self, query: str, params: Iterable = ()) -> int:
         with self._lock:
@@ -293,6 +302,7 @@ CREATE TABLE IF NOT EXISTS payouts (
     distributable INTEGER NOT NULL DEFAULT 0,
     notes TEXT,
     created_at TEXT NOT NULL,
+    sent_to_admin_at TEXT,
     reviewed_by INTEGER,
     reviewed_at TEXT
 );

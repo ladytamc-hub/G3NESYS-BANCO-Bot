@@ -108,7 +108,8 @@ Cada comando se ejecuta en el canal que quieres configurar.
 - Los paneles quedan fijos y las respuestas de botones son privadas cuando Discord lo permite.
 - El caller crea actividades y genera reparto, pero no deposita saldos.
 - En actividades, "Mandar check" envia el check por DM y "Verificar asistencia" manda al caller la lista de quienes dieron check.
-- Al generar reparto, el caller recibe por DM la lista de participantes confirmados con 100% de participacion por defecto y un boton para editar porcentajes.
+- Al generar reparto, el caller recibe por DM la lista de participantes confirmados con 100% de participacion por defecto, puede editar porcentajes y luego enviarlo a revision con boton.
+- Los repartos llegan a admins con botones para aprobar, rechazar, pedir correccion y ver detalle.
 - El admin aprueba repartos y liquida cobros.
 - Si el usuario confirma asistencia pero no esta en el canal de voz configurado, queda ausente.
 - La multa automatica por inasistencia solo se genera para ausentes y solo si esta activada.
@@ -158,10 +159,15 @@ Cada comando se ejecuta en el canal que quieres configurar.
 En el modal de crear plantilla o crear actividad:
 
 ```text
-Falce|1|<:falce:123456789>
-Juradores|1|<:juradores:123456789>
-Healer|1
-DPS Rango|2
+🌾 | Falce | 2
+🔮 | Prisma | 2
+🛡️ | Tanque | 1
 ```
 
-El emoji es opcional. Lo recomendado es usar emojis personalizados del servidor.
+El orden es `emoji | nombre del rol o arma | cantidad requerida`. El emoji es
+opcional y tambien puedes pegar un emoji personalizado del servidor. El ping
+mostrara el avance como `Falce [0/2]` y bloqueara el boton al llegar a `[2/2]`.
+
+Cuando el caller mande el check, **Aqui estoy** solo confirmara a usuarios
+conectados al canal de voz configurado. Si la actividad no tiene un canal
+especifico, el usuario debe estar conectado a cualquier canal de voz.

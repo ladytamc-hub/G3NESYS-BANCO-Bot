@@ -14,16 +14,121 @@ class Settings(commands.Cog):
 
     @commands.command(name="ayuda_g3n")
     async def ayuda_g3n(self, ctx: commands.Context) -> None:
+        await self.send_help(ctx)
+
+    @commands.command(name="ayuda", aliases=["help", "comandos"])
+    async def ayuda(self, ctx: commands.Context) -> None:
+        await self.send_help(ctx)
+
+    async def send_help(self, ctx: commands.Context) -> None:
+        sections = [
+            (
+                "📌 Paneles",
+                [
+                    "`!panel_pings` - Publica panel de actividades.",
+                    "`!panel_banco` - Publica panel bancario.",
+                    "`!panel_admin` - Publica panel administrativo.",
+                ],
+            ),
+            (
+                "⚙️ Configuracion",
+                [
+                    "`!config_ver` - Muestra configuracion basica.",
+                    "`!canal_pings_set` - Canal oficial de actividades.",
+                    "`!canal_admin_set` - Canal admin.",
+                    "`!canal_cobros_set` - Canal de cobros.",
+                    "`!canal_multas_set` - Canal de multas.",
+                    "`!canal_historial_set` - Canal historial.",
+                    "`!canal_repartos_set` - Canal de repartos.",
+                    "`!admin_role_set @rol` - Autoriza rol admin.",
+                    "`!caller_set @usuario` - Autoriza caller.",
+                    "`!caller_remove @usuario` - Quita caller.",
+                    "`!economia_set clave valor` - Ajusta economia.",
+                    "`!roles_banco_set \"MIEMBRO G3NESYS\" INVITADO` - Roles banco.",
+                    "`!diagnostico` - Muestra ruta de base de datos y estado tecnico.",
+                ],
+            ),
+            (
+                "⚔️ Actividades",
+                [
+                    "`!penalizaciones` - Lista penalizados.",
+                    "`!penalizacion_remove @usuario motivo` - Quita penalizacion.",
+                    "`!reparto_participantes REP-000001` - Lista participantes.",
+                    "`!reparto_participacion REP-000001 @usuario 10` - Edita porcentaje.",
+                    "`!reparto_agregar REP-000001 @usuario 100` - Agrega participante.",
+                    "`!reparto_quitar REP-000001 @usuario` - Quita participante.",
+                ],
+            ),
+            (
+                "🚨 Multas",
+                [
+                    "`!crear_multa @usuario monto motivo` - Crea multa manual.",
+                    "`!cancelar_multa MULTA-000001 motivo` - Cancela multa.",
+                    "`!mis_multas` - Consulta tus multas.",
+                    "`!mis_multas @usuario` - Admin consulta multas de usuario.",
+                    "`!pagar_multa MULTA-000001` - Paga multa con saldo.",
+                ],
+            ),
+            (
+                "🏦 Banco",
+                [
+                    "`!saldo` - Consulta saldo.",
+                    "`!estado_cuenta` - Estado de cuenta.",
+                    "`!transferir @usuario monto` - Transferencia miembro a miembro.",
+                    "`!cobrar monto motivo` - Solicita cobro.",
+                ],
+            ),
+            (
+                "💰 Administracion",
+                [
+                    "`!tesoreria` - Ver tesoreria.",
+                    "`!registrar_ingreso monto categoria descripcion` - Ingreso gremial.",
+                    "`!registrar_egreso monto categoria descripcion` - Egreso gremial.",
+                    "`!depositar_usuario @usuario monto disponible motivo` - Deposito admin.",
+                    "`!aprobar_cobro COBRO-000001` - Aprueba cobro.",
+                    "`!rechazar_cobro COBRO-000001 motivo` - Rechaza cobro.",
+                    "`!liquidar_cobro COBRO-000001 monto` - Liquida cobro.",
+                    "`!aprobar_reparto REP-000001` - Aprueba reparto.",
+                    "`!rechazar_reparto REP-000001 motivo` - Rechaza reparto.",
+                    "`!corregir_reparto REP-000001 motivo` - Pide correccion.",
+                    "`!reporte_excel` - Exporta reporte Excel.",
+                ],
+            ),
+        ]
+        chunks: list[str] = []
+        current = ["**📖 Ayuda G3NESYS Bot**"]
+        for title, lines in sections:
+            block = ["", f"**{title}**", *lines]
+            if len("\n".join(current + block)) > 1800:
+                chunks.append("\n".join(current))
+                current = [f"**📖 Ayuda G3NESYS Bot (cont.)**", *block]
+            else:
+                current.extend(block)
+        chunks.append("\n".join(current))
+
+        try:
+            for chunk in chunks:
+                await ctx.author.send(chunk)
+            await ctx.reply("Te envie la ayuda completa por DM.", mention_author=False)
+        except discord.HTTPException:
+            for chunk in chunks:
+                await ctx.reply(chunk, mention_author=False)
+
+    @commands.command(name="diagnostico")
+    async def diagnostico(self, ctx: commands.Context) -> None:
+        if not await require_admin_context(ctx, self.db):
+            return
+        db_path = self.db.path.resolve()
+        exists = db_path.exists()
+        size = db_path.stat().st_size if exists else 0
         await ctx.reply(
             "\n".join(
                 [
-                    "**G3NESYS Bot**",
-                    "`!panel_pings` publica el panel de actividades.",
-                    "`!panel_banco` publica el panel bancario.",
-                    "`!panel_admin` publica el panel administrativo.",
-                    "`!caller_set @usuario` autoriza callers.",
-                    "`!canal_pings_set` configura el canal actual como canal de pings.",
-                    "`!config_ver` muestra configuracion basica.",
+                    "**🔍 Diagnostico G3NESYS**",
+                    f"Base de datos: `{db_path}`",
+                    f"Existe: `{exists}`",
+                    f"Tamaño: `{size}` bytes",
+                    f"Bot conectado como: `{self.bot.user}`",
                 ]
             ),
             mention_author=False,

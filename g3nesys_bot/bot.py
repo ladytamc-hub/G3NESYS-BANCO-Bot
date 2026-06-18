@@ -25,6 +25,7 @@ class G3NBot(commands.Bot):
             command_prefix=self.config.command_prefix,
             intents=intents,
             help_command=None,
+            case_insensitive=True,
         )
         self.db = Database(self.config.database_path)
         self.backup_task: asyncio.Task | None = None
@@ -48,7 +49,14 @@ class G3NBot(commands.Bot):
         LOGGER.info("Bot conectado como %s", self.user)
 
     async def on_command_error(self, ctx: commands.Context, error: Exception) -> None:
+        if isinstance(error, commands.CommandInvokeError) and isinstance(
+            error.original,
+            commands.CommandNotFound,
+        ):
+            return
         if isinstance(error, commands.CommandNotFound):
+            return
+        if "Command " in str(error) and " is not found" in str(error):
             return
         if isinstance(error, commands.MissingRequiredArgument):
             await ctx.reply(
