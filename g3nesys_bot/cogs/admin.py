@@ -41,10 +41,36 @@ from ..services.economy import (
     register_guild_income,
 )
 from ..services.fines import cancel_fine, create_fine
-from ..services.notifications import send_admin_notification, send_dm_safe
+from ..services.notifications import (
+    ADMIN_CHANNEL_SETTINGS,
+    send_admin_notification,
+    send_dm_safe,
+)
 from ..services.payout_audit import log_payout_action, payout_audit_text
 from ..services.reports import create_admin_report
 from ..utils import format_amount, parse_channel_id, parse_int_amount, utc_now_iso
+
+
+NOTIFICATION_CHANNEL_CATEGORIES = (
+    ("splits", "Splits pendientes por aprobar", "📋"),
+    ("withdrawals", "Solicitudes de cobro", "💳"),
+    ("registration", "Registro", "📝"),
+    ("activities", "Actividades con validación admin", "⚔️"),
+    ("fines", "Multas o sanciones", "🚨"),
+    ("general_admin", "Otras notificaciones admin", "🔔"),
+)
+NOTIFICATION_CATEGORY_MAP = {
+    category: (label, emoji)
+    for category, label, emoji in NOTIFICATION_CHANNEL_CATEGORIES
+}
+
+
+def normalize_admin_message(value: str | None) -> str:
+    return (value or "").strip()[:600]
+
+
+def admin_message_block(message: str) -> str:
+    return f"\n\n**Indicaciones del admin:**\n{message}" if message else ""
 
 
 async def private_response(interaction: discord.Interaction, content: str, **kwargs) -> None:
@@ -152,6 +178,13 @@ class UserStatementModal(discord.ui.Modal, title="Estado de cuenta"):
 
 class ApproveWithdrawalModal(discord.ui.Modal, title="Aprobar cobro"):
     code = discord.ui.TextInput(label="Codigo de cobro", placeholder="COBRO-000001")
+    admin_message = discord.ui.TextInput(
+        label="Indicaciones para el usuario (opcional)",
+        required=False,
+        style=discord.TextStyle.paragraph,
+        max_length=600,
+        placeholder="Ej.: Te pago en la isla de Martlock a las 00 UTC.",
+    )
 
     def __init__(self, cog: "Admin"):
         super().__init__(timeout=180)
@@ -163,7 +196,12 @@ class ApproveWithdrawalModal(discord.ui.Modal, title="Aprobar cobro"):
             return
         code = str(self.code.value).strip().upper()
         try:
-            await self.cog.approve_withdrawal(interaction.guild, code, interaction.user.id)
+            await self.cog.approve_withdrawal(
+                interaction.guild,
+                code,
+                interaction.user.id,
+                normalize_admin_message(str(self.admin_message.value)),
+            )
         except ValueError as exc:
             await private_response(interaction, str(exc))
             return
@@ -173,6 +211,13 @@ class ApproveWithdrawalModal(discord.ui.Modal, title="Aprobar cobro"):
 class LiquidateWithdrawalModal(discord.ui.Modal, title="Liquidar cobro"):
     code = discord.ui.TextInput(label="Codigo de cobro", placeholder="COBRO-000001")
     amount = discord.ui.TextInput(label="Monto a liquidar", placeholder="1000000")
+    admin_message = discord.ui.TextInput(
+        label="Indicaciones para el usuario (opcional)",
+        required=False,
+        style=discord.TextStyle.paragraph,
+        max_length=600,
+        placeholder="Ej.: Te pago en la isla de Martlock a las 00 UTC.",
+    )
 
     def __init__(self, cog: "Admin"):
         super().__init__(timeout=180)
@@ -189,6 +234,7 @@ class LiquidateWithdrawalModal(discord.ui.Modal, title="Liquidar cobro"):
                 str(self.code.value).strip().upper(),
                 amount,
                 interaction.user.id,
+                normalize_admin_message(str(self.admin_message.value)),
             )
         except ValueError as exc:
             await private_response(interaction, str(exc))
@@ -614,6 +660,184 @@ class SplitsAdminView(discord.ui.View):
             )
 
 
+class NotificationChannelConfigView(discord.ui.View):
+    def __init__(self, cog: "Admin", category: str):
+        super().__init__(timeout=300)
+        self.cog = cog
+        self.category = category
+        self.label = NOTIFICATION_CATEGORY_MAP[category][0]
+        self.setting_key = ADMIN_CHANNEL_SETTINGS[category][0]
+        self.channel_select = discord.ui.ChannelSelect(
+            placeholder=f"Selecciona canal para {self.label}"[:150],
+            channel_types=[discord.ChannelType.text, discord.ChannelType.news],
+            min_values=1,
+            max_values=1,
+            row=0,
+        )
+        self.channel_select.callback = self.select_channel
+        self.add_item(self.channel_select)
+
+    async def require_admin(self, interaction: discord.Interaction) -> bool:
+        if interaction.guild is not None and is_admin_subject(self.cog.db, interaction):
+            return True
+        await private_response(
+            interaction,
+            "Solo admins autorizados pueden configurar notificaciones.",
+        )
+        return False
+
+    async def save_channel(
+        self,
+        interaction: discord.Interaction,
+        channel_id: int,
+    ) -> None:
+        self.cog.db.set_setting(
+            interaction.guild.id,
+            self.setting_key,
+            str(channel_id),
+        )
+        log_action(
+            self.cog.db,
+            interaction.guild.id,
+            admin_id=interaction.user.id,
+            action="Configurar canal de notificaciones",
+            system="Configuracion",
+            observation=f"{self.category}: {channel_id}",
+        )
+        await private_response(
+            interaction,
+            (
+                f"Canal de **{self.label}** actualizado a <#{channel_id}>.\n\n"
+                f"{self.cog.notification_settings_text(interaction.guild.id)}"
+            ),
+        )
+
+    async def select_channel(self, interaction: discord.Interaction) -> None:
+        if not await self.require_admin(interaction):
+            return
+        channel = self.channel_select.values[0]
+        await self.save_channel(interaction, int(channel.id))
+
+    @discord.ui.button(
+        label="Usar canal actual",
+        emoji="📍",
+        style=discord.ButtonStyle.primary,
+        row=1,
+    )
+    async def use_current(
+        self,
+        interaction: discord.Interaction,
+        _: discord.ui.Button,
+    ) -> None:
+        if not await self.require_admin(interaction):
+            return
+        channel = interaction.channel
+        if channel is None or not callable(getattr(channel, "send", None)):
+            await private_response(interaction, "Este canal no admite notificaciones.")
+            return
+        await self.save_channel(interaction, int(channel.id))
+
+    @discord.ui.button(
+        label="Usar respaldo",
+        emoji="↩️",
+        style=discord.ButtonStyle.secondary,
+        row=1,
+    )
+    async def clear_specific(
+        self,
+        interaction: discord.Interaction,
+        _: discord.ui.Button,
+    ) -> None:
+        if not await self.require_admin(interaction):
+            return
+        self.cog.db.set_setting(interaction.guild.id, self.setting_key, "")
+        log_action(
+            self.cog.db,
+            interaction.guild.id,
+            admin_id=interaction.user.id,
+            action="Restaurar respaldo de notificaciones",
+            system="Configuracion",
+            observation=self.category,
+        )
+        await private_response(
+            interaction,
+            (
+                f"**{self.label}** volverá a usar su canal de respaldo.\n\n"
+                f"{self.cog.notification_settings_text(interaction.guild.id)}"
+            ),
+        )
+
+
+class NotificationCategorySelect(discord.ui.Select):
+    def __init__(self, cog: "Admin"):
+        self.cog = cog
+        super().__init__(
+            placeholder="Selecciona el tipo de notificación",
+            min_values=1,
+            max_values=1,
+            options=[
+                discord.SelectOption(
+                    label=label,
+                    value=category,
+                    emoji=emoji,
+                )
+                for category, label, emoji in NOTIFICATION_CHANNEL_CATEGORIES
+            ],
+        )
+
+    async def callback(self, interaction: discord.Interaction) -> None:
+        if interaction.guild is None or not is_admin_subject(self.cog.db, interaction):
+            await private_response(
+                interaction,
+                "Solo admins autorizados pueden configurar notificaciones.",
+            )
+            return
+        category = self.values[0]
+        label = NOTIFICATION_CATEGORY_MAP[category][0]
+        current = self.cog.db.get_setting(
+            interaction.guild.id,
+            ADMIN_CHANNEL_SETTINGS[category][0],
+        )
+        current_text = f"<#{current}>" if current else "sin canal específico"
+        await private_response(
+            interaction,
+            (
+                f"Configura **{label}**. Actualmente: {current_text}.\n"
+                "Selecciona un canal, usa el canal actual o restaura el respaldo."
+            ),
+            view=NotificationChannelConfigView(self.cog, category),
+        )
+
+
+class NotificationsAdminView(discord.ui.View):
+    def __init__(self, cog: "Admin"):
+        super().__init__(timeout=300)
+        self.cog = cog
+        self.add_item(NotificationCategorySelect(cog))
+
+    @discord.ui.button(
+        label="Ver configuración",
+        emoji="👁️",
+        style=discord.ButtonStyle.secondary,
+        row=1,
+    )
+    async def show_configuration(
+        self,
+        interaction: discord.Interaction,
+        _: discord.ui.Button,
+    ) -> None:
+        if interaction.guild is None or not is_admin_subject(self.cog.db, interaction):
+            await private_response(
+                interaction,
+                "Solo admins autorizados pueden ver las notificaciones.",
+            )
+            return
+        await private_response(
+            interaction,
+            self.cog.notification_settings_text(interaction.guild.id),
+        )
+
+
 class AdminPanelView(discord.ui.View):
     def __init__(self, cog: "Admin"):
         super().__init__(timeout=None)
@@ -733,6 +957,15 @@ class AdminPanelView(discord.ui.View):
     async def config(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
         if await self.require_admin(interaction):
             await private_response(interaction, "Usa `!config_ver`, comandos `!canal_*_set`, `!caller_set` y `!economia_set`.")
+
+    @discord.ui.button(label="Notificaciones", emoji="🔔", style=discord.ButtonStyle.primary, custom_id="g3n:admin:notifications", row=3)
+    async def notifications(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
+        if await self.require_admin(interaction):
+            await private_response(
+                interaction,
+                self.cog.notification_settings_text(interaction.guild.id),
+                view=NotificationsAdminView(self.cog),
+            )
 
 
 class Admin(commands.Cog):
@@ -1084,11 +1317,22 @@ class Admin(commands.Cog):
         )
 
     @commands.command(name="aprobar_cobro")
-    async def aprobar_cobro(self, ctx: commands.Context, code: str) -> None:
+    async def aprobar_cobro(
+        self,
+        ctx: commands.Context,
+        code: str,
+        *,
+        admin_message: str = "",
+    ) -> None:
         if not await require_admin_context(ctx, self.db):
             return
         try:
-            await self.approve_withdrawal(ctx.guild, code, ctx.author.id)
+            await self.approve_withdrawal(
+                ctx.guild,
+                code,
+                ctx.author.id,
+                normalize_admin_message(admin_message),
+            )
         except ValueError as exc:
             await ctx.reply(str(exc), mention_author=False)
             return
@@ -1134,7 +1378,14 @@ class Admin(commands.Cog):
         await ctx.reply(f"Solicitud `{code}` rechazada.", mention_author=False)
 
     @commands.command(name="liquidar_cobro")
-    async def liquidar_cobro(self, ctx: commands.Context, code: str, amount_raw: str) -> None:
+    async def liquidar_cobro(
+        self,
+        ctx: commands.Context,
+        code: str,
+        amount_raw: str,
+        *,
+        admin_message: str = "",
+    ) -> None:
         if not await require_admin_context(ctx, self.db):
             return
         try:
@@ -1142,13 +1393,17 @@ class Admin(commands.Cog):
         except ValueError as exc:
             await ctx.reply(str(exc), mention_author=False)
             return
+        message = normalize_admin_message(admin_message)
         await ctx.reply(
-            f"¿Confirmas esta operacion?\nLiquidar `{code}` por {format_amount(amount)}.",
+            (
+                f"¿Confirmas esta operacion?\nLiquidar `{code}` por {format_amount(amount)}."
+                f"{admin_message_block(message)}"
+            ),
             view=ConfirmAdminActionView(
                 self,
                 admin_id=ctx.author.id,
                 action="liquidate_withdrawal",
-                payload={"code": code, "amount": amount},
+                payload={"code": code, "amount": amount, "admin_message": message},
             ),
             mention_author=False,
         )
@@ -1402,12 +1657,21 @@ class Admin(commands.Cog):
                 str(payload["code"]),
                 int(payload["amount"]),
                 interaction.user.id,
+                normalize_admin_message(str(payload.get("admin_message", ""))),
             )
         if action == "approve_payout":
             return await self.approve_payout(guild, str(payload["code"]), interaction.user.id)
         raise ValueError("Accion no reconocida.")
 
-    async def approve_withdrawal(self, guild: discord.Guild, code: str, admin_id: int) -> None:
+    async def approve_withdrawal(
+        self,
+        guild: discord.Guild,
+        code: str,
+        admin_id: int,
+        admin_message: str = "",
+    ) -> None:
+        code = code.strip().upper()
+        admin_message = normalize_admin_message(admin_message)
         withdrawal = self.db.fetch_one(
             "SELECT * FROM withdrawals WHERE guild_id = ? AND code = ?",
             (guild.id, code),
@@ -1419,10 +1683,18 @@ class Admin(commands.Cog):
         self.db.execute(
             """
             UPDATE withdrawals
-            SET status = ?, approved_by = ?, approved_at = ?
-            WHERE id = ?
+            SET status = ?, approved_by = ?, approved_at = ?,
+                approval_admin_message = ?
+            WHERE guild_id = ? AND id = ?
             """,
-            (WITHDRAWAL_APPROVED, admin_id, utc_now_iso(), int(withdrawal["id"])),
+            (
+                WITHDRAWAL_APPROVED,
+                admin_id,
+                utc_now_iso(),
+                admin_message or None,
+                guild.id,
+                int(withdrawal["id"]),
+            ),
         )
         log_action(
             self.db,
@@ -1432,7 +1704,11 @@ class Admin(commands.Cog):
             system="Banco",
             affected_user_id=int(withdrawal["user_id"]),
             amount=int(withdrawal["amount_requested"]),
-            observation=code,
+            observation=(
+                f"{code} · Indicaciones: {admin_message}"
+                if admin_message
+                else code
+            ),
         )
         user = guild.get_member(int(withdrawal["user_id"]))
         if user:
@@ -1444,7 +1720,7 @@ class Admin(commands.Cog):
                 content=(
                     f"Tu solicitud `{code}` fue aprobada por "
                     f"{format_amount(withdrawal['amount_requested'])}. "
-                    "Queda pendiente por liquidar."
+                    f"Queda pendiente por liquidar.{admin_message_block(admin_message)}"
                 ),
             )
         await send_admin_notification(
@@ -1454,6 +1730,7 @@ class Admin(commands.Cog):
             content=(
                 f"✅ Cobro `{code}` aprobado por <@{admin_id}> para "
                 f"<@{withdrawal['user_id']}> por {format_amount(withdrawal['amount_requested'])}."
+                f"{admin_message_block(admin_message)}"
             ),
         )
 
@@ -1463,7 +1740,10 @@ class Admin(commands.Cog):
         code: str,
         amount: int,
         admin_id: int,
+        admin_message: str = "",
     ) -> str:
+        code = code.strip().upper()
+        admin_message = normalize_admin_message(admin_message)
         withdrawal = self.db.fetch_one(
             "SELECT * FROM withdrawals WHERE guild_id = ? AND code = ?",
             (guild.id, code),
@@ -1496,10 +1776,19 @@ class Admin(commands.Cog):
         self.db.execute(
             """
             UPDATE withdrawals
-            SET status = ?, amount_liquidated = ?, liquidated_by = ?, liquidated_at = ?
-            WHERE id = ?
+            SET status = ?, amount_liquidated = ?, liquidated_by = ?, liquidated_at = ?,
+                liquidation_admin_message = ?
+            WHERE guild_id = ? AND id = ?
             """,
-            (status, amount, admin_id, utc_now_iso(), int(withdrawal["id"])),
+            (
+                status,
+                amount,
+                admin_id,
+                utc_now_iso(),
+                admin_message or None,
+                guild.id,
+                int(withdrawal["id"]),
+            ),
         )
         log_action(
             self.db,
@@ -1509,7 +1798,11 @@ class Admin(commands.Cog):
             system="Banco",
             affected_user_id=int(withdrawal["user_id"]),
             amount=amount,
-            observation=code,
+            observation=(
+                f"{code} · Indicaciones: {admin_message}"
+                if admin_message
+                else code
+            ),
         )
         user = guild.get_member(int(withdrawal["user_id"]))
         if user:
@@ -1522,7 +1815,7 @@ class Admin(commands.Cog):
                     f"Tu solicitud `{code}` fue liquidada.\n"
                     f"Monto solicitado: {format_amount(requested)}\n"
                     f"Monto liquidado: {format_amount(amount)}\n"
-                    f"Estado: {status}"
+                    f"Estado: {status}{admin_message_block(admin_message)}"
                 ),
             )
         await send_admin_notification(
@@ -1533,7 +1826,7 @@ class Admin(commands.Cog):
                 f"💵 Cobro `{code}` liquidado por <@{admin_id}>. "
                 f"Usuario: <@{withdrawal['user_id']}> · "
                 f"Monto: {format_amount(amount)} · Estado: {status} · "
-                f"Movimiento #{movement_id}."
+                f"Movimiento #{movement_id}.{admin_message_block(admin_message)}"
             ),
         )
         return f"Cobro `{code}` liquidado por {format_amount(amount)}. Movimiento #{movement_id}."
@@ -1770,6 +2063,44 @@ class Admin(commands.Cog):
             ]
         )
 
+    def notification_settings_text(self, guild_id: int) -> str:
+        lines = [
+            "🔔 **Canales de notificaciones administrativas**",
+            "Los avisos privados para usuarios continúan enviándose por DM.",
+            "",
+        ]
+        for category, label, emoji in NOTIFICATION_CHANNEL_CATEGORIES:
+            route = ADMIN_CHANNEL_SETTINGS[category]
+            specific = self.db.get_setting(guild_id, route[0])
+            if specific:
+                destination = (
+                    f"<#{specific}>"
+                    if specific.isdigit()
+                    else f"ID inválido: `{specific}`"
+                )
+            else:
+                fallback = next(
+                    (
+                        self.db.get_setting(guild_id, key)
+                        for key in route[1:]
+                        if self.db.get_setting(guild_id, key)
+                    ),
+                    "",
+                )
+                destination = (
+                    f"Respaldo <#{fallback}>"
+                    if fallback and fallback.isdigit()
+                    else "Sin configurar"
+                )
+            lines.append(f"{emoji} **{label}:** {destination}")
+        lines.extend(
+            [
+                "",
+                "Selecciona una categoría para establecer o cambiar su canal.",
+            ]
+        )
+        return "\n".join(lines)
+
     def withdrawals_text(self, guild_id: int) -> str:
         rows = self.db.fetch_all(
             """
@@ -1794,7 +2125,8 @@ class Admin(commands.Cog):
         rows = self.db.fetch_all(
             """
             SELECT code, user_id, amount_requested, amount_liquidated, status,
-                   liquidated_by, liquidated_at
+                   liquidated_by, liquidated_at, approval_admin_message,
+                   liquidation_admin_message
             FROM withdrawals
             WHERE guild_id = ? AND status IN (?, ?) AND liquidated_at IS NOT NULL
             ORDER BY liquidated_at DESC, id DESC LIMIT 15
@@ -1816,6 +2148,14 @@ class Admin(commands.Cog):
                 f"{format_amount(row['amount_requested'])} · {row['status']} · "
                 f"Por {liquidator} · {row['liquidated_at']}"
             )
+            if row["approval_admin_message"]:
+                lines.append(
+                    f"↳ Indicaciones al aprobar: {row['approval_admin_message']}"
+                )
+            if row["liquidation_admin_message"]:
+                lines.append(
+                    f"↳ Indicaciones al liquidar: {row['liquidation_admin_message']}"
+                )
         return "\n".join(lines)[:1900]
 
     def pending_fines_text(self, guild_id: int) -> str:

@@ -119,8 +119,57 @@ class BankPanelView(discord.ui.View):
         await self.cog.show_deposits_interaction(interaction)
 
 
+class ApproveWithdrawalReviewModal(discord.ui.Modal, title="Aprobar cobro"):
+    admin_message = discord.ui.TextInput(
+        label="Indicaciones para el usuario (opcional)",
+        required=False,
+        style=discord.TextStyle.paragraph,
+        max_length=600,
+        placeholder="Ej.: Te pago en la isla de Martlock a las 00 UTC.",
+    )
+
+    def __init__(self, cog: "Bank", guild_id: int, code: str):
+        super().__init__(timeout=180)
+        self.cog = cog
+        self.guild_id = guild_id
+        self.code = code
+
+    async def on_submit(self, interaction: discord.Interaction) -> None:
+        if interaction.guild is None or interaction.guild.id != self.guild_id:
+            await private_response(interaction, "Este cobro pertenece a otro servidor.")
+            return
+        if not is_admin_subject(self.cog.db, interaction):
+            await private_response(interaction, "Solo admins autorizados pueden aprobar cobros.")
+            return
+        admin_cog = self.cog.bot.get_cog("Admin")
+        if admin_cog is None:
+            await private_response(interaction, "El panel administrativo no esta disponible.")
+            return
+        try:
+            await admin_cog.approve_withdrawal(
+                interaction.guild,
+                self.code,
+                interaction.user.id,
+                str(self.admin_message.value).strip(),
+            )
+        except ValueError as exc:
+            await private_response(interaction, str(exc))
+            return
+        await private_response(
+            interaction,
+            f"Solicitud `{self.code}` aprobada. Ya puede liquidarse.",
+        )
+
+
 class LiquidateWithdrawalReviewModal(discord.ui.Modal, title="Liquidar cobro"):
     amount = discord.ui.TextInput(label="Monto a liquidar", placeholder="1000000")
+    admin_message = discord.ui.TextInput(
+        label="Indicaciones para el usuario (opcional)",
+        required=False,
+        style=discord.TextStyle.paragraph,
+        max_length=600,
+        placeholder="Ej.: Te pago en la isla de Martlock a las 00 UTC.",
+    )
 
     def __init__(self, cog: "Bank", guild_id: int, code: str):
         super().__init__(timeout=180)
@@ -146,6 +195,7 @@ class LiquidateWithdrawalReviewModal(discord.ui.Modal, title="Liquidar cobro"):
                 self.code,
                 amount,
                 interaction.user.id,
+                str(self.admin_message.value).strip(),
             )
         except ValueError as exc:
             await private_response(interaction, str(exc))
@@ -183,16 +233,9 @@ class WithdrawalReviewView(discord.ui.View):
         if not is_admin_subject(self.cog.db, interaction):
             await private_response(interaction, "Solo admins autorizados pueden aprobar cobros.")
             return
-        admin_cog = self.cog.bot.get_cog("Admin")
-        if admin_cog is None:
-            await private_response(interaction, "El panel administrativo no esta disponible.")
-            return
-        try:
-            await admin_cog.approve_withdrawal(interaction.guild, self.code, interaction.user.id)
-        except ValueError as exc:
-            await private_response(interaction, str(exc))
-            return
-        await private_response(interaction, f"Solicitud `{self.code}` aprobada. Ya puede liquidarse.")
+        await interaction.response.send_modal(
+            ApproveWithdrawalReviewModal(self.cog, self.guild_id, self.code)
+        )
 
     async def liquidate(self, interaction: discord.Interaction) -> None:
         if interaction.guild is None or interaction.guild.id != self.guild_id:

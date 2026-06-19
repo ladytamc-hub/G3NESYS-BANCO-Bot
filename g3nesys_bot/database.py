@@ -100,6 +100,19 @@ class Database:
                 "ALTER TABLE movements ADD COLUMN net_amount INTEGER"
             )
 
+        withdrawal_columns = {
+            row["name"]
+            for row in self._conn.execute("PRAGMA table_info(withdrawals)").fetchall()
+        }
+        if "approval_admin_message" not in withdrawal_columns:
+            self._conn.execute(
+                "ALTER TABLE withdrawals ADD COLUMN approval_admin_message TEXT"
+            )
+        if "liquidation_admin_message" not in withdrawal_columns:
+            self._conn.execute(
+                "ALTER TABLE withdrawals ADD COLUMN liquidation_admin_message TEXT"
+            )
+
         caller_penalty_columns = {
             row["name"]
             for row in self._conn.execute("PRAGMA table_info(caller_penalties)").fetchall()
@@ -228,12 +241,15 @@ class Database:
                     rejected_by INTEGER,
                     rejected_at TEXT,
                     rejection_reason TEXT,
+                    approval_admin_message TEXT,
+                    liquidation_admin_message TEXT,
                     UNIQUE(guild_id, code)
                 )
                 """,
                 "id, code, guild_id, user_id, amount_requested, amount_liquidated, "
                 "status, reason, created_at, approved_by, approved_at, "
-                "liquidated_by, liquidated_at, rejected_by, rejected_at, rejection_reason",
+                "liquidated_by, liquidated_at, rejected_by, rejected_at, rejection_reason, "
+                "approval_admin_message, liquidation_admin_message",
             ),
             "payouts": (
                 """
@@ -654,6 +670,8 @@ CREATE TABLE IF NOT EXISTS withdrawals (
     rejected_by INTEGER,
     rejected_at TEXT,
     rejection_reason TEXT,
+    approval_admin_message TEXT,
+    liquidation_admin_message TEXT,
     UNIQUE(guild_id, code)
 );
 
