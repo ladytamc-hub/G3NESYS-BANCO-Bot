@@ -18,7 +18,11 @@ from ..constants import (
     WITHDRAWAL_PENDING,
     WITHDRAWAL_REJECTED,
 )
-from ..permissions import is_admin_subject, require_admin_context
+from ..permissions import (
+    has_any_configured_role,
+    is_admin_subject,
+    require_admin_context,
+)
 from ..services.audit import log_action
 from ..services.callers import (
     CallerRemovalNoticeView,
@@ -47,6 +51,12 @@ from ..services.notifications import (
     send_dm_safe,
 )
 from ..services.payout_audit import log_payout_action, payout_audit_text
+from ..services.quick_liquidations import (
+    get_liquidatable_participants,
+    get_liquidatable_payout,
+    liquidate_payout,
+    recent_liquidatable_payouts,
+)
 from ..services.reports import create_admin_report
 from ..utils import format_amount, parse_channel_id, parse_int_amount, utc_now_iso
 
@@ -107,6 +117,12 @@ class ConfirmAdminActionView(discord.ui.View):
         if interaction.user.id != self.admin_id:
             await interaction.response.send_message("Solo quien inicio la operacion puede confirmar.", ephemeral=True)
             return
+        if not is_admin_subject(self.cog.db, interaction):
+            await interaction.response.send_message(
+                "Ya no tienes autorizacion de admin para confirmar esta operacion.",
+                ephemeral=True,
+            )
+            return
         try:
             message = await self.cog.execute_confirmed_action(
                 interaction,
@@ -115,14 +131,14 @@ class ConfirmAdminActionView(discord.ui.View):
             )
         except ValueError as exc:
             message = str(exc)
-        await interaction.response.edit_message(content=message, view=None)
+        await interaction.response.edit_message(content=message, embed=None, view=None)
 
     @discord.ui.button(label="Cancelar", emoji="❌", style=discord.ButtonStyle.secondary)
     async def cancel(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
         if interaction.user.id != self.admin_id:
             await interaction.response.send_message("Solo quien inicio la operacion puede cancelar.", ephemeral=True)
             return
-        await interaction.response.edit_message(content="Operacion cancelada.", view=None)
+        await interaction.response.edit_message(content="Operacion cancelada.", embed=None, view=None)
 
 
 class IncomeModal(discord.ui.Modal, title="Registrar ingreso"):
@@ -163,6 +179,329 @@ class DepositModal(discord.ui.Modal, title="Depositar a usuario"):
 
     async def on_submit(self, interaction: discord.Interaction) -> None:
         await self.cog.deposit_interaction(interaction, self)
+
+
+class AdminIdModal(discord.ui.Modal):
+    def __init__(self, cog: "Admin", *, action: str, admin_id: int):
+        title = "Agregar admin por ID" if action == "add" else "Eliminar admin por ID"
+        super().__init__(title=title, timeout=180)
+        self.cog = cog
+        self.action = action
+        self.admin_id = admin_id
+        self.user_id_input = discord.ui.TextInput(
+            label="ID o mencion del usuario",
+            placeholder="123456789012345678",
+            max_length=40,
+        )
+        self.add_item(self.user_id_input)
+
+    async def on_submit(self, interaction: discord.Interaction) -> None:
+        if interaction.user.id != self.admin_id or not is_admin_subject(self.cog.db, interaction):
+            await private_response(interaction, "Solo el admin que abrio este menu puede usarlo.")
+            return
+        user_id = parse_channel_id(str(self.user_id_input.value))
+        if user_id is None:
+            await private_response(interaction, "No pude leer ese ID de Discord.")
+            return
+        await self.cog.prompt_admin_change(interaction, self.action, user_id)
+
+
+class AdminUserSelect(discord.ui.UserSelect):
+    def __init__(self, cog: "Admin", *, action: str, admin_id: int):
+        verb = "agregar" if action == "add" else "eliminar"
+        super().__init__(
+            placeholder=f"Selecciona el usuario que deseas {verb}",
+            min_values=1,
+            max_values=1,
+        )
+        self.cog = cog
+        self.action = action
+        self.admin_id = admin_id
+
+    async def callback(self, interaction: discord.Interaction) -> None:
+        if interaction.user.id != self.admin_id or not is_admin_subject(self.cog.db, interaction):
+            await private_response(interaction, "Solo el admin que abrio este menu puede usarlo.")
+            return
+        await self.cog.prompt_admin_change(interaction, self.action, self.values[0].id)
+
+
+class AdminSelectionView(discord.ui.View):
+    def __init__(self, cog: "Admin", *, action: str, admin_id: int):
+        super().__init__(timeout=300)
+        self.cog = cog
+        self.action = action
+        self.admin_id = admin_id
+        self.add_item(AdminUserSelect(cog, action=action, admin_id=admin_id))
+
+    @discord.ui.button(label="Ingresar ID manualmente", emoji="⌨️", style=discord.ButtonStyle.secondary)
+    async def manual_id(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
+        if interaction.user.id != self.admin_id or not is_admin_subject(self.cog.db, interaction):
+            await private_response(interaction, "Solo el admin que abrio este menu puede usarlo.")
+            return
+        await interaction.response.send_modal(
+            AdminIdModal(self.cog, action=self.action, admin_id=self.admin_id)
+        )
+
+
+class DepositOptionsView(discord.ui.View):
+    def __init__(self, cog: "Admin", *, admin_id: int):
+        super().__init__(timeout=300)
+        self.cog = cog
+        self.admin_id = admin_id
+
+    async def require_owner_admin(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id == self.admin_id and is_admin_subject(self.cog.db, interaction):
+            return True
+        await private_response(interaction, "Solo el admin que abrio este menu puede usarlo.")
+        return False
+
+    @discord.ui.button(label="Deposito manual", emoji="🪙", style=discord.ButtonStyle.success)
+    async def manual_deposit(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
+        if await self.require_owner_admin(interaction):
+            await interaction.response.send_modal(DepositModal(self.cog))
+
+    @discord.ui.button(label="Liquidacion rapida", emoji="⚡", style=discord.ButtonStyle.primary)
+    async def quick_liquidation(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
+        if not await self.require_owner_admin(interaction):
+            return
+        rows = recent_liquidatable_payouts(self.cog.db, interaction.guild.id)
+        if not rows:
+            await private_response(
+                interaction,
+                "No existen splits recientes con miembros pendientes de liquidar.",
+            )
+            return
+        await private_response(
+            interaction,
+            "Selecciona el split reciente que deseas liquidar:",
+            view=QuickLiquidationSplitSelectionView(
+                self.cog,
+                admin_id=self.admin_id,
+                payouts=rows,
+            ),
+        )
+
+
+class QuickLiquidationSplitSelect(discord.ui.Select):
+    def __init__(self, cog: "Admin", *, admin_id: int, payouts):
+        options = []
+        for payout in payouts:
+            options.append(
+                discord.SelectOption(
+                    label=f"{payout['code']} · {payout['activity_name']}"[:100],
+                    value=str(payout["id"]),
+                    description=(
+                        f"{payout['pending_members']} miembros · "
+                        f"{format_amount(payout['pending_total'])} pendientes"
+                    )[:100],
+                    emoji="⚡",
+                )
+            )
+        super().__init__(
+            placeholder="Selecciona un split reciente",
+            min_values=1,
+            max_values=1,
+            options=options,
+        )
+        self.cog = cog
+        self.admin_id = admin_id
+
+    async def callback(self, interaction: discord.Interaction) -> None:
+        if interaction.user.id != self.admin_id or not is_admin_subject(self.cog.db, interaction):
+            await private_response(interaction, "Solo el admin que abrio este menu puede usarlo.")
+            return
+        payout_id = int(self.values[0])
+        payout = get_liquidatable_payout(self.cog.db, interaction.guild.id, payout_id)
+        participants = get_liquidatable_participants(self.cog.db, payout_id)
+        if payout is None or not participants:
+            await interaction.response.edit_message(
+                content="Ese split ya no tiene miembros pendientes de liquidar.",
+                view=None,
+            )
+            return
+        await interaction.response.edit_message(
+            content=(
+                f"Split `{payout['code']}` · **{payout['activity_name']}**\n"
+                f"Pendientes: {len(participants)} miembros · "
+                f"{format_amount(sum(int(row['amount']) for row in participants))}\n\n"
+                "Elige si deseas liquidar la actividad completa o a un solo miembro."
+            ),
+            view=QuickLiquidationModeView(
+                self.cog,
+                payout_id=payout_id,
+                admin_id=self.admin_id,
+            ),
+        )
+
+
+class QuickLiquidationSplitSelectionView(discord.ui.View):
+    def __init__(self, cog: "Admin", *, admin_id: int, payouts):
+        super().__init__(timeout=300)
+        self.add_item(QuickLiquidationSplitSelect(cog, admin_id=admin_id, payouts=payouts))
+
+
+class QuickLiquidationModeView(discord.ui.View):
+    def __init__(self, cog: "Admin", *, payout_id: int, admin_id: int):
+        super().__init__(timeout=300)
+        self.cog = cog
+        self.payout_id = payout_id
+        self.admin_id = admin_id
+
+    async def require_owner_admin(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id == self.admin_id and is_admin_subject(self.cog.db, interaction):
+            return True
+        await private_response(interaction, "Solo el admin que abrio este menu puede usarlo.")
+        return False
+
+    @discord.ui.button(label="Actividad completa", emoji="👥", style=discord.ButtonStyle.danger)
+    async def complete(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
+        if not await self.require_owner_admin(interaction):
+            return
+        payout = get_liquidatable_payout(self.cog.db, interaction.guild.id, self.payout_id)
+        participants = get_liquidatable_participants(self.cog.db, self.payout_id)
+        if payout is None or not participants:
+            await private_response(interaction, "Ese split ya fue liquidado por completo.")
+            return
+        embed = self.cog.quick_liquidation_confirmation_embed(
+            interaction.guild,
+            payout,
+            participants,
+            interaction.user,
+            mode="Completa",
+        )
+        await private_response(
+            interaction,
+            "Confirma la liquidacion rapida de la actividad completa.",
+            embed=embed,
+            view=ConfirmAdminActionView(
+                self.cog,
+                admin_id=self.admin_id,
+                action="quick_liquidate_full",
+                payload={"payout_id": self.payout_id},
+            ),
+        )
+
+    @discord.ui.button(label="Un solo miembro", emoji="👤", style=discord.ButtonStyle.primary)
+    async def individual(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
+        if not await self.require_owner_admin(interaction):
+            return
+        participants = get_liquidatable_participants(self.cog.db, self.payout_id)
+        if not participants:
+            await private_response(interaction, "Ese split ya fue liquidado por completo.")
+            return
+        await private_response(
+            interaction,
+            "Selecciona un miembro del split o ingresa su ID manualmente:",
+            view=QuickLiquidationMemberSelectionView(
+                self.cog,
+                payout_id=self.payout_id,
+                admin_id=self.admin_id,
+                guild=interaction.guild,
+                participants=participants,
+            ),
+        )
+
+
+class QuickLiquidationMemberSelect(discord.ui.Select):
+    def __init__(self, cog: "Admin", *, payout_id: int, admin_id: int, guild: discord.Guild, participants):
+        options = []
+        for participant in participants[:25]:
+            user_id = int(participant["user_id"])
+            member = guild.get_member(user_id)
+            name = member.display_name if member else f"Usuario {user_id}"
+            options.append(
+                discord.SelectOption(
+                    label=name[:100],
+                    value=str(user_id),
+                    description=f"ID {user_id} · {format_amount(participant['amount'])}"[:100],
+                    emoji="👤",
+                )
+            )
+        super().__init__(
+            placeholder="Selecciona un miembro pendiente",
+            min_values=1,
+            max_values=1,
+            options=options,
+        )
+        self.cog = cog
+        self.payout_id = payout_id
+        self.admin_id = admin_id
+
+    async def callback(self, interaction: discord.Interaction) -> None:
+        if interaction.user.id != self.admin_id or not is_admin_subject(self.cog.db, interaction):
+            await private_response(interaction, "Solo el admin que abrio este menu puede usarlo.")
+            return
+        await self.cog.prompt_quick_liquidation_individual(
+            interaction,
+            self.payout_id,
+            int(self.values[0]),
+        )
+
+
+class QuickLiquidationMemberIdModal(discord.ui.Modal, title="Liquidar miembro por ID"):
+    user_id_input = discord.ui.TextInput(
+        label="ID o mencion del usuario",
+        placeholder="123456789012345678",
+        max_length=40,
+    )
+
+    def __init__(self, cog: "Admin", *, payout_id: int, admin_id: int):
+        super().__init__(timeout=180)
+        self.cog = cog
+        self.payout_id = payout_id
+        self.admin_id = admin_id
+
+    async def on_submit(self, interaction: discord.Interaction) -> None:
+        if interaction.user.id != self.admin_id or not is_admin_subject(self.cog.db, interaction):
+            await private_response(interaction, "Solo el admin que abrio este menu puede usarlo.")
+            return
+        user_id = parse_channel_id(str(self.user_id_input.value))
+        if user_id is None:
+            await private_response(interaction, "No pude leer ese ID de Discord.")
+            return
+        await self.cog.prompt_quick_liquidation_individual(
+            interaction,
+            self.payout_id,
+            user_id,
+        )
+
+
+class QuickLiquidationMemberSelectionView(discord.ui.View):
+    def __init__(
+        self,
+        cog: "Admin",
+        *,
+        payout_id: int,
+        admin_id: int,
+        guild: discord.Guild,
+        participants,
+    ):
+        super().__init__(timeout=300)
+        self.cog = cog
+        self.payout_id = payout_id
+        self.admin_id = admin_id
+        self.add_item(
+            QuickLiquidationMemberSelect(
+                cog,
+                payout_id=payout_id,
+                admin_id=admin_id,
+                guild=guild,
+                participants=participants,
+            )
+        )
+
+    @discord.ui.button(label="Ingresar ID manualmente", emoji="⌨️", style=discord.ButtonStyle.secondary)
+    async def manual_id(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
+        if interaction.user.id != self.admin_id or not is_admin_subject(self.cog.db, interaction):
+            await private_response(interaction, "Solo el admin que abrio este menu puede usarlo.")
+            return
+        await interaction.response.send_modal(
+            QuickLiquidationMemberIdModal(
+                self.cog,
+                payout_id=self.payout_id,
+                admin_id=self.admin_id,
+            )
+        )
 
 
 class UserStatementModal(discord.ui.Modal, title="Estado de cuenta"):
@@ -867,7 +1206,11 @@ class AdminPanelView(discord.ui.View):
     @discord.ui.button(label="Depositar a Usuario", emoji="🪙", style=discord.ButtonStyle.success, custom_id="g3n:admin:deposit", row=0)
     async def deposit(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
         if await self.require_admin(interaction):
-            await interaction.response.send_modal(DepositModal(self.cog))
+            await private_response(
+                interaction,
+                "Selecciona el tipo de operacion:",
+                view=DepositOptionsView(self.cog, admin_id=interaction.user.id),
+            )
 
     @discord.ui.button(label="Revisar Splits", emoji="📋", style=discord.ButtonStyle.secondary, custom_id="g3n:admin:payouts", row=1)
     async def payouts(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
@@ -967,6 +1310,32 @@ class AdminPanelView(discord.ui.View):
                 view=NotificationsAdminView(self.cog),
             )
 
+    @discord.ui.button(label="Agregar admin", emoji="➕", style=discord.ButtonStyle.success, custom_id="g3n:admin:add_admin", row=4)
+    async def add_admin(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
+        if await self.require_admin(interaction):
+            await private_response(
+                interaction,
+                "Selecciona al usuario que deseas autorizar como admin o ingresa su ID:",
+                view=AdminSelectionView(
+                    self.cog,
+                    action="add",
+                    admin_id=interaction.user.id,
+                ),
+            )
+
+    @discord.ui.button(label="Eliminar admin", emoji="➖", style=discord.ButtonStyle.danger, custom_id="g3n:admin:remove_admin", row=4)
+    async def remove_admin(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
+        if await self.require_admin(interaction):
+            await private_response(
+                interaction,
+                "Selecciona al admin que deseas retirar o ingresa su ID:",
+                view=AdminSelectionView(
+                    self.cog,
+                    action="remove",
+                    admin_id=interaction.user.id,
+                ),
+            )
+
 
 class Admin(commands.Cog):
     def __init__(self, bot: commands.Bot):
@@ -988,6 +1357,300 @@ class Admin(commands.Cog):
 
     def build_payout_review_view(self, code: str) -> PayoutReviewView:
         return PayoutReviewView(self, code)
+
+    def member_has_admin_access(self, guild: discord.Guild, member: discord.Member) -> bool:
+        override = self.db.fetch_one(
+            "SELECT authorized FROM admin_access WHERE guild_id = ? AND user_id = ?",
+            (guild.id, member.id),
+        )
+        if override is not None:
+            return bool(override["authorized"])
+        if member.guild_permissions.administrator:
+            return True
+        return has_any_configured_role(
+            member,
+            self.db.get_setting(guild.id, "admin_role_ids"),
+        )
+
+    def has_admin_after_removal(self, guild: discord.Guild, removed_user_id: int) -> bool:
+        for member in guild.members:
+            if member.bot or member.id == removed_user_id:
+                continue
+            if self.member_has_admin_access(guild, member):
+                return True
+        return False
+
+    async def prompt_admin_change(
+        self,
+        interaction: discord.Interaction,
+        action: str,
+        user_id: int,
+    ) -> None:
+        guild = interaction.guild
+        if guild is None:
+            await private_response(interaction, "Esta operacion debe realizarse dentro del servidor.")
+            return
+        member = guild.get_member(user_id)
+        if member is None:
+            try:
+                member = await guild.fetch_member(user_id)
+            except (discord.NotFound, discord.Forbidden, discord.HTTPException):
+                member = None
+        if member is None:
+            await private_response(interaction, "No encontre ese usuario dentro del servidor.")
+            return
+        if member.bot:
+            await private_response(interaction, "No puedes autorizar un bot como administrador.")
+            return
+        currently_authorized = self.member_has_admin_access(guild, member)
+        if action == "add" and currently_authorized:
+            await private_response(interaction, f"{member.mention} ya tiene acceso administrativo.")
+            return
+        if action == "remove" and not currently_authorized:
+            await private_response(interaction, f"{member.mention} no tiene acceso administrativo.")
+            return
+        verb = "autorizar como admin" if action == "add" else "retirar como admin"
+        warning = (
+            ""
+            if action == "add"
+            else "\nLa denegacion se aplicara incluso si posee un rol admin o permisos de Discord."
+        )
+        await private_response(
+            interaction,
+            f"¿Confirmas {verb} a {member.mention}?{warning}",
+            view=ConfirmAdminActionView(
+                self,
+                admin_id=interaction.user.id,
+                action="add_admin" if action == "add" else "remove_admin",
+                payload={"user_id": member.id},
+            ),
+        )
+
+    async def change_admin_access(
+        self,
+        guild: discord.Guild,
+        *,
+        user_id: int,
+        authorized: bool,
+        changed_by: int,
+    ) -> str:
+        member = guild.get_member(user_id)
+        if member is None:
+            try:
+                member = await guild.fetch_member(user_id)
+            except (discord.NotFound, discord.Forbidden, discord.HTTPException):
+                member = None
+        if member is None:
+            raise ValueError("No encontre ese usuario dentro del servidor.")
+        if member.bot:
+            raise ValueError("No puedes gestionar un bot como administrador.")
+        if not authorized and not self.has_admin_after_removal(guild, user_id):
+            raise ValueError(
+                "No puedes eliminar al ultimo admin disponible. Agrega otro admin primero."
+            )
+        self.db.execute(
+            """
+            INSERT INTO admin_access (guild_id, user_id, authorized, updated_by, updated_at)
+            VALUES (?, ?, ?, ?, ?)
+            ON CONFLICT(guild_id, user_id)
+            DO UPDATE SET authorized = excluded.authorized,
+                          updated_by = excluded.updated_by,
+                          updated_at = excluded.updated_at
+            """,
+            (guild.id, user_id, 1 if authorized else 0, changed_by, utc_now_iso()),
+        )
+        action = "Agregar admin" if authorized else "Eliminar admin"
+        log_action(
+            self.db,
+            guild.id,
+            admin_id=changed_by,
+            action=action,
+            affected_user_id=user_id,
+            system="Administracion",
+            observation=(
+                "Acceso administrativo autorizado desde el panel."
+                if authorized
+                else "Acceso administrativo denegado desde el panel."
+            ),
+        )
+        await send_dm_safe(
+            self.db,
+            guild_id=guild.id,
+            user=member,
+            action="cambio_acceso_admin",
+            content=(
+                f"Ahora tienes acceso a las funciones administrativas del bot en {guild.name}."
+                if authorized
+                else f"Tu acceso a las funciones administrativas del bot en {guild.name} fue retirado."
+            ),
+        )
+        await send_admin_notification(
+            self.db,
+            guild=guild,
+            category="general_admin",
+            content=(
+                f"{'➕' if authorized else '➖'} <@{user_id}> "
+                f"{'fue agregado como admin' if authorized else 'fue eliminado como admin'} "
+                f"por <@{changed_by}>."
+            ),
+        )
+        return (
+            f"{member.mention} ahora es admin autorizado."
+            if authorized
+            else f"Se retiro el acceso administrativo de {member.mention}."
+        )
+
+    def quick_liquidation_confirmation_embed(
+        self,
+        guild: discord.Guild,
+        payout,
+        participants,
+        admin: discord.Member | discord.User,
+        *,
+        mode: str,
+    ) -> discord.Embed:
+        total = sum(int(row["amount"]) for row in participants)
+        activity_reference = payout["activity_code"] or f"ID {payout['activity_id']}"
+        embed = discord.Embed(
+            title="⚡ Confirmar liquidacion rapida",
+            description=(
+                f"**Split:** {payout['code']}\n"
+                f"**Actividad:** {payout['activity_name']} ({activity_reference})\n"
+                f"**Modalidad:** {mode}\n"
+                f"**Admin:** {admin.mention}\n"
+                f"**Total a liquidar:** {format_amount(total)}"
+            ),
+            color=discord.Color.orange(),
+        )
+        lines = []
+        for row in participants:
+            user_id = int(row["user_id"])
+            member = guild.get_member(user_id)
+            name = member.display_name if member else f"Usuario {user_id}"
+            lines.append(f"• {name} (<@{user_id}>) — {format_amount(row['amount'])}")
+        chunks: list[str] = []
+        current = ""
+        for line in lines:
+            candidate = f"{current}\n{line}".strip()
+            if len(candidate) > 1000 and current:
+                chunks.append(current)
+                current = line
+            else:
+                current = candidate
+        if current:
+            chunks.append(current)
+        for index, chunk in enumerate(chunks[:5], start=1):
+            title = "Miembros y cantidades" if index == 1 else f"Miembros y cantidades ({index})"
+            embed.add_field(name=title, value=chunk, inline=False)
+        if len(chunks) > 5:
+            embed.add_field(
+                name="Aviso",
+                value="La lista es demasiado extensa para Discord; todos los miembros pendientes siguen incluidos.",
+                inline=False,
+            )
+        embed.set_footer(text="El saldo se restara al confirmar. Esta operacion no puede duplicarse.")
+        return embed
+
+    async def prompt_quick_liquidation_individual(
+        self,
+        interaction: discord.Interaction,
+        payout_id: int,
+        user_id: int,
+    ) -> None:
+        guild = interaction.guild
+        if guild is None:
+            await private_response(interaction, "Esta operacion debe realizarse dentro del servidor.")
+            return
+        payout = get_liquidatable_payout(self.db, guild.id, payout_id)
+        if payout is None:
+            await private_response(interaction, "No encontre ese Split.")
+            return
+        participant = self.db.fetch_one(
+            "SELECT * FROM payout_participants WHERE payout_id = ? AND user_id = ?",
+            (payout_id, user_id),
+        )
+        if participant is None:
+            await private_response(
+                interaction,
+                "El ID ingresado no corresponde a ningun miembro del split.",
+            )
+            return
+        if participant["liquidated_at"] is not None:
+            await private_response(interaction, "Ese miembro ya fue liquidado en este split.")
+            return
+        if participant["deposited_at"] is None:
+            await private_response(interaction, "Ese miembro aun no tiene acreditado el saldo del split.")
+            return
+        embed = self.quick_liquidation_confirmation_embed(
+            guild,
+            payout,
+            [participant],
+            interaction.user,
+            mode="Individual",
+        )
+        await private_response(
+            interaction,
+            "Confirma la liquidacion rapida del miembro seleccionado.",
+            embed=embed,
+            view=ConfirmAdminActionView(
+                self,
+                admin_id=interaction.user.id,
+                action="quick_liquidate_individual",
+                payload={"payout_id": payout_id, "user_id": user_id},
+            ),
+        )
+
+    async def execute_quick_liquidation(
+        self,
+        guild: discord.Guild,
+        *,
+        payout_id: int,
+        admin_id: int,
+        user_id: int | None = None,
+    ) -> str:
+        result = liquidate_payout(
+            self.db,
+            guild.id,
+            payout_id=payout_id,
+            admin_id=admin_id,
+            user_id=user_id,
+        )
+        for item in result.items:
+            member = guild.get_member(item.user_id)
+            if member is None:
+                continue
+            await send_dm_safe(
+                self.db,
+                guild_id=guild.id,
+                user=member,
+                action="liquidacion_rapida",
+                content=(
+                    "⚡ Tu saldo fue liquidado directamente por un administrador.\n\n"
+                    f"Split: {result.payout_code}\n"
+                    f"Actividad: {result.activity_name}\n"
+                    f"Cantidad liquidada: {format_amount(item.amount)}\n"
+                    f"Realizado por: <@{admin_id}>\n"
+                    f"Registro: {result.code}"
+                ),
+            )
+        members = ", ".join(
+            f"<@{item.user_id}> ({format_amount(item.amount)})"
+            for item in result.items
+        )
+        await send_admin_notification(
+            self.db,
+            guild=guild,
+            category="splits",
+            content=(
+                f"⚡ Liquidacion rapida **{result.mode}** {result.code} realizada "
+                f"por <@{admin_id}> sobre el Split {result.payout_code}. "
+                f"Total: {format_amount(result.total_amount)}. Miembros: {members}"
+            )[:1900],
+        )
+        return (
+            f"Liquidacion rapida {result.code} completada: "
+            f"{len(result.items)} miembro(s), {format_amount(result.total_amount)}."
+        )
 
     async def add_caller_interaction(
         self,
@@ -1661,6 +2324,33 @@ class Admin(commands.Cog):
             )
         if action == "approve_payout":
             return await self.approve_payout(guild, str(payload["code"]), interaction.user.id)
+        if action == "add_admin":
+            return await self.change_admin_access(
+                guild,
+                user_id=int(payload["user_id"]),
+                authorized=True,
+                changed_by=interaction.user.id,
+            )
+        if action == "remove_admin":
+            return await self.change_admin_access(
+                guild,
+                user_id=int(payload["user_id"]),
+                authorized=False,
+                changed_by=interaction.user.id,
+            )
+        if action == "quick_liquidate_full":
+            return await self.execute_quick_liquidation(
+                guild,
+                payout_id=int(payload["payout_id"]),
+                admin_id=interaction.user.id,
+            )
+        if action == "quick_liquidate_individual":
+            return await self.execute_quick_liquidation(
+                guild,
+                payout_id=int(payload["payout_id"]),
+                admin_id=interaction.user.id,
+                user_id=int(payload["user_id"]),
+            )
         raise ValueError("Accion no reconocida.")
 
     async def approve_withdrawal(
@@ -2122,7 +2812,7 @@ class Admin(commands.Cog):
         return "\n".join(lines)
 
     def liquidation_history_text(self, guild_id: int) -> str:
-        rows = self.db.fetch_all(
+        withdrawal_rows = self.db.fetch_all(
             """
             SELECT code, user_id, amount_requested, amount_liquidated, status,
                    liquidated_by, liquidated_at, approval_admin_message,
@@ -2133,10 +2823,52 @@ class Admin(commands.Cog):
             """,
             (guild_id, WITHDRAWAL_LIQUIDATED, WITHDRAWAL_PARTIAL),
         )
-        if not rows:
+        quick_rows = self.db.fetch_all(
+            """
+            SELECT q.id, q.code, q.mode, q.admin_id, q.total_amount, q.created_at,
+                   p.code AS payout_code, i.user_id, i.amount
+            FROM quick_liquidations q
+            JOIN payouts p ON p.id = q.payout_id
+            JOIN quick_liquidation_items i ON i.liquidation_id = q.id
+            WHERE q.guild_id = ?
+              AND q.id IN (
+                  SELECT id FROM quick_liquidations
+                  WHERE guild_id = ? ORDER BY id DESC LIMIT 15
+              )
+            ORDER BY q.id DESC, i.id ASC
+            """,
+            (guild_id, guild_id),
+        )
+        if not withdrawal_rows and not quick_rows:
             return "No hay liquidaciones registradas."
         lines = ["🧾 **Historial de liquidaciones**"]
-        for row in rows:
+        grouped_quick: dict[int, dict] = {}
+        for row in quick_rows:
+            liquidation = grouped_quick.setdefault(
+                int(row["id"]),
+                {
+                    "code": row["code"],
+                    "mode": row["mode"],
+                    "admin_id": row["admin_id"],
+                    "total_amount": row["total_amount"],
+                    "created_at": row["created_at"],
+                    "payout_code": row["payout_code"],
+                    "items": [],
+                },
+            )
+            liquidation["items"].append((int(row["user_id"]), int(row["amount"])))
+        for liquidation in grouped_quick.values():
+            members = ", ".join(
+                f"<@{user_id}> ({format_amount(amount)})"
+                for user_id, amount in liquidation["items"]
+            )
+            lines.append(
+                f"⚡ {liquidation['code']} · Split {liquidation['payout_code']} · "
+                f"{liquidation['mode']} · {format_amount(liquidation['total_amount'])} · "
+                f"Por <@{liquidation['admin_id']}> · {liquidation['created_at']}"
+            )
+            lines.append(f"↳ {members}")
+        for row in withdrawal_rows:
             liquidator = (
                 f"<@{row['liquidated_by']}>"
                 if row["liquidated_by"] is not None

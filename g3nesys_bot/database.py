@@ -45,6 +45,37 @@ class Database:
             self._conn.execute(
                 "ALTER TABLE payouts ADD COLUMN caller_amount INTEGER NOT NULL DEFAULT 0"
             )
+        if "quick_liquidated_at" not in payout_columns:
+            self._conn.execute(
+                "ALTER TABLE payouts ADD COLUMN quick_liquidated_at TEXT"
+            )
+        if "quick_liquidated_by" not in payout_columns:
+            self._conn.execute(
+                "ALTER TABLE payouts ADD COLUMN quick_liquidated_by INTEGER"
+            )
+
+        payout_participant_columns = {
+            row["name"]
+            for row in self._conn.execute(
+                "PRAGMA table_info(payout_participants)"
+            ).fetchall()
+        }
+        if "liquidated_at" not in payout_participant_columns:
+            self._conn.execute(
+                "ALTER TABLE payout_participants ADD COLUMN liquidated_at TEXT"
+            )
+        if "liquidated_by" not in payout_participant_columns:
+            self._conn.execute(
+                "ALTER TABLE payout_participants ADD COLUMN liquidated_by INTEGER"
+            )
+        if "liquidation_id" not in payout_participant_columns:
+            self._conn.execute(
+                "ALTER TABLE payout_participants ADD COLUMN liquidation_id INTEGER"
+            )
+        if "liquidation_movement_id" not in payout_participant_columns:
+            self._conn.execute(
+                "ALTER TABLE payout_participants ADD COLUMN liquidation_movement_id INTEGER"
+            )
 
         template_columns = {
             row["name"]
@@ -274,13 +305,16 @@ class Database:
                     reviewed_at TEXT,
                     caller_percent REAL NOT NULL DEFAULT 0,
                     caller_amount INTEGER NOT NULL DEFAULT 0,
+                    quick_liquidated_at TEXT,
+                    quick_liquidated_by INTEGER,
                     UNIQUE(guild_id, code)
                 )
                 """,
                 "id, code, guild_id, activity_id, caller_id, status, gross_loot, "
                 "market_rate_percent, repairs, other_expenses, guild_percent, "
                 "guild_amount, distributable, notes, created_at, sent_to_admin_at, "
-                "reviewed_by, reviewed_at, caller_percent, caller_amount",
+                "reviewed_by, reviewed_at, caller_percent, caller_amount, "
+                "quick_liquidated_at, quick_liquidated_by",
             ),
             "movements": (
                 """
@@ -362,6 +396,18 @@ class Database:
         self._conn.execute(
             "CREATE UNIQUE INDEX IF NOT EXISTS idx_caller_penalties_one_active "
             "ON caller_penalties(guild_id, user_id) WHERE active = 1"
+        )
+        self._conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_admin_access_guild_authorized "
+            "ON admin_access(guild_id, authorized)"
+        )
+        self._conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_payout_participants_liquidation "
+            "ON payout_participants(payout_id, liquidated_at)"
+        )
+        self._conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_quick_liquidations_guild_created "
+            "ON quick_liquidations(guild_id, created_at)"
         )
 
     def _has_unique_index(self, table: str, columns: tuple[str, ...]) -> bool:
@@ -473,6 +519,15 @@ CREATE TABLE IF NOT EXISTS callers (
     user_id INTEGER NOT NULL,
     added_by INTEGER NOT NULL,
     created_at TEXT NOT NULL,
+    PRIMARY KEY (guild_id, user_id)
+);
+
+CREATE TABLE IF NOT EXISTS admin_access (
+    guild_id INTEGER NOT NULL,
+    user_id INTEGER NOT NULL,
+    authorized INTEGER NOT NULL,
+    updated_by INTEGER NOT NULL,
+    updated_at TEXT NOT NULL,
     PRIMARY KEY (guild_id, user_id)
 );
 
@@ -696,6 +751,8 @@ CREATE TABLE IF NOT EXISTS payouts (
     reviewed_at TEXT,
     caller_percent REAL NOT NULL DEFAULT 0,
     caller_amount INTEGER NOT NULL DEFAULT 0,
+    quick_liquidated_at TEXT,
+    quick_liquidated_by INTEGER,
     UNIQUE(guild_id, code)
 );
 
@@ -717,7 +774,34 @@ CREATE TABLE IF NOT EXISTS payout_participants (
     amount INTEGER NOT NULL DEFAULT 0,
     balance_type TEXT,
     deposited_at TEXT,
+    liquidated_at TEXT,
+    liquidated_by INTEGER,
+    liquidation_id INTEGER,
+    liquidation_movement_id INTEGER,
     UNIQUE(payout_id, user_id)
+);
+
+CREATE TABLE IF NOT EXISTS quick_liquidations (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    code TEXT NOT NULL,
+    guild_id INTEGER NOT NULL,
+    payout_id INTEGER NOT NULL REFERENCES payouts(id) ON DELETE CASCADE,
+    mode TEXT NOT NULL,
+    admin_id INTEGER NOT NULL,
+    total_amount INTEGER NOT NULL,
+    created_at TEXT NOT NULL,
+    UNIQUE(guild_id, code)
+);
+
+CREATE TABLE IF NOT EXISTS quick_liquidation_items (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    liquidation_id INTEGER NOT NULL REFERENCES quick_liquidations(id) ON DELETE CASCADE,
+    payout_participant_id INTEGER NOT NULL REFERENCES payout_participants(id) ON DELETE CASCADE,
+    user_id INTEGER NOT NULL,
+    amount INTEGER NOT NULL,
+    balance_type TEXT NOT NULL,
+    movement_id INTEGER NOT NULL,
+    UNIQUE(payout_participant_id)
 );
 
 CREATE TABLE IF NOT EXISTS movements (

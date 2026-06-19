@@ -35,6 +35,12 @@ def is_admin_subject(db: Database, subject: commands.Context | discord.Interacti
     member = _member_from_subject(subject)
     if guild is None or member is None:
         return False
+    override = db.fetch_one(
+        "SELECT authorized FROM admin_access WHERE guild_id = ? AND user_id = ?",
+        (guild.id, member.id),
+    )
+    if override is not None:
+        return bool(override["authorized"])
     if member.guild_permissions.administrator:
         return True
     return has_any_configured_role(member, db.get_setting(guild.id, "admin_role_ids"))

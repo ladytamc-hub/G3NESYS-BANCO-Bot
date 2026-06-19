@@ -1,16 +1,19 @@
 PINGS_PANEL_IMAGE = (
-    "https://cdn.discordapp.com/attachments/1496878843644870716/"
-    "1516779723504488519/actividades-gremiales.png"
+    "https://cdn.discordapp.com/attachments/1517430214584700950/"
+    "1517431114346528808/actividades-gremiales.png?ex=6a36415a&is=6a34efda&"
+    "hm=812245ba88e45a021b9dc03f2788eae834ccb3913fcc6fc8d9afc4c379121c43"
 )
 
 BANK_PANEL_IMAGE = (
-    "https://cdn.discordapp.com/attachments/1496878843644870716/"
-    "1516759603931643944/G3N-BANCO.png"
+    "https://cdn.discordapp.com/attachments/1517430214584700950/"
+    "1517430793780072479/G3N-BANCO.png?ex=6a36410d&is=6a34ef8d&"
+    "hm=1f42537fe22b204b8112412b16c3ca5d1bccb54cbd6533358a3adbc1f56891c3"
 )
 
 ADMIN_PANEL_IMAGE = (
-    "https://cdn.discordapp.com/attachments/1496878843644870716/"
-    "1516779706693849128/panel_administrativo.png"
+    "https://cdn.discordapp.com/attachments/1517430214584700950/"
+    "1517431097011736596/panel_administrativo.png?ex=6a364156&is=6a34efd6&"
+    "hm=1543c9ab081d7167558c55eb5c78d16b815fae66b9ae93bfa10c8006ac51dfae"
 )
 
 CALLERS_WELCOME_IMAGE = (
