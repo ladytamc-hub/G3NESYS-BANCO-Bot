@@ -73,6 +73,7 @@ NOTIFICATION_CATEGORY_MAP = {
     category: (label, emoji)
     for category, label, emoji in NOTIFICATION_CHANNEL_CATEGORIES
 }
+RECRUITER_ROLE_NAMES = {"reclutador", "reclutadores"}
 
 
 def normalize_admin_message(value: str | None) -> str:
@@ -840,6 +841,146 @@ class CallersAdminView(discord.ui.View):
             )
 
 
+class RecruiterMemberSelect(discord.ui.UserSelect):
+    def __init__(self, cog: "Admin", *, action: str, admin_id: int):
+        verb = "agregar como reclutador" if action == "add" else "eliminar como reclutador"
+        super().__init__(
+            placeholder=f"Selecciona a quien quieres {verb}",
+            min_values=1,
+            max_values=1,
+        )
+        self.cog = cog
+        self.action = action
+        self.admin_id = admin_id
+
+    async def callback(self, interaction: discord.Interaction) -> None:
+        if interaction.user.id != self.admin_id or not is_admin_subject(self.cog.db, interaction):
+            await private_response(interaction, "Solo el admin que abrio este menu puede usarlo.")
+            return
+        if interaction.guild is None:
+            await private_response(interaction, "Este menu solo funciona dentro del servidor.")
+            return
+        selected = self.values[0]
+        member = selected if isinstance(selected, discord.Member) else interaction.guild.get_member(selected.id)
+        if member is None:
+            try:
+                member = await interaction.guild.fetch_member(selected.id)
+            except (discord.NotFound, discord.Forbidden, discord.HTTPException):
+                member = None
+        if member is None:
+            await private_response(interaction, "No encontre a ese usuario dentro del servidor.")
+            return
+        if member.bot and self.action == "add":
+            await private_response(interaction, "Un bot no puede registrarse como reclutador.")
+            return
+        if self.action == "add":
+            await self.cog.add_recruiter_interaction(interaction, member)
+        else:
+            await self.cog.remove_recruiter_interaction(interaction, member)
+
+
+class RecruiterSelectionView(discord.ui.View):
+    def __init__(self, cog: "Admin", *, action: str, admin_id: int):
+        super().__init__(timeout=180)
+        self.add_item(RecruiterMemberSelect(cog, action=action, admin_id=admin_id))
+
+
+class RecruitersAdminView(discord.ui.View):
+    def __init__(self, cog: "Admin"):
+        super().__init__(timeout=300)
+        self.cog = cog
+
+    async def require_admin(self, interaction: discord.Interaction) -> bool:
+        if is_admin_subject(self.cog.db, interaction):
+            return True
+        await private_response(interaction, "Solo admins autorizados pueden gestionar reclutadores.")
+        return False
+
+    @discord.ui.button(label="Ver reclutadores actuales", emoji="👥", style=discord.ButtonStyle.primary)
+    async def list_recruiters(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
+        if await self.require_admin(interaction):
+            await dm_or_private(
+                self.cog,
+                interaction,
+                self.cog.recruiters_text(interaction.guild),
+                "lista_reclutadores",
+            )
+
+    @discord.ui.button(label="Agregar reclutador", emoji="➕", style=discord.ButtonStyle.success)
+    async def add_recruiter(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
+        if await self.require_admin(interaction):
+            await private_response(
+                interaction,
+                "Selecciona al nuevo reclutador:",
+                view=RecruiterSelectionView(
+                    self.cog,
+                    action="add",
+                    admin_id=interaction.user.id,
+                ),
+            )
+
+    @discord.ui.button(label="Eliminar reclutador", emoji="➖", style=discord.ButtonStyle.danger)
+    async def remove_recruiter(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
+        if await self.require_admin(interaction):
+            await private_response(
+                interaction,
+                "Selecciona al usuario al que deseas quitar el rol de Reclutador:",
+                view=RecruiterSelectionView(
+                    self.cog,
+                    action="remove",
+                    admin_id=interaction.user.id,
+                ),
+            )
+
+
+class AdminsAdminView(discord.ui.View):
+    def __init__(self, cog: "Admin"):
+        super().__init__(timeout=300)
+        self.cog = cog
+
+    async def require_admin(self, interaction: discord.Interaction) -> bool:
+        if is_admin_subject(self.cog.db, interaction):
+            return True
+        await private_response(interaction, "Solo admins autorizados pueden gestionar administradores.")
+        return False
+
+    @discord.ui.button(label="Ver admins actuales", emoji="👥", style=discord.ButtonStyle.primary)
+    async def list_admins(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
+        if await self.require_admin(interaction):
+            await dm_or_private(
+                self.cog,
+                interaction,
+                self.cog.admins_text(interaction.guild),
+                "lista_admins",
+            )
+
+    @discord.ui.button(label="Agregar admin", emoji="➕", style=discord.ButtonStyle.success)
+    async def add_admin(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
+        if await self.require_admin(interaction):
+            await private_response(
+                interaction,
+                "Selecciona al usuario que deseas autorizar como admin o ingresa su ID:",
+                view=AdminSelectionView(
+                    self.cog,
+                    action="add",
+                    admin_id=interaction.user.id,
+                ),
+            )
+
+    @discord.ui.button(label="Eliminar admin", emoji="➖", style=discord.ButtonStyle.danger)
+    async def remove_admin(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
+        if await self.require_admin(interaction):
+            await private_response(
+                interaction,
+                "Selecciona al admin que deseas retirar o ingresa su ID:",
+                view=AdminSelectionView(
+                    self.cog,
+                    action="remove",
+                    admin_id=interaction.user.id,
+                ),
+            )
+
+
 class PayoutReasonModal(discord.ui.Modal):
     reason = discord.ui.TextInput(label="Motivo", style=discord.TextStyle.paragraph, max_length=600)
 
@@ -1177,6 +1318,96 @@ class NotificationsAdminView(discord.ui.View):
         )
 
 
+class ExtraAdminOptionsView(discord.ui.View):
+    def __init__(self, cog: "Admin"):
+        super().__init__(timeout=300)
+        self.cog = cog
+
+    async def require_admin(self, interaction: discord.Interaction) -> bool:
+        if is_admin_subject(self.cog.db, interaction):
+            return True
+        await private_response(interaction, "Solo admins autorizados pueden usar estas opciones.")
+        return False
+
+    @discord.ui.button(label="Rankings", emoji="🏆", style=discord.ButtonStyle.secondary)
+    async def rankings(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
+        if await self.require_admin(interaction):
+            await dm_or_private(
+                self.cog,
+                interaction,
+                self.cog.rankings_text(interaction.guild.id),
+                "rankings_panel",
+            )
+
+    @discord.ui.button(label="Notificaciones", emoji="🔔", style=discord.ButtonStyle.primary)
+    async def notifications(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
+        if await self.require_admin(interaction):
+            await private_response(
+                interaction,
+                self.cog.notification_settings_text(interaction.guild.id),
+                view=NotificationsAdminView(self.cog),
+            )
+
+
+class LegacyAdminPanelCallbacksView(discord.ui.View):
+    """Keeps buttons from already-published admin panels working after the redesign."""
+
+    def __init__(self, cog: "Admin"):
+        super().__init__(timeout=None)
+        self.cog = cog
+
+    async def require_admin(self, interaction: discord.Interaction) -> bool:
+        if is_admin_subject(self.cog.db, interaction):
+            return True
+        await private_response(interaction, "Solo admins autorizados pueden usar este panel.")
+        return False
+
+    @discord.ui.button(label="Rankings", custom_id="g3n:admin:rankings")
+    async def rankings(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
+        if await self.require_admin(interaction):
+            await dm_or_private(
+                self.cog,
+                interaction,
+                self.cog.rankings_text(interaction.guild.id),
+                "rankings_panel",
+            )
+
+    @discord.ui.button(label="Notificaciones", custom_id="g3n:admin:notifications")
+    async def notifications(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
+        if await self.require_admin(interaction):
+            await private_response(
+                interaction,
+                self.cog.notification_settings_text(interaction.guild.id),
+                view=NotificationsAdminView(self.cog),
+            )
+
+    @discord.ui.button(label="Agregar admin", custom_id="g3n:admin:add_admin")
+    async def add_admin(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
+        if await self.require_admin(interaction):
+            await private_response(
+                interaction,
+                "Selecciona al usuario que deseas autorizar como admin o ingresa su ID:",
+                view=AdminSelectionView(
+                    self.cog,
+                    action="add",
+                    admin_id=interaction.user.id,
+                ),
+            )
+
+    @discord.ui.button(label="Eliminar admin", custom_id="g3n:admin:remove_admin")
+    async def remove_admin(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
+        if await self.require_admin(interaction):
+            await private_response(
+                interaction,
+                "Selecciona al admin que deseas retirar o ingresa su ID:",
+                view=AdminSelectionView(
+                    self.cog,
+                    action="remove",
+                    admin_id=interaction.user.id,
+                ),
+            )
+
+
 class AdminPanelView(discord.ui.View):
     def __init__(self, cog: "Admin"):
         super().__init__(timeout=None)
@@ -1188,7 +1419,7 @@ class AdminPanelView(discord.ui.View):
         await private_response(interaction, "Solo admins autorizados pueden usar este panel.")
         return False
 
-    @discord.ui.button(label="Ver Tesoreria", emoji="💰", style=discord.ButtonStyle.primary, custom_id="g3n:admin:treasury", row=0)
+    @discord.ui.button(label="Ver Plata Gremial", emoji="💰", style=discord.ButtonStyle.primary, custom_id="g3n:admin:treasury", row=0)
     async def treasury(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
         if await self.require_admin(interaction):
             await dm_or_private(self.cog, interaction, self.cog.treasury_text(interaction.guild.id), "tesoreria_panel")
@@ -1212,6 +1443,20 @@ class AdminPanelView(discord.ui.View):
                 view=DepositOptionsView(self.cog, admin_id=interaction.user.id),
             )
 
+    @discord.ui.button(label="Solicitudes de Cobro", emoji="💳", style=discord.ButtonStyle.secondary, custom_id="g3n:admin:withdrawals", row=1)
+    async def withdrawals(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
+        if await self.require_admin(interaction):
+            await private_response(
+                interaction,
+                self.cog.withdrawals_text(interaction.guild.id),
+                view=WithdrawalAdminView(self.cog),
+            )
+
+    @discord.ui.button(label="Edo.Cta.Usuario", emoji="👤", style=discord.ButtonStyle.secondary, custom_id="g3n:admin:statement", row=1)
+    async def statement(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
+        if await self.require_admin(interaction):
+            await interaction.response.send_modal(UserStatementModal(self.cog))
+
     @discord.ui.button(label="Revisar Splits", emoji="📋", style=discord.ButtonStyle.secondary, custom_id="g3n:admin:payouts", row=2)
     async def payouts(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
         if await self.require_admin(interaction):
@@ -1221,21 +1466,7 @@ class AdminPanelView(discord.ui.View):
                 view=SplitsAdminView(self.cog),
             )
 
-    @discord.ui.button(label="Solicitudes Cobro", emoji="💳", style=discord.ButtonStyle.secondary, custom_id="g3n:admin:withdrawals", row=1)
-    async def withdrawals(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
-        if await self.require_admin(interaction):
-            await private_response(
-                interaction,
-                self.cog.withdrawals_text(interaction.guild.id),
-                view=WithdrawalAdminView(self.cog),
-            )
-
-    @discord.ui.button(label="Estado de Cuenta", emoji="👤", style=discord.ButtonStyle.secondary, custom_id="g3n:admin:statement", row=1)
-    async def statement(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
-        if await self.require_admin(interaction):
-            await interaction.response.send_modal(UserStatementModal(self.cog))
-
-    @discord.ui.button(label="Historial de liquidaciones", emoji="🧾", style=discord.ButtonStyle.secondary, custom_id="g3n:admin:liquidation_history", row=2)
+    @discord.ui.button(label="Historial de Liquidaciones", emoji="🧾", style=discord.ButtonStyle.secondary, custom_id="g3n:admin:liquidation_history", row=2)
     async def liquidation_history(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
         if await self.require_admin(interaction):
             await dm_or_private(
@@ -1245,42 +1476,12 @@ class AdminPanelView(discord.ui.View):
                 "historial_liquidaciones_admin",
             )
 
-    @discord.ui.button(label="Rankings", emoji="🏆", style=discord.ButtonStyle.secondary, custom_id="g3n:admin:rankings", row=2)
-    async def rankings(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
-        if await self.require_admin(interaction):
-            await dm_or_private(self.cog, interaction, self.cog.rankings_text(interaction.guild.id), "rankings_panel")
-
-    @discord.ui.button(label="Reportes", emoji="📊", style=discord.ButtonStyle.secondary, custom_id="g3n:admin:reports", row=3)
-    async def reports(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
-        if await self.require_admin(interaction):
-            await interaction.response.defer(ephemeral=True)
-            path = self.cog.create_report(interaction.guild.id)
-            await interaction.followup.send(
-                "Reporte administrativo integral generado.",
-                file=discord.File(path),
-                ephemeral=True,
-            )
-
-    @discord.ui.button(label="Multas", emoji="🚨", style=discord.ButtonStyle.danger, custom_id="g3n:admin:fines", row=3)
-    async def fines(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
-        if await self.require_admin(interaction):
-            await private_response(
-                interaction,
-                "Panel de multas:",
-                view=FineAdminView(self.cog),
-            )
-
-    @discord.ui.button(label="Auditoria", emoji="🔍", style=discord.ButtonStyle.secondary, custom_id="g3n:admin:audit", row=3)
-    async def audit(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
-        if await self.require_admin(interaction):
-            await dm_or_private(self.cog, interaction, self.cog.audit_text(interaction.guild.id), "auditoria_panel")
-
-    @discord.ui.button(label="Edo. Cta. Gremio", emoji="📜", style=discord.ButtonStyle.secondary, custom_id="g3n:admin:history", row=3)
+    @discord.ui.button(label="Edo.Cta.Gremio", emoji="📜", style=discord.ButtonStyle.secondary, custom_id="g3n:admin:history", row=2)
     async def history(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
         if await self.require_admin(interaction):
             await dm_or_private(self.cog, interaction, self.cog.history_text(interaction.guild.id), "historial_panel")
 
-    @discord.ui.button(label="Callers", emoji="📣", style=discord.ButtonStyle.primary, custom_id="g3n:admin:callers", row=4)
+    @discord.ui.button(label="Callers", emoji="📣", style=discord.ButtonStyle.primary, custom_id="g3n:admin:callers", row=3)
     async def callers(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
         if await self.require_admin(interaction):
             embed = discord.Embed(
@@ -1296,44 +1497,69 @@ class AdminPanelView(discord.ui.View):
             )
             await private_response(interaction, "Menu de callers:", embed=embed, view=CallersAdminView(self.cog))
 
-    @discord.ui.button(label="Configuracion", emoji="⚙️", style=discord.ButtonStyle.secondary, custom_id="g3n:admin:config", row=4)
+    @discord.ui.button(label="Reclutadores", emoji="🛡️", style=discord.ButtonStyle.primary, custom_id="g3n:admin:recruiters", row=3)
+    async def recruiters(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
+        if await self.require_admin(interaction):
+            await private_response(
+                interaction,
+                "Menu de reclutadores:",
+                embed=discord.Embed(
+                    title="🛡️ Gestion de Reclutadores G3NESYS",
+                    description=(
+                        "Agrega, elimina o consulta a quienes tienen el rol de Reclutador. "
+                        "Si el rol no existe, se creara al agregar al primer reclutador."
+                    ),
+                    color=discord.Color.blurple(),
+                ),
+                view=RecruitersAdminView(self.cog),
+            )
+
+    @discord.ui.button(label="Admins", emoji="🔐", style=discord.ButtonStyle.primary, custom_id="g3n:admin:admins", row=3)
+    async def admins(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
+        if await self.require_admin(interaction):
+            await private_response(
+                interaction,
+                "Menu de administradores:",
+                view=AdminsAdminView(self.cog),
+            )
+
+    @discord.ui.button(label="Reportes", emoji="📊", style=discord.ButtonStyle.secondary, custom_id="g3n:admin:reports", row=4)
+    async def reports(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
+        if await self.require_admin(interaction):
+            await interaction.response.defer(ephemeral=True)
+            path = self.cog.create_report(interaction.guild.id)
+            await interaction.followup.send(
+                "Reporte administrativo integral generado.",
+                file=discord.File(path),
+                ephemeral=True,
+            )
+
+    @discord.ui.button(label="Auditoria", emoji="🔍", style=discord.ButtonStyle.secondary, custom_id="g3n:admin:audit", row=4)
+    async def audit(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
+        if await self.require_admin(interaction):
+            await dm_or_private(self.cog, interaction, self.cog.audit_text(interaction.guild.id), "auditoria_panel")
+
+    @discord.ui.button(label="Multas", emoji="🚨", style=discord.ButtonStyle.danger, custom_id="g3n:admin:fines", row=4)
+    async def fines(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
+        if await self.require_admin(interaction):
+            await private_response(
+                interaction,
+                "Panel de multas:",
+                view=FineAdminView(self.cog),
+            )
+
+    @discord.ui.button(label="Config", emoji="⚙️", style=discord.ButtonStyle.secondary, custom_id="g3n:admin:config", row=4)
     async def config(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
         if await self.require_admin(interaction):
             await private_response(interaction, "Usa `!config_ver`, comandos `!canal_*_set`, `!caller_set` y `!economia_set`.")
 
-    @discord.ui.button(label="Notificaciones", emoji="🔔", style=discord.ButtonStyle.primary, custom_id="g3n:admin:notifications", row=4)
-    async def notifications(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
+    @discord.ui.button(label="Más", emoji="🧭", style=discord.ButtonStyle.secondary, custom_id="g3n:admin:more", row=4)
+    async def more(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
         if await self.require_admin(interaction):
             await private_response(
                 interaction,
-                self.cog.notification_settings_text(interaction.guild.id),
-                view=NotificationsAdminView(self.cog),
-            )
-
-    @discord.ui.button(label="Agregar admin", emoji="➕", style=discord.ButtonStyle.success, custom_id="g3n:admin:add_admin", row=4)
-    async def add_admin(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
-        if await self.require_admin(interaction):
-            await private_response(
-                interaction,
-                "Selecciona al usuario que deseas autorizar como admin o ingresa su ID:",
-                view=AdminSelectionView(
-                    self.cog,
-                    action="add",
-                    admin_id=interaction.user.id,
-                ),
-            )
-
-    @discord.ui.button(label="Eliminar admin", emoji="➖", style=discord.ButtonStyle.danger, custom_id="g3n:admin:remove_admin", row=4)
-    async def remove_admin(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
-        if await self.require_admin(interaction):
-            await private_response(
-                interaction,
-                "Selecciona al admin que deseas retirar o ingresa su ID:",
-                view=AdminSelectionView(
-                    self.cog,
-                    action="remove",
-                    admin_id=interaction.user.id,
-                ),
+                "Opciones adicionales:",
+                view=ExtraAdminOptionsView(self.cog),
             )
 
 
@@ -1344,6 +1570,7 @@ class Admin(commands.Cog):
 
     async def cog_load(self) -> None:
         self.bot.add_view(AdminPanelView(self))
+        self.bot.add_view(LegacyAdminPanelCallbacksView(self))
         rows = self.db.fetch_all(
             """
             SELECT DISTINCT code
@@ -1379,6 +1606,156 @@ class Admin(commands.Cog):
             if self.member_has_admin_access(guild, member):
                 return True
         return False
+
+    @staticmethod
+    def recruiter_roles(guild: discord.Guild) -> list[discord.Role]:
+        roles = [
+            role
+            for role in guild.roles
+            if role.name.strip().casefold() in RECRUITER_ROLE_NAMES
+        ]
+        return sorted(
+            roles,
+            key=lambda role: (role.name.strip().casefold() != "reclutador", role.position),
+        )
+
+    def recruiters_text(self, guild: discord.Guild) -> str:
+        roles = self.recruiter_roles(guild)
+        if not roles:
+            return "🛡️ **Reclutadores actuales**\nEl rol Reclutador todavia no existe."
+        role_ids = {role.id for role in roles}
+        members = sorted(
+            (
+                member
+                for member in guild.members
+                if not member.bot and any(role.id in role_ids for role in member.roles)
+            ),
+            key=lambda member: member.display_name.casefold(),
+        )
+        if not members:
+            return "🛡️ **Reclutadores actuales**\nNingun usuario tiene el rol de Reclutador."
+        lines = ["🛡️ **Reclutadores actuales**"]
+        lines.extend(f"{index}. {member.mention}" for index, member in enumerate(members[:50], start=1))
+        if len(members) > 50:
+            lines.append(f"… y {len(members) - 50} mas.")
+        return "\n".join(lines)
+
+    def admins_text(self, guild: discord.Guild) -> str:
+        members = sorted(
+            (
+                member
+                for member in guild.members
+                if not member.bot and self.member_has_admin_access(guild, member)
+            ),
+            key=lambda member: member.display_name.casefold(),
+        )
+        if not members:
+            return "🔐 **Admins actuales**\nNo encontre administradores autorizados."
+        lines = ["🔐 **Admins actuales**"]
+        lines.extend(f"{index}. {member.mention}" for index, member in enumerate(members[:50], start=1))
+        if len(members) > 50:
+            lines.append(f"… y {len(members) - 50} mas.")
+        return "\n".join(lines)
+
+    async def add_recruiter_interaction(
+        self,
+        interaction: discord.Interaction,
+        member: discord.Member,
+    ) -> None:
+        guild = interaction.guild
+        if guild is None:
+            await private_response(interaction, "Este menu solo funciona dentro del servidor.")
+            return
+        roles = self.recruiter_roles(guild)
+        if any(role in member.roles for role in roles):
+            await private_response(interaction, f"{member.mention} ya tiene el rol de Reclutador.")
+            return
+        role = roles[0] if roles else None
+        if role is None:
+            try:
+                role = await guild.create_role(
+                    name="Reclutador",
+                    reason=f"Creado desde el Panel Administrativo por {interaction.user}",
+                )
+            except discord.Forbidden:
+                await private_response(
+                    interaction,
+                    "No pude crear el rol Reclutador. Revisa que el bot tenga permiso para gestionar roles.",
+                )
+                return
+            except discord.HTTPException:
+                await private_response(interaction, "Discord no permitio crear el rol Reclutador. Intenta de nuevo.")
+                return
+        try:
+            await member.add_roles(
+                role,
+                reason=f"Asignado desde el Panel Administrativo por {interaction.user}",
+            )
+        except discord.Forbidden:
+            await private_response(
+                interaction,
+                "No pude asignar el rol. Coloca el rol del bot por encima de Reclutador y permite gestionar roles.",
+            )
+            return
+        except discord.HTTPException:
+            await private_response(interaction, "Discord no permitio asignar el rol Reclutador. Intenta de nuevo.")
+            return
+        log_action(
+            self.db,
+            guild.id,
+            admin_id=interaction.user.id,
+            action="Agregar reclutador",
+            affected_user_id=member.id,
+            system="Reclutadores",
+            observation=f"Rol {role.name} ({role.id}) asignado desde el panel administrativo.",
+        )
+        await private_response(
+            interaction,
+            f"🛡️ {member.mention} ahora tiene el rol {role.mention}.",
+        )
+
+    async def remove_recruiter_interaction(
+        self,
+        interaction: discord.Interaction,
+        member: discord.Member,
+    ) -> None:
+        guild = interaction.guild
+        if guild is None:
+            await private_response(interaction, "Este menu solo funciona dentro del servidor.")
+            return
+        recruiter_roles = self.recruiter_roles(guild)
+        member_roles = [role for role in recruiter_roles if role in member.roles]
+        if not member_roles:
+            await private_response(interaction, f"{member.mention} no tiene el rol de Reclutador.")
+            return
+        try:
+            await member.remove_roles(
+                *member_roles,
+                reason=f"Retirado desde el Panel Administrativo por {interaction.user}",
+            )
+        except discord.Forbidden:
+            await private_response(
+                interaction,
+                "No pude quitar el rol. Coloca el rol del bot por encima de Reclutador y permite gestionar roles.",
+            )
+            return
+        except discord.HTTPException:
+            await private_response(interaction, "Discord no permitio quitar el rol Reclutador. Intenta de nuevo.")
+            return
+        role_names = ", ".join(role.name for role in member_roles)
+        log_action(
+            self.db,
+            guild.id,
+            admin_id=interaction.user.id,
+            action="Eliminar reclutador",
+            affected_user_id=member.id,
+            system="Reclutadores",
+            observation=f"Rol(es) {role_names} retirado(s) desde el panel administrativo.",
+        )
+        await private_response(
+            interaction,
+            f"➖ {member.mention} ya no tiene el rol de Reclutador.",
+        )
 
     async def prompt_admin_change(
         self,
