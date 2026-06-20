@@ -1339,6 +1339,18 @@ class ExtraAdminOptionsView(discord.ui.View):
                 "rankings_panel",
             )
 
+
+class ConfigAdminView(discord.ui.View):
+    def __init__(self, cog: "Admin"):
+        super().__init__(timeout=300)
+        self.cog = cog
+
+    async def require_admin(self, interaction: discord.Interaction) -> bool:
+        if is_admin_subject(self.cog.db, interaction):
+            return True
+        await private_response(interaction, "Solo admins autorizados pueden usar estas opciones.")
+        return False
+
     @discord.ui.button(label="Notificaciones", emoji="🔔", style=discord.ButtonStyle.primary)
     async def notifications(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
         if await self.require_admin(interaction):
@@ -1466,7 +1478,7 @@ class AdminPanelView(discord.ui.View):
                 view=SplitsAdminView(self.cog),
             )
 
-    @discord.ui.button(label="Historial de Liquidaciones", emoji="🧾", style=discord.ButtonStyle.secondary, custom_id="g3n:admin:liquidation_history", row=2)
+    @discord.ui.button(label="Historial Liq.", emoji="🧾", style=discord.ButtonStyle.secondary, custom_id="g3n:admin:liquidation_history", row=2)
     async def liquidation_history(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
         if await self.require_admin(interaction):
             await dm_or_private(
@@ -1539,7 +1551,7 @@ class AdminPanelView(discord.ui.View):
         if await self.require_admin(interaction):
             await dm_or_private(self.cog, interaction, self.cog.audit_text(interaction.guild.id), "auditoria_panel")
 
-    @discord.ui.button(label="Multas", emoji="🚨", style=discord.ButtonStyle.danger, custom_id="g3n:admin:fines", row=4)
+    @discord.ui.button(label="Multas", emoji="🚨", style=discord.ButtonStyle.danger, custom_id="g3n:admin:fines", row=3)
     async def fines(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
         if await self.require_admin(interaction):
             await private_response(
@@ -1548,11 +1560,6 @@ class AdminPanelView(discord.ui.View):
                 view=FineAdminView(self.cog),
             )
 
-    @discord.ui.button(label="Config", emoji="⚙️", style=discord.ButtonStyle.secondary, custom_id="g3n:admin:config", row=4)
-    async def config(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
-        if await self.require_admin(interaction):
-            await private_response(interaction, "Usa `!config_ver`, comandos `!canal_*_set`, `!caller_set` y `!economia_set`.")
-
     @discord.ui.button(label="Más", emoji="🧭", style=discord.ButtonStyle.secondary, custom_id="g3n:admin:more", row=4)
     async def more(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
         if await self.require_admin(interaction):
@@ -1560,6 +1567,15 @@ class AdminPanelView(discord.ui.View):
                 interaction,
                 "Opciones adicionales:",
                 view=ExtraAdminOptionsView(self.cog),
+            )
+
+    @discord.ui.button(label="Config.", emoji="⚙️", style=discord.ButtonStyle.secondary, custom_id="g3n:admin:config", row=4)
+    async def config(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
+        if await self.require_admin(interaction):
+            await private_response(
+                interaction,
+                "Usa `!config_ver`, comandos `!canal_*_set`, `!caller_set` y `!economia_set`.",
+                view=ConfigAdminView(self.cog),
             )
 
 
