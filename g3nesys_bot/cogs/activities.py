@@ -47,6 +47,7 @@ MAX_ACTIVITY_ROLES = 15
 ACTIVITY_MANAGEMENT_DENIED_MESSAGE = (
     "No puedes administrar esta actividad porque no fuiste quien la creó."
 )
+VOICE_CHANNEL_ERROR = "❌ Debes ingresar un ID válido de canal de voz."
 
 
 def parse_role_lines(raw: str) -> list[dict]:
@@ -137,6 +138,16 @@ def parse_cost_pair(raw: str) -> tuple[int, int]:
     return repairs, expenses
 
 
+def resolve_voice_channel(guild: discord.Guild, raw: str | None):
+    channel_id = parse_channel_id(raw)
+    if channel_id is None:
+        return None
+    channel = guild.get_channel(channel_id)
+    if isinstance(channel, (discord.VoiceChannel, discord.StageChannel)):
+        return channel
+    return None
+
+
 def parse_iso_datetime(value: str | None) -> datetime | None:
     if not value:
         return None
@@ -183,7 +194,7 @@ async def dm_or_private(cog: "Activities", interaction: discord.Interaction, con
         await private_response(interaction, content[:1900])
 
 
-class TemplateModal(discord.ui.Modal, title="Crear plantilla"):
+class TemplateModal(discord.ui.Modal, title="Crear Plantilla"):
     template_name = discord.ui.TextInput(label="Nombre de plantilla", max_length=80)
     activity_name = discord.ui.TextInput(label="Nombre base de actividad", max_length=100)
     default_time = discord.ui.TextInput(label="Horario base", max_length=40)
@@ -200,12 +211,94 @@ class TemplateModal(discord.ui.Modal, title="Crear plantilla"):
         max_length=1800,
     )
 
-    def __init__(self, cog: "Activities"):
+    def __init__(self, cog: "Activities", *, voice_channel_id: int, publica: bool = False):
         super().__init__(timeout=300)
         self.cog = cog
+        self.voice_channel_id = voice_channel_id
+        self.publica = publica
 
     async def on_submit(self, interaction: discord.Interaction) -> None:
         await self.cog.create_template_from_modal(interaction, self)
+
+
+class TemplateVoiceChannelSelect(discord.ui.ChannelSelect):
+    def __init__(self, parent_view: "TemplateVisibilityView"):
+        super().__init__(
+            placeholder="Selecciona el canal de voz obligatorio",
+            channel_types=[discord.ChannelType.voice, discord.ChannelType.stage_voice],
+            min_values=1,
+            max_values=1,
+            row=1,
+        )
+        self.parent_view = parent_view
+
+    async def callback(self, interaction: discord.Interaction) -> None:
+        channel = self.values[0]
+        if not isinstance(channel, (discord.VoiceChannel, discord.StageChannel)):
+            await private_response(interaction, VOICE_CHANNEL_ERROR)
+            return
+        self.parent_view.voice_channel_id = channel.id
+        await interaction.response.edit_message(content=self.parent_view.visibility_text(), view=self.parent_view)
+
+
+class TemplateVisibilityView(discord.ui.View):
+    def __init__(self, cog: "Activities", *, author_id: int, publica: bool = False):
+        super().__init__(timeout=180)
+        self.cog = cog
+        self.author_id = author_id
+        self.publica = publica
+        self.voice_channel_id: int | None = None
+        self.add_item(TemplateVoiceChannelSelect(self))
+        self.update_toggle_button()
+
+    def visibility_text(self) -> str:
+        voice_text = f"<#{self.voice_channel_id}>" if self.voice_channel_id else "Pendiente"
+        return (
+            "Elige la visibilidad de la plantilla antes de completar el formulario.\n"
+            "Privada: solo tu puedes verla y usarla.\n"
+            "Publica: cualquier Caller puede verla y usarla; solo tu o un admin podran administrarla.\n"
+            f"Canal de voz: {voice_text}"
+        )
+
+    def update_toggle_button(self) -> None:
+        self.public_toggle.label = "Plantilla publica: Si" if self.publica else "Plantilla publica: No"
+        self.public_toggle.style = discord.ButtonStyle.success if self.publica else discord.ButtonStyle.secondary
+        self.public_toggle.emoji = "🌐" if self.publica else "🔒"
+
+    async def require_author(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id == self.author_id and is_caller_subject(self.cog.db, interaction):
+            return True
+        await private_response(interaction, "Solo quien abrio esta creacion puede continuar.")
+        return False
+
+    @discord.ui.button(label="Plantilla publica: No", emoji="🔒", style=discord.ButtonStyle.secondary, row=0)
+    async def public_toggle(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
+        if not await self.require_author(interaction):
+            return
+        self.publica = not self.publica
+        self.update_toggle_button()
+        await interaction.response.edit_message(content=self.visibility_text(), view=self)
+
+    @discord.ui.button(label="Continuar", emoji="➡️", style=discord.ButtonStyle.primary, row=2)
+    async def continue_button(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
+        if not await self.require_author(interaction):
+            return
+        if self.voice_channel_id is None:
+            await private_response(interaction, VOICE_CHANNEL_ERROR)
+            return
+        await interaction.response.send_modal(
+            TemplateModal(
+                self.cog,
+                voice_channel_id=self.voice_channel_id,
+                publica=self.publica,
+            )
+        )
+
+    @discord.ui.button(label="Cancelar", emoji="✖️", style=discord.ButtonStyle.danger, row=2)
+    async def cancel_button(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
+        if not await self.require_author(interaction):
+            return
+        await interaction.response.edit_message(content="Creacion de plantilla cancelada.", view=None)
 
 
 class ActivityModal(discord.ui.Modal):
@@ -217,8 +310,9 @@ class ActivityModal(discord.ui.Modal):
         default_name: str = "",
         default_time: str = "",
         default_notes: str = "",
+        default_voice_channel_id: int | None = None,
     ):
-        title = "Publicar actividad" if template_id else "Crear actividad"
+        title = "Crear Ping"
         super().__init__(title=title, timeout=300)
         self.cog = cog
         self.template_id = template_id
@@ -233,9 +327,11 @@ class ActivityModal(discord.ui.Modal):
             default=default_time,
         )
         self.voice_channel = discord.ui.TextInput(
-            label="Canal de voz (ID o mencion)",
-            required=False,
+            label="ID o mencion del canal de voz",
+            placeholder="123456789012345678 o <#123456789012345678>",
+            required=True,
             max_length=80,
+            default=str(default_voice_channel_id or ""),
         )
         self.notes = discord.ui.TextInput(
             label="Observaciones",
@@ -336,14 +432,16 @@ class JoinActivityRequestModal(discord.ui.Modal, title="Solicitar unirme"):
 class TemplateSelect(discord.ui.Select):
     def __init__(self, cog: "Activities", templates):
         self.cog = cog
-        options = [
-            discord.SelectOption(
-                label=row["name"][:100],
-                description=f"{row['activity_name']} - {row['default_time']}"[:100],
-                value=str(row["id"]),
+        options = []
+        for row in templates[:25]:
+            visibility = "Publica" if int(row["publica"]) else "Privada"
+            options.append(
+                discord.SelectOption(
+                    label=row["name"][:100],
+                    description=f"{visibility} - {row['activity_name']} - {row['default_time']}"[:100],
+                    value=str(row["id"]),
+                )
             )
-            for row in templates[:25]
-        ]
         super().__init__(
             placeholder="Selecciona una plantilla",
             min_values=1,
@@ -353,13 +451,26 @@ class TemplateSelect(discord.ui.Select):
         )
 
     async def callback(self, interaction: discord.Interaction) -> None:
+        if interaction.guild is None:
+            await private_response(interaction, "Este selector solo funciona dentro del servidor.")
+            return
         template_id = int(self.values[0])
-        template = self.cog.db.fetch_one(
-            "SELECT * FROM templates WHERE id = ? AND guild_id = ?",
-            (template_id, interaction.guild.id),
-        )
+        if is_admin_subject(self.cog.db, interaction):
+            template = self.cog.db.fetch_one(
+                "SELECT * FROM templates WHERE id = ? AND guild_id = ?",
+                (template_id, interaction.guild.id),
+            )
+        else:
+            template = self.cog.db.fetch_one(
+                """
+                SELECT *
+                FROM templates
+                WHERE id = ? AND guild_id = ? AND (created_by = ? OR publica = 1)
+                """,
+                (template_id, interaction.guild.id, interaction.user.id),
+            )
         if template is None:
-            await private_response(interaction, "No encontre esa plantilla.")
+            await private_response(interaction, "No encontre esa plantilla disponible para ti.")
             return
         await interaction.response.send_modal(
             ActivityModal(
@@ -368,6 +479,7 @@ class TemplateSelect(discord.ui.Select):
                 default_name=template["activity_name"],
                 default_time=template["default_time"],
                 default_notes=template["description"],
+                default_voice_channel_id=template["voice_channel_id"],
             )
         )
 
@@ -378,51 +490,253 @@ class TemplateSelectView(discord.ui.View):
         self.add_item(TemplateSelect(cog, templates))
 
 
+class CallerConfigValueModal(discord.ui.Modal):
+    def __init__(
+        self,
+        cog: "Activities",
+        *,
+        key: str,
+        title: str,
+        label: str,
+        placeholder: str,
+        current_value: str,
+    ):
+        super().__init__(title=title, timeout=180)
+        self.cog = cog
+        self.key = key
+        self.value_input = discord.ui.TextInput(
+            label=label,
+            placeholder=placeholder,
+            default=current_value,
+            max_length=40,
+        )
+        self.add_item(self.value_input)
+
+    async def on_submit(self, interaction: discord.Interaction) -> None:
+        if interaction.guild is None or not is_admin_subject(self.cog.db, interaction):
+            await private_response(interaction, "Solo admins autorizados pueden cambiar Config.")
+            return
+        value = str(self.value_input.value).strip()
+        try:
+            if self.key in {"caller_percentage_default", "voice_minimum_percent"}:
+                parsed = parse_percent(value)
+                value = f"{parsed:.2f}".rstrip("0").rstrip(".")
+            elif self.key == "absence_fine_amount":
+                value = str(parse_int_amount(value))
+        except ValueError as exc:
+            await private_response(interaction, str(exc))
+            return
+        self.cog.db.set_setting(interaction.guild.id, self.key, value)
+        log_action(
+            self.cog.db,
+            interaction.guild.id,
+            admin_id=interaction.user.id,
+            action="Configurar Panel de Callers",
+            system="Configuracion",
+            observation=f"{self.key}={value}",
+        )
+        await private_response(
+            interaction,
+            f"Config actualizada: `{self.key}` = `{value}`.\n\n"
+            f"{self.cog.caller_config_text(interaction.guild.id)}",
+        )
+
+
+class CallerConfigPanelView(discord.ui.View):
+    def __init__(self, cog: "Activities"):
+        super().__init__(timeout=300)
+        self.cog = cog
+
+    async def require_admin(self, interaction: discord.Interaction) -> bool:
+        if interaction.guild is not None and is_admin_subject(self.cog.db, interaction):
+            return True
+        await private_response(interaction, "Solo admins autorizados pueden usar Config.")
+        return False
+
+    async def set_current_channel(
+        self,
+        interaction: discord.Interaction,
+        *,
+        key: str,
+        label: str,
+    ) -> None:
+        if not await self.require_admin(interaction):
+            return
+        channel = interaction.channel
+        if channel is None or not hasattr(channel, "id"):
+            await private_response(interaction, "No pude identificar este canal.")
+            return
+        self.cog.db.set_setting(interaction.guild.id, key, str(channel.id))
+        log_action(
+            self.cog.db,
+            interaction.guild.id,
+            admin_id=interaction.user.id,
+            action="Configurar Panel de Callers",
+            system="Configuracion",
+            observation=f"{key}={channel.id}",
+        )
+        await private_response(
+            interaction,
+            f"{label} actualizado a <#{channel.id}>.\n\n{self.cog.caller_config_text(interaction.guild.id)}",
+        )
+
+    async def open_value_modal(
+        self,
+        interaction: discord.Interaction,
+        *,
+        key: str,
+        title: str,
+        label: str,
+        placeholder: str,
+    ) -> None:
+        if not await self.require_admin(interaction):
+            return
+        await interaction.response.send_modal(
+            CallerConfigValueModal(
+                self.cog,
+                key=key,
+                title=title,
+                label=label,
+                placeholder=placeholder,
+                current_value=self.cog.db.get_setting(interaction.guild.id, key),
+            )
+        )
+
+    @discord.ui.button(label="Ver config", emoji="📋", style=discord.ButtonStyle.primary, row=0)
+    async def show_config(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
+        if await self.require_admin(interaction):
+            await private_response(interaction, self.cog.caller_config_text(interaction.guild.id))
+
+    @discord.ui.button(label="Canal pings", emoji="📍", style=discord.ButtonStyle.success, row=0)
+    async def set_pings_channel(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
+        await self.set_current_channel(
+            interaction,
+            key="channel_pings_id",
+            label="Canal de pings",
+        )
+
+    @discord.ui.button(label="Avisos actividad", emoji="📣", style=discord.ButtonStyle.secondary, row=0)
+    async def set_activity_notifications(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
+        await self.set_current_channel(
+            interaction,
+            key="channel_notify_activities_id",
+            label="Canal de avisos de actividad",
+        )
+
+    @discord.ui.button(label="Multa ausencia", emoji="⚠️", style=discord.ButtonStyle.secondary, row=1)
+    async def set_absence_fine(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
+        await self.open_value_modal(
+            interaction,
+            key="absence_fine_amount",
+            title="Multa por ausencia",
+            label="Monto de multa",
+            placeholder="200000",
+        )
+
+    @discord.ui.button(label="Permanencia %", emoji="🎙️", style=discord.ButtonStyle.secondary, row=1)
+    async def set_voice_minimum(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
+        await self.open_value_modal(
+            interaction,
+            key="voice_minimum_percent",
+            title="Permanencia minima",
+            label="Porcentaje minimo en voz",
+            placeholder="50",
+        )
+
+    @discord.ui.button(label="Pago caller %", emoji="💰", style=discord.ButtonStyle.secondary, row=1)
+    async def set_caller_percent(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
+        await self.open_value_modal(
+            interaction,
+            key="caller_percentage_default",
+            title="Pago caller predeterminado",
+            label="Porcentaje para caller",
+            placeholder="5",
+        )
+
+    @discord.ui.button(label="Multas ON/OFF", emoji="🟢", style=discord.ButtonStyle.secondary, row=2)
+    async def toggle_absence_fines(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
+        if not await self.require_admin(interaction):
+            return
+        current = self.cog.db.get_setting(interaction.guild.id, "absence_fine_enabled", "1")
+        enabled = str(current).strip().lower() in {"1", "true", "si", "sí", "yes", "on"}
+        value = "0" if enabled else "1"
+        self.cog.db.set_setting(interaction.guild.id, "absence_fine_enabled", value)
+        log_action(
+            self.cog.db,
+            interaction.guild.id,
+            admin_id=interaction.user.id,
+            action="Configurar Panel de Callers",
+            system="Configuracion",
+            observation=f"absence_fine_enabled={value}",
+        )
+        state = "desactivadas" if enabled else "activadas"
+        await private_response(
+            interaction,
+            f"Multas por ausencia {state}.\n\n{self.cog.caller_config_text(interaction.guild.id)}",
+        )
+
+
 class PingsPanelView(discord.ui.View):
     def __init__(self, cog: "Activities"):
         super().__init__(timeout=None)
         self.cog = cog
 
     @discord.ui.button(
-        label="Crear actividad",
-        emoji="⚔️",
-        style=discord.ButtonStyle.primary,
+        label="Crear Ping",
+        emoji="📍",
+        style=discord.ButtonStyle.success,
         custom_id="g3n:pings:create_activity",
+        row=0,
     )
     async def create_activity(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
         if not is_caller_subject(self.cog.db, interaction):
-            await reject_caller_access(self.cog.db, interaction, "crear actividades")
+            await reject_caller_access(self.cog.db, interaction, "crear pings")
             return
         await interaction.response.send_modal(ActivityModal(self.cog, template_id=None))
 
     @discord.ui.button(
-        label="Crear plantilla",
-        emoji="🧾",
+        label="Crear Plantilla",
+        emoji="📝",
         style=discord.ButtonStyle.secondary,
         custom_id="g3n:pings:create_template",
+        row=0,
     )
     async def create_template(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
         if not is_caller_subject(self.cog.db, interaction):
             await reject_caller_access(self.cog.db, interaction, "crear plantillas")
             return
-        await interaction.response.send_modal(TemplateModal(self.cog))
+        view = TemplateVisibilityView(self.cog, author_id=interaction.user.id)
+        await private_response(interaction, view.visibility_text(), view=view)
 
     @discord.ui.button(
-        label="Seleccionar plantilla",
+        label="Seleccionar Plantilla",
         emoji="📋",
         style=discord.ButtonStyle.secondary,
         custom_id="g3n:pings:select_template",
+        row=0,
     )
     async def select_template(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
         if not is_caller_subject(self.cog.db, interaction):
-            await reject_caller_access(self.cog.db, interaction, "publicar actividades")
+            await reject_caller_access(self.cog.db, interaction, "crear pings")
             return
-        templates = self.cog.db.fetch_all(
-            "SELECT * FROM templates WHERE guild_id = ? ORDER BY created_at DESC LIMIT 25",
-            (interaction.guild.id,),
-        )
+        if is_admin_subject(self.cog.db, interaction):
+            templates = self.cog.db.fetch_all(
+                "SELECT * FROM templates WHERE guild_id = ? ORDER BY created_at DESC LIMIT 25",
+                (interaction.guild.id,),
+            )
+        else:
+            templates = self.cog.db.fetch_all(
+                """
+                SELECT *
+                FROM templates
+                WHERE guild_id = ? AND (created_by = ? OR publica = 1)
+                ORDER BY CASE WHEN created_by = ? THEN 0 ELSE 1 END, created_at DESC
+                LIMIT 25
+                """,
+                (interaction.guild.id, interaction.user.id, interaction.user.id),
+            )
         if not templates:
-            await private_response(interaction, "Aun no hay plantillas. Crea una con `Crear plantilla`.")
+            await private_response(interaction, "Aun no hay plantillas disponibles. Crea una con `Crear Plantilla`.")
             return
         await private_response(
             interaction,
@@ -431,10 +745,67 @@ class PingsPanelView(discord.ui.View):
         )
 
     @discord.ui.button(
-        label="Ver mis actividades",
-        emoji="🗓️",
+        label="Ver mis Plantillas",
+        emoji="📚",
+        style=discord.ButtonStyle.secondary,
+        custom_id="g3n:pings:view_templates",
+        row=0,
+    )
+    async def view_templates(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
+        if not is_caller_subject(self.cog.db, interaction):
+            await reject_caller_access(self.cog.db, interaction, "ver plantillas")
+            return
+        is_admin = is_admin_subject(self.cog.db, interaction)
+        if is_admin:
+            rows = self.cog.db.fetch_all(
+                """
+                SELECT t.id, t.name, t.activity_name, t.default_time, t.created_by,
+                       t.publica, t.voice_channel_id, COUNT(r.id) AS roles
+                FROM templates t
+                LEFT JOIN template_roles r ON r.template_id = t.id
+                WHERE t.guild_id = ?
+                GROUP BY t.id
+                ORDER BY t.created_at DESC LIMIT 15
+                """,
+                (interaction.guild.id,),
+            )
+        else:
+            rows = self.cog.db.fetch_all(
+                """
+                SELECT t.id, t.name, t.activity_name, t.default_time, t.created_by,
+                       t.publica, t.voice_channel_id, COUNT(r.id) AS roles
+                FROM templates t
+                LEFT JOIN template_roles r ON r.template_id = t.id
+                WHERE t.guild_id = ? AND (t.created_by = ? OR t.publica = 1)
+                GROUP BY t.id
+                ORDER BY CASE WHEN t.created_by = ? THEN 0 ELSE 1 END, t.created_at DESC
+                LIMIT 15
+                """,
+                (interaction.guild.id, interaction.user.id, interaction.user.id),
+            )
+        if not rows:
+            await private_response(interaction, "No hay plantillas disponibles.")
+            return
+        lines = ["**Todas las plantillas del servidor**" if is_admin else "**Mis plantillas y plantillas publicas**"]
+        for row in rows:
+            visibility = "Publica" if int(row["publica"]) else "Privada"
+            voice_text = f"<#{row['voice_channel_id']}>" if row["voice_channel_id"] else "Sin canal"
+            creator_note = ""
+            if is_admin or int(row["created_by"]) != interaction.user.id:
+                creator_note = f" — <@{row['created_by']}>"
+            lines.append(
+                f"`{row['id']}` {row['name']} - {row['activity_name']} "
+                f"({row['roles']} roles, {row['default_time']}, {voice_text}, {visibility})"
+                f"{creator_note}"
+            )
+        await dm_or_private(self.cog, interaction, "\n".join(lines), "plantillas_panel")
+
+    @discord.ui.button(
+        label="Ver mis Actividades",
+        emoji="📅",
         style=discord.ButtonStyle.secondary,
         custom_id="g3n:pings:my_activities",
+        row=1,
     )
     async def my_activities(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
         rows = self.cog.db.fetch_all(
@@ -455,58 +826,11 @@ class PingsPanelView(discord.ui.View):
         await dm_or_private(self.cog, interaction, "\n".join(lines), "mis_actividades_panel")
 
     @discord.ui.button(
-        label="Ver mis plantillas",
-        emoji="📚",
-        style=discord.ButtonStyle.secondary,
-        custom_id="g3n:pings:view_templates",
-    )
-    async def view_templates(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
-        if not is_caller_subject(self.cog.db, interaction):
-            await reject_caller_access(self.cog.db, interaction, "ver plantillas")
-            return
-        if is_admin_subject(self.cog.db, interaction):
-            rows = self.cog.db.fetch_all(
-                """
-                SELECT t.id, t.name, t.activity_name, t.default_time, t.created_by,
-                       COUNT(r.id) AS roles
-                FROM templates t
-                LEFT JOIN template_roles r ON r.template_id = t.id
-                WHERE t.guild_id = ?
-                GROUP BY t.id
-                ORDER BY t.created_at DESC LIMIT 15
-                """,
-                (interaction.guild.id,),
-            )
-        else:
-            rows = self.cog.db.fetch_all(
-                """
-                SELECT t.id, t.name, t.activity_name, t.default_time, t.created_by,
-                       COUNT(r.id) AS roles
-                FROM templates t
-                LEFT JOIN template_roles r ON r.template_id = t.id
-                WHERE t.guild_id = ? AND t.created_by = ?
-                GROUP BY t.id
-                ORDER BY t.created_at DESC LIMIT 15
-                """,
-                (interaction.guild.id, interaction.user.id),
-            )
-        if not rows:
-            await private_response(interaction, "No tienes plantillas guardadas.")
-            return
-        lines = ["**Todas las plantillas del servidor**" if is_admin_subject(self.cog.db, interaction) else "**Mis plantillas**"]
-        for row in rows:
-            lines.append(
-                f"`{row['id']}` {row['name']} - {row['activity_name']} "
-                f"({row['roles']} roles, {row['default_time']})"
-                + (f" — <@{row['created_by']}>" if is_admin_subject(self.cog.db, interaction) else "")
-            )
-        await dm_or_private(self.cog, interaction, "\n".join(lines), "plantillas_panel")
-
-    @discord.ui.button(
-        label="Mi ranking",
+        label="Mi Ranking",
         emoji="🏆",
         style=discord.ButtonStyle.primary,
         custom_id="g3n:pings:my_caller_ranking",
+        row=1,
     )
     async def my_ranking(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
         await dm_or_private(
@@ -517,10 +841,11 @@ class PingsPanelView(discord.ui.View):
         )
 
     @discord.ui.button(
-        label="Mis penalizaciones",
+        label="Mis Penalizaciones",
         emoji="⚠️",
         style=discord.ButtonStyle.secondary,
         custom_id="g3n:pings:my_caller_penalties",
+        row=1,
     )
     async def my_penalties(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
         await dm_or_private(
@@ -531,10 +856,11 @@ class PingsPanelView(discord.ui.View):
         )
 
     @discord.ui.button(
-        label="Mi reporte",
+        label="Mi Reporte",
         emoji="📊",
         style=discord.ButtonStyle.success,
         custom_id="g3n:pings:my_caller_report",
+        row=1,
     )
     async def my_report(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
         caller = self.cog.db.fetch_one(
@@ -565,18 +891,21 @@ class PingsPanelView(discord.ui.View):
         )
 
     @discord.ui.button(
-        label="Configuracion",
+        label="Config",
         emoji="⚙️",
         style=discord.ButtonStyle.secondary,
         custom_id="g3n:pings:configuration",
+        row=2,
     )
     async def configuration(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
+        if not is_admin_subject(self.cog.db, interaction):
+            await private_response(interaction, "Solo admins autorizados pueden usar Config.")
+            return
         await private_response(
             interaction,
-            "Configuracion rapida: usa `!canal_pings_set`, `!caller_set @usuario` "
-            "y `!economia_set absence_fine_amount 200000`.",
+            self.cog.caller_config_text(interaction.guild.id),
+            view=CallerConfigPanelView(self.cog),
         )
-
 
 class ActivityView(discord.ui.View):
     def __init__(self, cog: "Activities", activity_id: int):
@@ -633,6 +962,10 @@ class ActivityView(discord.ui.View):
         elif status == ACTIVITY_FINISHED:
             self.add_control_button("Ver asistencia", "verify", discord.ButtonStyle.secondary, 0, False, "🔍")
             self.add_control_button("Splitear", "payout", discord.ButtonStyle.primary, 0, False, "💰")
+            self.add_control_button("Liquidación rápida", "quick_liquidation", discord.ButtonStyle.danger, 0, False, "⚡")
+        elif status == ACTIVITY_PAYOUT_CREATED:
+            self.add_control_button("Ver asistencia", "verify", discord.ButtonStyle.secondary, 0, False, "🔍")
+            self.add_control_button("Liquidación rápida", "quick_liquidation", discord.ButtonStyle.danger, 0, False, "⚡")
 
     def add_control_button(
         self,
@@ -944,14 +1277,33 @@ class Activities(commands.Cog):
             elif after_id == channel_id and before_id != channel_id:
                 self.start_voice_session(activity_id, member.guild.id, member.id)
 
+    def caller_config_text(self, guild_id: int) -> str:
+        def channel_value(key: str) -> str:
+            value = self.db.get_setting(guild_id, key)
+            return f"<#{value}>" if value and value.isdigit() else "sin configurar"
+
+        absence_enabled = self.db.get_setting(guild_id, "absence_fine_enabled", "1")
+        absence_state = "Activas" if str(absence_enabled).strip().lower() in {"1", "true", "si", "sí", "yes", "on"} else "Inactivas"
+        return "\n".join(
+            [
+                "**⚙️ Config Panel de Callers**",
+                f"Canal de pings: {channel_value('channel_pings_id')}",
+                f"Avisos de actividad: {channel_value('channel_notify_activities_id')}",
+                f"Multas por ausencia: **{absence_state}**",
+                f"Monto multa ausencia: `{self.db.get_setting(guild_id, 'absence_fine_amount', '0')}`",
+                f"Permanencia minima en voz: `{self.db.get_setting(guild_id, 'voice_minimum_percent', '50')}%`",
+                f"Pago caller predeterminado: `{self.db.get_setting(guild_id, 'caller_percentage_default', '0')}%`",
+            ]
+        )
+
     @commands.command(name="panel_pings")
     async def panel_pings(self, ctx: commands.Context) -> None:
         if not await require_caller_context(ctx, self.db):
             return
         embed = discord.Embed(
-            title="Actividades G3NESYS",
+            title="Panel de Callers",
             description=(
-                "Crea plantillas, publica actividades y organiza composiciones "
+                "Crea pings, reutiliza plantillas y organiza composiciones "
                 "sin saturar el canal."
             ),
             color=discord.Color.dark_gold(),
@@ -1361,20 +1713,26 @@ class Activities(commands.Cog):
         if not description:
             await private_response(interaction, "La descripcion de la plantilla es obligatoria.")
             return
+        voice_channel = interaction.guild.get_channel(int(modal.voice_channel_id))
+        if not isinstance(voice_channel, (discord.VoiceChannel, discord.StageChannel)):
+            await private_response(interaction, VOICE_CHANNEL_ERROR)
+            return
         template_id = self.db.execute(
             """
             INSERT INTO templates (
                 guild_id, name, activity_name, default_time,
-                description, created_by, created_at
+                voice_channel_id, description, publica, created_by, created_at
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 interaction.guild.id,
                 str(modal.template_name.value).strip(),
                 str(modal.activity_name.value).strip(),
                 str(modal.default_time.value).strip(),
+                voice_channel.id,
                 description,
+                1 if modal.publica else 0,
                 interaction.user.id,
                 utc_now_iso(),
             ),
@@ -1398,9 +1756,10 @@ class Activities(commands.Cog):
             f"{role['emoji']} **{role['name']}** [0/{role['slots']}]".strip()
             for role in roles
         )
+        visibility = "Publica" if modal.publica else "Privada"
         await private_response(
             interaction,
-            f"Plantilla guardada con {len(roles)} roles.\n\n"
+            f"Plantilla guardada como **{visibility}** con {len(roles)} roles.\n\n"
             f"**Descripcion:** {description}\n\n{preview}",
         )
 
@@ -1410,7 +1769,7 @@ class Activities(commands.Cog):
         modal: ActivityModal,
     ) -> None:
         if not interaction.guild or not is_caller_subject(self.db, interaction):
-            await private_response(interaction, "No tienes permiso para publicar actividades.")
+            await private_response(interaction, "No tienes permiso para crear pings.")
             return
         channel_id_raw = self.db.get_setting(interaction.guild.id, "channel_pings_id")
         if not channel_id_raw:
@@ -1443,7 +1802,11 @@ class Activities(commands.Cog):
             await private_response(interaction, str(exc))
             return
 
-        voice_channel_id = parse_channel_id(str(modal.voice_channel.value))
+        voice_channel = resolve_voice_channel(interaction.guild, str(modal.voice_channel.value))
+        if voice_channel is None:
+            await private_response(interaction, VOICE_CHANNEL_ERROR)
+            return
+        voice_channel_id = voice_channel.id
         code = self.db.next_code(interaction.guild.id, "ACT")
         activity_id = self.db.execute(
             """
@@ -1494,7 +1857,7 @@ class Activities(commands.Cog):
             self.db,
             interaction.guild.id,
             admin_id=interaction.user.id,
-            action="Publicar actividad",
+            action="Crear Ping",
             system="Actividades",
             observation=code,
         )
@@ -1503,11 +1866,11 @@ class Activities(commands.Cog):
             guild=interaction.guild,
             category="activities",
             content=(
-                f"⚔️ Actividad `{code}` publicada por <@{interaction.user.id}>: "
+                f"📍 Ping `{code}` creado por <@{interaction.user.id}>: "
                 f"**{str(modal.activity_name.value).strip()}** en <#{channel.id}>."
             ),
         )
-        await private_response(interaction, f"Actividad publicada: `{code}`.")
+        await private_response(interaction, f"Ping creado: `{code}`.")
 
     def build_activity_embed(self, activity_id: int) -> discord.Embed:
         activity = self.get_activity(activity_id)
@@ -2133,6 +2496,9 @@ class Activities(commands.Cog):
         )
         await private_response(interaction, "Te quite de la actividad.")
 
+    def build_payout_modal(self, activity_id: int) -> PayoutModal:
+        return PayoutModal(self, activity_id)
+
     async def handle_activity_action(
         self,
         interaction: discord.Interaction,
@@ -2154,6 +2520,16 @@ class Activities(commands.Cog):
                 await private_response(interaction, "Las solicitudes solo estan disponibles durante la actividad.")
                 return
             await interaction.response.send_modal(JoinActivityRequestModal(self, activity_id))
+            return
+        if action == "quick_liquidation":
+            if not is_admin_subject(self.db, interaction):
+                await private_response(interaction, "❌ Solo los administradores pueden usar liquidación rápida.")
+                return
+            admin_cog = self.bot.get_cog("Admin")
+            if admin_cog is None:
+                await private_response(interaction, "El panel administrativo no esta disponible.")
+                return
+            await admin_cog.prompt_quick_liquidation_for_activity(interaction, activity_id)
             return
         if not await self.require_activity_manager(interaction, activity, action):
             return

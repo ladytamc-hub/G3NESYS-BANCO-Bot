@@ -85,6 +85,14 @@ class Database:
             self._conn.execute(
                 "ALTER TABLE templates ADD COLUMN description TEXT NOT NULL DEFAULT ''"
             )
+        if "publica" not in template_columns:
+            self._conn.execute(
+                "ALTER TABLE templates ADD COLUMN publica INTEGER NOT NULL DEFAULT 0"
+            )
+        if "voice_channel_id" not in template_columns:
+            self._conn.execute(
+                "ALTER TABLE templates ADD COLUMN voice_channel_id INTEGER"
+            )
 
         activity_columns = {
             row["name"]
@@ -561,7 +569,9 @@ CREATE TABLE IF NOT EXISTS templates (
     name TEXT NOT NULL,
     activity_name TEXT NOT NULL,
     default_time TEXT NOT NULL,
+    voice_channel_id INTEGER,
     description TEXT NOT NULL,
+    publica INTEGER NOT NULL DEFAULT 0,
     created_by INTEGER NOT NULL,
     created_at TEXT NOT NULL
 );

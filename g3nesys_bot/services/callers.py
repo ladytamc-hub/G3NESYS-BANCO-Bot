@@ -137,8 +137,8 @@ def caller_welcome_embed(guild_name: str) -> discord.Embed:
     embed.add_field(
         name="⚔️ Tus funciones",
         value=(
-            "• Usar el panel de actividades.\n"
-            "• Crear plantillas y publicar actividades.\n"
+            "• Usar el Panel de Callers.\n"
+            "• Crear plantillas y crear pings.\n"
             "• Administrar cupos, avisos y asistencia.\n"
             "• Generar Splits y enviarlos a revision administrativa."
         ),
@@ -158,7 +158,7 @@ def caller_welcome_embed(guild_name: str) -> discord.Embed:
     embed.add_field(
         name="🎛️ Tu acceso",
         value=(
-            "Ya puedes usar el **Panel de Actividades** de G3NESYS. "
+            "Ya puedes usar el **Panel de Callers** de G3NESYS. "
             "Si necesitas publicarlo, utiliza `!panel_pings` en el canal correspondiente."
         ),
         inline=False,
@@ -280,7 +280,7 @@ def caller_penalty_embed(guild_name: str, score: int) -> discord.Embed:
     embed.add_field(
         name="📋 ¿Que significa?",
         value=(
-            "Ya no podras usar las funciones de caller del Panel de Actividades hasta que "
+            "Ya no podras usar las funciones de caller del Panel de Callers hasta que "
             "un administrador retire la penalizacion."
         ),
         inline=False,

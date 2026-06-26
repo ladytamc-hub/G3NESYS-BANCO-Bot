@@ -900,12 +900,13 @@ def create_admin_report(db: Database, guild_id: int, guild=None) -> Path:
         subtitle=subtitle,
         headers=[
             "Plantilla DB ID", "Nombre", "Actividad base", "Horario base", "Descripcion",
-            "Cantidad roles", "Composicion", "Creada por ID", "Creada por", "Fecha",
+            "Visibilidad", "Cantidad roles", "Composicion", "Creada por ID", "Creada por", "Fecha",
         ],
         rows=[
             [
                 row["id"], row["name"], row["activity_name"], row["default_time"],
-                row["description"], int(row["roles"]), row["composition"],
+                row["description"], "Publica" if int(row["publica"]) else "Privada",
+                int(row["roles"]), row["composition"],
                 _id(row["created_by"]), _member_name(guild, row["created_by"]), row["created_at"],
             ]
             for row in templates
@@ -1302,12 +1303,13 @@ def create_caller_report(db: Database, guild_id: int, user_id: int, guild=None) 
         subtitle=subtitle,
         headers=[
             "Plantilla DB ID", "Nombre", "Actividad base", "Horario base", "Descripcion",
-            "Cantidad roles", "Composicion", "Fecha",
+            "Visibilidad", "Cantidad roles", "Composicion", "Fecha",
         ],
         rows=[
             [
                 row["id"], row["name"], row["activity_name"], row["default_time"],
-                row["description"], int(row["roles"]), row["composition"], row["created_at"],
+                row["description"], "Publica" if int(row["publica"]) else "Privada",
+                int(row["roles"]), row["composition"], row["created_at"],
             ]
             for row in templates
         ],

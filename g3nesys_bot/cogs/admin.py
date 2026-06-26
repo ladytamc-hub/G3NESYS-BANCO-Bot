@@ -7,6 +7,7 @@ from discord.ext import commands
 
 from ..constants import (
     ADMIN_PANEL_IMAGE,
+    ACTIVITY_FINISHED,
     PAYOUT_APPROVED,
     PAYOUT_DEPOSITED,
     PAYOUT_CORRECTION,
@@ -58,7 +59,7 @@ from ..services.quick_liquidations import (
     recent_liquidatable_payouts,
 )
 from ..services.reports import create_admin_report
-from ..utils import format_amount, parse_channel_id, parse_int_amount, utc_now_iso
+from ..utils import format_amount, parse_channel_id, parse_int_amount, split_csv_ids, utc_now_iso
 
 
 NOTIFICATION_CHANNEL_CATEGORIES = (
@@ -1125,6 +1126,29 @@ class SplitsAdminView(discord.ui.View):
             )
 
     @discord.ui.button(
+        label="Actividades pendientes de split",
+        emoji="🔴",
+        style=discord.ButtonStyle.danger,
+        custom_id="g3n:admin:splits:pending_activities",
+    )
+    async def pending_split_activities(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
+        if not await self.require_admin(interaction):
+            return
+        rows = self.cog.pending_split_activities(interaction.guild.id)
+        if not rows:
+            await private_response(interaction, "No hay actividades pendientes de split.")
+            return
+        await private_response(
+            interaction,
+            self.cog.pending_split_activities_text(interaction.guild.id, rows=rows),
+            view=PendingSplitActivitiesView(
+                self.cog,
+                admin_id=interaction.user.id,
+                activities=rows,
+            ),
+        )
+
+    @discord.ui.button(
         label="Lista general",
         emoji="📚",
         style=discord.ButtonStyle.secondary,
@@ -1138,6 +1162,115 @@ class SplitsAdminView(discord.ui.View):
                 self.cog.all_payouts_text(interaction.guild.id),
                 "splits_lista_general_admin",
             )
+
+
+class PendingSplitActivitySelect(discord.ui.Select):
+    def __init__(self, cog: "Admin", *, activities):
+        options = []
+        for activity in activities[:25]:
+            options.append(
+                discord.SelectOption(
+                    label=f"{activity['code']} · {activity['name']}"[:100],
+                    value=str(activity["id"]),
+                    description=(
+                        f"Caller {activity['caller_id']} · "
+                        f"{activity['confirmed']} asist. · {activity['horario'] or activity['ended_at']}"
+                    )[:100],
+                    emoji="🔴",
+                )
+            )
+        super().__init__(
+            placeholder="Selecciona una actividad pendiente de split",
+            min_values=1,
+            max_values=1,
+            options=options,
+            row=0,
+        )
+        self.cog = cog
+
+    async def callback(self, interaction: discord.Interaction) -> None:
+        parent = self.view
+        if not isinstance(parent, PendingSplitActivitiesView):
+            await private_response(interaction, "No pude actualizar esta selección.")
+            return
+        if interaction.user.id != parent.admin_id or not is_admin_subject(self.cog.db, interaction):
+            await private_response(interaction, "Solo el admin que abrio este menu puede usarlo.")
+            return
+        parent.selected_activity_id = int(self.values[0])
+        activity = parent.selected_activity()
+        selected = f"\n\nSeleccionada: `{activity['code']}` **{activity['name']}**" if activity else ""
+        await interaction.response.edit_message(
+            content=self.cog.pending_split_activities_text(interaction.guild.id, rows=parent.activities) + selected,
+            view=parent,
+        )
+
+
+class PendingSplitActivitiesView(discord.ui.View):
+    def __init__(self, cog: "Admin", *, admin_id: int, activities):
+        super().__init__(timeout=300)
+        self.cog = cog
+        self.admin_id = admin_id
+        self.activities = list(activities)
+        self.selected_activity_id: int | None = None
+        self.add_item(PendingSplitActivitySelect(cog, activities=activities))
+
+    async def require_owner_admin(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id == self.admin_id and is_admin_subject(self.cog.db, interaction):
+            return True
+        await private_response(interaction, "Solo el admin que abrio este menu puede usarlo.")
+        return False
+
+    def selected_activity(self):
+        if self.selected_activity_id is None:
+            return None
+        return next(
+            (row for row in self.activities if int(row["id"]) == self.selected_activity_id),
+            None,
+        )
+
+    async def require_selected_activity(self, interaction: discord.Interaction):
+        activity = self.selected_activity()
+        if activity is None:
+            await private_response(interaction, "Selecciona una actividad primero.")
+        return activity
+
+    @discord.ui.button(label="Revisar detalles", emoji="🔎", style=discord.ButtonStyle.secondary, row=1)
+    async def details(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
+        if not await self.require_owner_admin(interaction):
+            return
+        activity = await self.require_selected_activity(interaction)
+        if activity is None:
+            return
+        await private_response(
+            interaction,
+            self.cog.pending_split_activity_detail_text(interaction.guild, int(activity["id"])),
+        )
+
+    @discord.ui.button(label="Recordar caller", emoji="🔔", style=discord.ButtonStyle.primary, row=1)
+    async def remind(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
+        if not await self.require_owner_admin(interaction):
+            return
+        activity = await self.require_selected_activity(interaction)
+        if activity is None:
+            return
+        await self.cog.remind_pending_split_caller(interaction, int(activity["id"]))
+
+    @discord.ui.button(label="Crear split", emoji="💰", style=discord.ButtonStyle.success, row=1)
+    async def create_split(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
+        if not await self.require_owner_admin(interaction):
+            return
+        activity = await self.require_selected_activity(interaction)
+        if activity is None:
+            return
+        activities_cog = self.cog.bot.get_cog("Activities")
+        if activities_cog is None or not hasattr(activities_cog, "build_payout_modal"):
+            await private_response(interaction, "El panel de actividades no esta disponible.")
+            return
+        current = activities_cog.get_guild_activity(interaction.guild.id, int(activity["id"]))
+        if current is None or current["status"] != ACTIVITY_FINISHED:
+            await private_response(interaction, "Esta actividad ya no esta pendiente de split.")
+            return
+        await interaction.response.send_modal(activities_cog.build_payout_modal(int(activity["id"])))
 
 
 class NotificationChannelConfigView(discord.ui.View):
@@ -1606,14 +1739,22 @@ class Admin(commands.Cog):
             "SELECT authorized FROM admin_access WHERE guild_id = ? AND user_id = ?",
             (guild.id, member.id),
         )
-        if override is not None:
-            return bool(override["authorized"])
+        if override is not None and bool(override["authorized"]):
+            return True
         if member.guild_permissions.administrator:
             return True
         return has_any_configured_role(
             member,
             self.db.get_setting(guild.id, "admin_role_ids"),
         )
+
+    def configured_admin_roles(self, guild: discord.Guild) -> list[discord.Role]:
+        role_ids = split_csv_ids(self.db.get_setting(guild.id, "admin_role_ids"))
+        roles = [role for role_id in role_ids if (role := guild.get_role(role_id)) is not None]
+        return sorted(roles, key=lambda role: role.position, reverse=True)
+
+    def member_has_configured_admin_role(self, guild: discord.Guild, member: discord.Member) -> bool:
+        return any(role in member.roles for role in self.configured_admin_roles(guild))
 
     def has_admin_after_removal(self, guild: discord.Guild, removed_user_id: int) -> bool:
         for member in guild.members:
@@ -1796,9 +1937,14 @@ class Admin(commands.Cog):
             await private_response(interaction, "No puedes autorizar un bot como administrador.")
             return
         currently_authorized = self.member_has_admin_access(guild, member)
-        if action == "add" and currently_authorized:
-            await private_response(interaction, f"{member.mention} ya tiene acceso administrativo.")
-            return
+        has_admin_role = self.member_has_configured_admin_role(guild, member)
+        if action == "add":
+            if not self.configured_admin_roles(guild):
+                await private_response(interaction, "❌ Primero debes configurar el rol de Admin.")
+                return
+            if currently_authorized and has_admin_role:
+                await private_response(interaction, f"{member.mention} ya tiene acceso administrativo.")
+                return
         if action == "remove" and not currently_authorized:
             await private_response(interaction, f"{member.mention} no tiene acceso administrativo.")
             return
@@ -1806,7 +1952,7 @@ class Admin(commands.Cog):
         warning = (
             ""
             if action == "add"
-            else "\nLa denegacion se aplicara incluso si posee un rol admin o permisos de Discord."
+            else "\nSe retirara el rol de Admin configurado si el usuario lo tiene."
         )
         await private_response(
             interaction,
@@ -1841,6 +1987,40 @@ class Admin(commands.Cog):
             raise ValueError(
                 "No puedes eliminar al ultimo admin disponible. Agrega otro admin primero."
             )
+        admin_roles = self.configured_admin_roles(guild)
+        role_note = ""
+        if authorized:
+            if not admin_roles:
+                raise ValueError("❌ Primero debes configurar el rol de Admin.")
+            role = admin_roles[0]
+            if role not in member.roles:
+                try:
+                    await member.add_roles(
+                        role,
+                        reason=f"Asignado desde el Panel Administrativo por {changed_by}",
+                    )
+                except discord.Forbidden as exc:
+                    raise ValueError(
+                        "No pude asignar el rol de Admin. Coloca el rol del bot por encima del rol Admin y permite gestionar roles."
+                    ) from exc
+                except discord.HTTPException as exc:
+                    raise ValueError("Discord no permitio asignar el rol de Admin. Intenta de nuevo.") from exc
+            role_note = f"Rol {role.name} ({role.id}) asignado."
+        else:
+            member_admin_roles = [role for role in admin_roles if role in member.roles]
+            if member_admin_roles:
+                try:
+                    await member.remove_roles(
+                        *member_admin_roles,
+                        reason=f"Retirado desde el Panel Administrativo por {changed_by}",
+                    )
+                except discord.Forbidden as exc:
+                    raise ValueError(
+                        "No pude quitar el rol de Admin. Coloca el rol del bot por encima del rol Admin y permite gestionar roles."
+                    ) from exc
+                except discord.HTTPException as exc:
+                    raise ValueError("Discord no permitio quitar el rol de Admin. Intenta de nuevo.") from exc
+                role_note = "Rol(es) Admin retirado(s): " + ", ".join(role.name for role in member_admin_roles)
         self.db.execute(
             """
             INSERT INTO admin_access (guild_id, user_id, authorized, updated_by, updated_at)
@@ -1861,9 +2041,9 @@ class Admin(commands.Cog):
             affected_user_id=user_id,
             system="Administracion",
             observation=(
-                "Acceso administrativo autorizado desde el panel."
+                f"Acceso administrativo autorizado desde el panel. {role_note}".strip()
                 if authorized
-                else "Acceso administrativo denegado desde el panel."
+                else f"Acceso administrativo denegado desde el panel. {role_note}".strip()
             ),
         )
         await send_dm_safe(
@@ -1888,9 +2068,61 @@ class Admin(commands.Cog):
             ),
         )
         return (
-            f"{member.mention} ahora es admin autorizado."
+            "✅ Admin agregado correctamente.\n"
+            "Se le asignó el rol de Admin en Discord y ya puede usar el Panel de Admins."
             if authorized
             else f"Se retiro el acceso administrativo de {member.mention}."
+        )
+
+    def get_activity_payout_for_quick_liquidation(self, guild_id: int, activity_id: int):
+        return self.db.fetch_one(
+            """
+            SELECT p.*, COALESCE(a.name, a.code, 'Actividad sin nombre') AS activity_name,
+                   a.code AS activity_code
+            FROM payouts p
+            LEFT JOIN activities a ON a.id = p.activity_id
+            WHERE p.guild_id = ? AND p.activity_id = ?
+            ORDER BY p.id DESC LIMIT 1
+            """,
+            (guild_id, activity_id),
+        )
+
+    async def prompt_quick_liquidation_for_activity(
+        self,
+        interaction: discord.Interaction,
+        activity_id: int,
+    ) -> None:
+        guild = interaction.guild
+        if guild is None:
+            await private_response(interaction, "Esta operacion debe realizarse dentro del servidor.")
+            return
+        if not is_admin_subject(self.db, interaction):
+            await private_response(interaction, "❌ Solo los administradores pueden usar liquidación rápida.")
+            return
+        payout = self.get_activity_payout_for_quick_liquidation(guild.id, activity_id)
+        if payout is None:
+            await private_response(interaction, "❌ Debes splitear actividad primero.")
+            return
+        if payout["status"] != PAYOUT_DEPOSITED:
+            await private_response(interaction, "El Split debe estar aprobado y depositado antes de liquidarlo.")
+            return
+        participants = get_liquidatable_participants(self.db, int(payout["id"]))
+        if not participants:
+            await private_response(interaction, "Ese split ya fue liquidado por completo.")
+            return
+        await private_response(
+            interaction,
+            (
+                f"Split `{payout['code']}` · **{payout['activity_name']}**\n"
+                f"Pendientes: {len(participants)} miembros · "
+                f"{format_amount(sum(int(row['amount']) for row in participants))}\n\n"
+                "Elige si deseas liquidar la actividad completa o a un solo miembro."
+            ),
+            view=QuickLiquidationModeView(
+                self,
+                payout_id=int(payout["id"]),
+                admin_id=interaction.user.id,
+            ),
         )
 
     def quick_liquidation_confirmation_embed(
@@ -3301,6 +3533,145 @@ class Admin(commands.Cog):
                 f"`{row['code']}` <@{row['user_id']}> {format_amount(row['amount'])} - {row['reason']}"
             )
         return "\n".join(lines)
+
+    def pending_split_activities(self, guild_id: int, limit: int = 15):
+        return self.db.fetch_all(
+            """
+            SELECT a.id, a.code, a.name, a.caller_id, a.horario,
+                   a.voice_channel_id, a.created_at, a.started_at, a.ended_at,
+                   COALESCE((
+                       SELECT COUNT(*) FROM asistencia_actividades aa
+                       WHERE aa.actividad_id = a.id AND aa.estado = 'Confirmado'
+                   ), 0) AS confirmed,
+                   COALESCE((
+                       SELECT COUNT(*) FROM asistencia_actividades aa
+                       WHERE aa.actividad_id = a.id AND aa.estado = 'Ausente'
+                   ), 0) AS absent,
+                   COALESCE((
+                       SELECT COUNT(*) FROM activity_participants ap
+                       WHERE ap.activity_id = a.id
+                   ), 0) AS registered
+            FROM activities a
+            WHERE a.guild_id = ?
+              AND a.status = ?
+              AND NOT EXISTS (
+                  SELECT 1 FROM payouts p
+                  WHERE p.guild_id = a.guild_id AND p.activity_id = a.id
+              )
+            ORDER BY COALESCE(a.ended_at, a.created_at) DESC, a.id DESC
+            LIMIT ?
+            """,
+            (guild_id, ACTIVITY_FINISHED, limit),
+        )
+
+    def pending_split_activities_text(self, guild_id: int, *, rows=None) -> str:
+        rows = list(rows) if rows is not None else self.pending_split_activities(guild_id)
+        if not rows:
+            return "No hay actividades pendientes de split."
+        lines = ["🔴 **Actividades pendientes de split**"]
+        for row in rows:
+            voice = f"<#{row['voice_channel_id']}>" if row["voice_channel_id"] else "Sin canal"
+            date = row["horario"] or row["ended_at"] or row["created_at"]
+            lines.extend(
+                [
+                    "",
+                    f"`{row['code']}` **{row['name']}**",
+                    f"Caller: <@{row['caller_id']}> · Fecha/hora: `{date}` · Voz: {voice}",
+                    (
+                        f"Asistencia: {row['confirmed']} confirmados, "
+                        f"{row['absent']} ausentes, {row['registered']} registrados"
+                    ),
+                ]
+            )
+        lines.append("\nSelecciona una actividad para revisar detalles, recordar al caller o crear split.")
+        return "\n".join(lines)[:1900]
+
+    def pending_split_activity_detail_text(self, guild: discord.Guild, activity_id: int) -> str:
+        activity = self.db.fetch_one(
+            """
+            SELECT * FROM activities
+            WHERE guild_id = ? AND id = ?
+            """,
+            (guild.id, activity_id),
+        )
+        if activity is None:
+            return "No encontre esa actividad."
+        rows = self.db.fetch_all(
+            """
+            SELECT ap.user_id, ap.display_name, ar.name AS role_name,
+                   aa.estado, aa.voice_seconds, aa.participation_percent
+            FROM activity_participants ap
+            LEFT JOIN activity_roles ar ON ar.id = ap.role_id
+            LEFT JOIN asistencia_actividades aa
+              ON aa.actividad_id = ap.activity_id AND aa.usuario_id = ap.user_id
+            WHERE ap.activity_id = ?
+            ORDER BY ar.position ASC, ap.joined_at ASC
+            """,
+            (activity_id,),
+        )
+        voice = f"<#{activity['voice_channel_id']}>" if activity["voice_channel_id"] else "Sin canal"
+        date = activity["horario"] or activity["ended_at"] or activity["created_at"]
+        lines = [
+            f"🔴 **Actividad pendiente de split:** `{activity['code']}`",
+            f"Nombre: **{activity['name']}**",
+            f"Caller: <@{activity['caller_id']}>",
+            f"Fecha/hora: `{date}`",
+            f"Canal de voz: {voice}",
+            "",
+            "**Participantes con asistencia**",
+        ]
+        if not rows:
+            lines.append("Sin participantes registrados.")
+        for row in rows:
+            state = row["estado"] or "Sin registro"
+            percent = float(row["participation_percent"] or 0)
+            minutes = int(row["voice_seconds"] or 0) // 60
+            lines.append(
+                f"• <@{row['user_id']}> · {row['role_name'] or 'Sin rol'} · "
+                f"{state} · {percent:.1f}% · {minutes} min"
+            )
+        return "\n".join(lines)[:1900]
+
+    async def remind_pending_split_caller(
+        self,
+        interaction: discord.Interaction,
+        activity_id: int,
+    ) -> None:
+        activity = self.db.fetch_one(
+            """
+            SELECT * FROM activities
+            WHERE guild_id = ? AND id = ? AND status = ?
+            """,
+            (interaction.guild.id, activity_id, ACTIVITY_FINISHED),
+        )
+        if activity is None:
+            await private_response(interaction, "Esta actividad ya no esta pendiente de split.")
+            return
+        payout = self.db.fetch_one(
+            "SELECT 1 FROM payouts WHERE guild_id = ? AND activity_id = ?",
+            (interaction.guild.id, activity_id),
+        )
+        if payout is not None:
+            await private_response(interaction, "Esta actividad ya tiene split asociado.")
+            return
+        caller = interaction.guild.get_member(int(activity["caller_id"]))
+        if caller is None:
+            await private_response(interaction, "No encontre al caller dentro del servidor.")
+            return
+        sent = await send_dm_safe(
+            self.db,
+            guild_id=interaction.guild.id,
+            user=caller,
+            action="recordatorio_split_pendiente",
+            content=(
+                f"🔴 Recordatorio: la actividad `{activity['code']}` **{activity['name']}** "
+                "ya fue finalizada y sigue pendiente de split."
+            ),
+        )
+        if sent:
+            await private_response(interaction, f"Recordatorio enviado a {caller.mention}.")
+        else:
+            await private_response(interaction, "No pude enviar DM al caller; quedo registrado el intento.")
 
     def pending_payouts_text(self, guild_id: int) -> str:
         return self.payouts_list_text(
