@@ -75,6 +75,14 @@ NOTIFICATION_CATEGORY_MAP = {
     for category, label, emoji in NOTIFICATION_CHANNEL_CATEGORIES
 }
 RECRUITER_ROLE_NAMES = {"reclutador", "reclutadores"}
+ADMIN_ROLE_NAMES = {
+    "admin",
+    "admins",
+    "administrador",
+    "administradores",
+    "admin g3nesys",
+    "administrador g3nesys",
+}
 
 
 def normalize_admin_message(value: str | None) -> str:
@@ -1743,14 +1751,28 @@ class Admin(commands.Cog):
             return True
         if member.guild_permissions.administrator:
             return True
-        return has_any_configured_role(
-            member,
-            self.db.get_setting(guild.id, "admin_role_ids"),
+        configured_roles = self.db.get_setting(guild.id, "admin_role_ids")
+        if has_any_configured_role(member, configured_roles):
+            return True
+        return not split_csv_ids(configured_roles) and any(
+            role.name.strip().casefold() in ADMIN_ROLE_NAMES for role in member.roles
         )
 
     def configured_admin_roles(self, guild: discord.Guild) -> list[discord.Role]:
         role_ids = split_csv_ids(self.db.get_setting(guild.id, "admin_role_ids"))
         roles = [role for role_id in role_ids if (role := guild.get_role(role_id)) is not None]
+        if not roles:
+            roles = [
+                role
+                for role in guild.roles
+                if role.name.strip().casefold() in ADMIN_ROLE_NAMES
+            ]
+            if roles:
+                self.db.set_setting(
+                    guild.id,
+                    "admin_role_ids",
+                    ",".join(str(role.id) for role in roles),
+                )
         return sorted(roles, key=lambda role: role.position, reverse=True)
 
     def member_has_configured_admin_role(self, guild: discord.Guild, member: discord.Member) -> bool:

@@ -8,6 +8,16 @@ from .services.callers import is_caller_penalized
 from .utils import split_csv_ids
 
 
+ADMIN_ROLE_NAMES = {
+    "admin",
+    "admins",
+    "administrador",
+    "administradores",
+    "admin g3nesys",
+    "administrador g3nesys",
+}
+
+
 def _member_from_subject(subject: commands.Context | discord.Interaction) -> discord.Member | None:
     user = getattr(subject, "author", None) or getattr(subject, "user", None)
     if isinstance(user, discord.Member):
@@ -30,6 +40,10 @@ def has_any_configured_role(member: discord.Member, role_ids_csv: str) -> bool:
     return any(role.id in role_ids for role in member.roles)
 
 
+def has_named_admin_role(member: discord.Member) -> bool:
+    return any(role.name.strip().casefold() in ADMIN_ROLE_NAMES for role in member.roles)
+
+
 def is_admin_subject(db: Database, subject: commands.Context | discord.Interaction) -> bool:
     guild = _guild_from_subject(subject)
     member = _member_from_subject(subject)
@@ -43,7 +57,10 @@ def is_admin_subject(db: Database, subject: commands.Context | discord.Interacti
         return True
     if member.guild_permissions.administrator:
         return True
-    return has_any_configured_role(member, db.get_setting(guild.id, "admin_role_ids"))
+    configured_roles = db.get_setting(guild.id, "admin_role_ids")
+    if has_any_configured_role(member, configured_roles):
+        return True
+    return not split_csv_ids(configured_roles) and has_named_admin_role(member)
 
 
 def is_caller_subject(db: Database, subject: commands.Context | discord.Interaction) -> bool:

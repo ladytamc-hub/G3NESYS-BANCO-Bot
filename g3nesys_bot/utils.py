@@ -26,10 +26,8 @@ def split_csv_ids(value: str | None) -> set[int]:
     result: set[int] = set()
     if not value:
         return result
-    for part in value.split(","):
-        part = part.strip()
-        if part.isdigit():
-            result.add(int(part))
+    for match in re.findall(r"\d+", value):
+        result.add(int(match))
     return result
 
 

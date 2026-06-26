@@ -148,6 +148,29 @@ def resolve_voice_channel(guild: discord.Guild, raw: str | None):
     return None
 
 
+def resolve_selected_voice_channel(guild: discord.Guild, value):
+    if isinstance(value, (discord.VoiceChannel, discord.StageChannel)):
+        return value
+    channel_id = None
+    if hasattr(value, "id"):
+        try:
+            channel_id = int(value.id)
+        except (TypeError, ValueError):
+            channel_id = None
+    if channel_id is None and isinstance(value, str):
+        cleaned = value.strip()
+        if cleaned.isdigit():
+            channel_id = int(cleaned)
+        else:
+            channel_id = parse_channel_id(cleaned)
+    if channel_id is None:
+        return None
+    channel = guild.get_channel(channel_id)
+    if isinstance(channel, (discord.VoiceChannel, discord.StageChannel)):
+        return channel
+    return None
+
+
 def parse_iso_datetime(value: str | None) -> datetime | None:
     if not value:
         return None
@@ -233,8 +256,11 @@ class TemplateVoiceChannelSelect(discord.ui.ChannelSelect):
         self.parent_view = parent_view
 
     async def callback(self, interaction: discord.Interaction) -> None:
-        channel = self.values[0]
-        if not isinstance(channel, (discord.VoiceChannel, discord.StageChannel)):
+        if interaction.guild is None or not self.values:
+            await private_response(interaction, VOICE_CHANNEL_ERROR)
+            return
+        channel = resolve_selected_voice_channel(interaction.guild, self.values[0])
+        if channel is None:
             await private_response(interaction, VOICE_CHANNEL_ERROR)
             return
         self.parent_view.voice_channel_id = channel.id
@@ -284,6 +310,10 @@ class TemplateVisibilityView(discord.ui.View):
         if not await self.require_author(interaction):
             return
         if self.voice_channel_id is None:
+            await private_response(interaction, VOICE_CHANNEL_ERROR)
+            return
+        channel = interaction.guild.get_channel(self.voice_channel_id) if interaction.guild else None
+        if not isinstance(channel, (discord.VoiceChannel, discord.StageChannel)):
             await private_response(interaction, VOICE_CHANNEL_ERROR)
             return
         await interaction.response.send_modal(
