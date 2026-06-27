@@ -1024,28 +1024,50 @@ class PayoutReviewView(discord.ui.View):
         super().__init__(timeout=None)
         self.cog = cog
         self.code = code
-        self.add_button("Aprobar", "approve", "✅", discord.ButtonStyle.success)
-        self.add_button("Rechazar", "reject", "❌", discord.ButtonStyle.danger)
-        self.add_button("Corregir", "correction", "🛠️", discord.ButtonStyle.secondary)
-        self.add_button("Ver detalle", "detail", "📋", discord.ButtonStyle.primary)
-        self.add_button("Auditoria", "audit", "🧾", discord.ButtonStyle.secondary)
+        self.add_button("Aprobar", "approve", "✅", discord.ButtonStyle.success, row=0)
+        self.add_button("Rechazar", "reject", "❌", discord.ButtonStyle.danger, row=0)
+        self.add_button("Corregir Split", "edit", "🛠️", discord.ButtonStyle.secondary, row=0)
+        self.add_button("Pedir correccion", "correction", "📝", discord.ButtonStyle.secondary, row=1)
+        self.add_button("Ver detalle", "detail", "📋", discord.ButtonStyle.primary, row=1)
+        self.add_button("Auditoria", "audit", "🧾", discord.ButtonStyle.secondary, row=1)
 
-    def add_button(self, label: str, action: str, emoji: str, style: discord.ButtonStyle) -> None:
+    def add_button(
+        self,
+        label: str,
+        action: str,
+        emoji: str,
+        style: discord.ButtonStyle,
+        *,
+        row: int,
+    ) -> None:
         button = discord.ui.Button(
             label=label,
             emoji=emoji,
             style=style,
             custom_id=f"g3n:admin:payout:{action}:{self.code}",
+            row=row,
         )
         button.callback = self.handle_button
         self.add_item(button)
 
     async def handle_button(self, interaction: discord.Interaction) -> None:
+        custom_id = str(interaction.data["custom_id"])
+        action = custom_id.split(":")[3]
+        if action == "edit":
+            activities_cog = self.cog.bot.get_cog("Activities")
+            if activities_cog is None or not hasattr(activities_cog, "prompt_correct_payout_interaction"):
+                await private_response(interaction, "El panel de actividades no esta disponible.")
+                return
+            await activities_cog.prompt_correct_payout_interaction(
+                interaction,
+                interaction.guild.id,
+                self.code,
+                source_message=interaction.message,
+            )
+            return
         if not is_admin_subject(self.cog.db, interaction):
             await private_response(interaction, "Solo admins autorizados pueden revisar Splits.")
             return
-        custom_id = str(interaction.data["custom_id"])
-        action = custom_id.split(":")[3]
         if action == "approve":
             await private_response(
                 interaction,
@@ -1091,6 +1113,133 @@ class PayoutReviewView(discord.ui.View):
                 "auditoria_split_admin",
             )
 
+class PendingPayoutSelect(discord.ui.Select):
+    def __init__(self, cog: "Admin", payouts):
+        options = []
+        for payout in list(payouts)[:25]:
+            options.append(
+                discord.SelectOption(
+                    label=f"{payout['code']} · Caller {payout['caller_id']}"[:100],
+                    value=str(payout["code"]),
+                    description=(
+                        f"Repartible {format_amount(payout['distributable'])} · "
+                        f"Gremio {format_amount(payout['guild_amount'])}"
+                    )[:100],
+                    emoji="📋",
+                )
+            )
+        super().__init__(
+            placeholder="Selecciona un Split pendiente",
+            min_values=1,
+            max_values=1,
+            options=options,
+            row=0,
+        )
+        self.cog = cog
+
+    async def callback(self, interaction: discord.Interaction) -> None:
+        parent = self.view
+        if not isinstance(parent, PendingPayoutManagementView):
+            await private_response(interaction, "No pude actualizar esta seleccion.")
+            return
+        if interaction.user.id != parent.admin_id or not is_admin_subject(self.cog.db, interaction):
+            await private_response(interaction, "Solo el admin que abrio este menu puede usarlo.")
+            return
+        parent.selected_code = self.values[0]
+        await interaction.response.edit_message(
+            content=parent.message_text(interaction.guild.id),
+            view=parent,
+        )
+
+
+class PendingPayoutManagementView(discord.ui.View):
+    def __init__(self, cog: "Admin", *, admin_id: int, payouts):
+        super().__init__(timeout=300)
+        self.cog = cog
+        self.admin_id = admin_id
+        self.payouts = list(payouts)
+        self.selected_code: str | None = None
+        self.add_item(PendingPayoutSelect(cog, self.payouts))
+
+    async def require_owner_admin(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id == self.admin_id and is_admin_subject(self.cog.db, interaction):
+            return True
+        await private_response(interaction, "Solo el admin que abrio este menu puede usarlo.")
+        return False
+
+    def selected_payout(self):
+        if self.selected_code is None:
+            return None
+        return next((row for row in self.payouts if str(row["code"]) == self.selected_code), None)
+
+    def message_text(self, guild_id: int) -> str:
+        selected = self.selected_payout()
+        extra = ""
+        if selected is not None:
+            extra = (
+                f"\n\nSeleccionado: `{selected['code']}` · Caller <@{selected['caller_id']}> · "
+                f"Repartible {format_amount(selected['distributable'])}"
+            )
+        return (self.cog.pending_payouts_text(guild_id) + extra)[:1900]
+
+    async def require_selected_code(self, interaction: discord.Interaction) -> str | None:
+        payout = self.selected_payout()
+        if payout is None:
+            await private_response(interaction, "Selecciona un Split primero.")
+            return None
+        return str(payout["code"])
+
+    @discord.ui.button(label="Ver detalle", emoji="📋", style=discord.ButtonStyle.primary, row=1)
+    async def detail(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
+        if not await self.require_owner_admin(interaction):
+            return
+        code = await self.require_selected_code(interaction)
+        if code is None:
+            return
+        await dm_or_private(
+            self.cog,
+            interaction,
+            self.cog.payout_detail_text(interaction.guild.id, code),
+            "detalle_split_pendiente_admin",
+        )
+
+    @discord.ui.button(label="Corregir Split", emoji="🛠️", style=discord.ButtonStyle.secondary, row=1)
+    async def correct(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
+        if not await self.require_owner_admin(interaction):
+            return
+        code = await self.require_selected_code(interaction)
+        if code is None:
+            return
+        activities_cog = self.cog.bot.get_cog("Activities")
+        if activities_cog is None or not hasattr(activities_cog, "prompt_correct_payout_interaction"):
+            await private_response(interaction, "El panel de actividades no esta disponible.")
+            return
+        await activities_cog.prompt_correct_payout_interaction(
+            interaction,
+            interaction.guild.id,
+            code,
+        )
+
+    @discord.ui.button(label="Auditoria", emoji="🧾", style=discord.ButtonStyle.secondary, row=1)
+    async def audit(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
+        if not await self.require_owner_admin(interaction):
+            return
+        code = await self.require_selected_code(interaction)
+        if code is None:
+            return
+        payout = self.cog.db.fetch_one(
+            "SELECT id FROM payouts WHERE guild_id = ? AND code = ?",
+            (interaction.guild.id, code),
+        )
+        if payout is None:
+            await private_response(interaction, "No encontre ese Split.")
+            return
+        await dm_or_private(
+            self.cog,
+            interaction,
+            payout_audit_text(self.cog.db, interaction.guild.id, int(payout["id"])),
+            "auditoria_split_pendiente_admin",
+        )
 
 class SplitsAdminView(discord.ui.View):
     def __init__(self, cog: "Admin"):
@@ -1110,13 +1259,21 @@ class SplitsAdminView(discord.ui.View):
         custom_id="g3n:admin:splits:pending",
     )
     async def pending(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
-        if await self.require_admin(interaction):
-            await dm_or_private(
+        if not await self.require_admin(interaction):
+            return
+        rows = self.cog.pending_payout_rows(interaction.guild.id)
+        if not rows:
+            await private_response(interaction, "No hay Splits pendientes de aprobación.")
+            return
+        await private_response(
+            interaction,
+            self.cog.pending_payouts_text(interaction.guild.id),
+            view=PendingPayoutManagementView(
                 self.cog,
-                interaction,
-                self.cog.pending_payouts_text(interaction.guild.id),
-                "splits_pendientes_admin",
-            )
+                admin_id=interaction.user.id,
+                payouts=rows,
+            ),
+        )
 
     @discord.ui.button(
         label="Aprobados",
@@ -3694,6 +3851,18 @@ class Admin(commands.Cog):
             await private_response(interaction, f"Recordatorio enviado a {caller.mention}.")
         else:
             await private_response(interaction, "No pude enviar DM al caller; quedo registrado el intento.")
+
+    def pending_payout_rows(self, guild_id: int):
+        return self.db.fetch_all(
+            """
+            SELECT code, caller_id, distributable, guild_amount,
+                   caller_amount, status, created_at, reviewed_at
+            FROM payouts
+            WHERE guild_id = ? AND status = ? AND sent_to_admin_at IS NOT NULL
+            ORDER BY id DESC LIMIT 25
+            """,
+            (guild_id, PAYOUT_PENDING),
+        )
 
     def pending_payouts_text(self, guild_id: int) -> str:
         return self.payouts_list_text(
