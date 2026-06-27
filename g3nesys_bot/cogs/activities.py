@@ -2345,9 +2345,9 @@ class Activities(commands.Cog):
             [
                 ACTIVITY_SEPARATOR,
                 "",
-                "✅ Haz check al entrar.",
-                "🎤 Permanece al menos el 50% en voz.",
-                "⚠️ La inasistencia puede generar multa.",
+                "✅ No olvides realizar tu check cuando el caller lo solicite.",
+                "🎤 Permanece en el canal de voz durante toda la actividad.",
+                "⚠️ Respeta las indicaciones del caller durante toda la actividad.",
             ]
         )
         description = "\n".join(lines)
