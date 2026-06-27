@@ -1027,9 +1027,9 @@ class PayoutReviewView(discord.ui.View):
         self.add_button("Aprobar", "approve", "✅", discord.ButtonStyle.success, row=0)
         self.add_button("Rechazar", "reject", "❌", discord.ButtonStyle.danger, row=0)
         self.add_button("Corregir Split", "edit", "🛠️", discord.ButtonStyle.secondary, row=0)
-        self.add_button("Pedir correccion", "correction", "📝", discord.ButtonStyle.secondary, row=1)
-        self.add_button("Ver detalle", "detail", "📋", discord.ButtonStyle.primary, row=1)
-        self.add_button("Auditoria", "audit", "🧾", discord.ButtonStyle.secondary, row=1)
+        self.add_button("Pedir Corrección", "correction", "🔁", discord.ButtonStyle.secondary, row=1)
+        self.add_button("Ver Detalle", "detail", "🔍", discord.ButtonStyle.primary, row=1)
+        self.add_button("Auditoría", "audit", "📋", discord.ButtonStyle.secondary, row=1)
 
     def add_button(
         self,
@@ -1117,15 +1117,16 @@ class PendingPayoutSelect(discord.ui.Select):
     def __init__(self, cog: "Admin", payouts):
         options = []
         for payout in list(payouts)[:25]:
+            status_label = "Requiere corrección" if payout["status"] == PAYOUT_CORRECTION else "Pendiente"
             options.append(
                 discord.SelectOption(
-                    label=f"{payout['code']} · Caller {payout['caller_id']}"[:100],
+                    label=f"{payout['code']} · {status_label}"[:100],
                     value=str(payout["code"]),
                     description=(
-                        f"Repartible {format_amount(payout['distributable'])} · "
-                        f"Gremio {format_amount(payout['guild_amount'])}"
+                        f"Caller {payout['caller_id']} · "
+                        f"Repartible {format_amount(payout['distributable'])}"
                     )[:100],
-                    emoji="📋",
+                    emoji="🔁" if payout["status"] == PAYOUT_CORRECTION else "📋",
                 )
             )
         super().__init__(
@@ -1176,39 +1177,73 @@ class PendingPayoutManagementView(discord.ui.View):
         selected = self.selected_payout()
         extra = ""
         if selected is not None:
+            status_label = "🔁 Requiere corrección" if selected["status"] == PAYOUT_CORRECTION else "⏳ Pendiente"
             extra = (
-                f"\n\nSeleccionado: `{selected['code']}` · Caller <@{selected['caller_id']}> · "
+                f"\n\nSeleccionado: `{selected['code']}` · {status_label} · "
+                f"Caller <@{selected['caller_id']}> · "
                 f"Repartible {format_amount(selected['distributable'])}"
             )
         return (self.cog.pending_payouts_text(guild_id) + extra)[:1900]
 
-    async def require_selected_code(self, interaction: discord.Interaction) -> str | None:
+    async def require_selected_payout(self, interaction: discord.Interaction):
         payout = self.selected_payout()
         if payout is None:
             await private_response(interaction, "Selecciona un Split primero.")
             return None
-        return str(payout["code"])
+        current = self.cog.db.fetch_one(
+            "SELECT * FROM payouts WHERE guild_id = ? AND code = ?",
+            (interaction.guild.id, payout["code"]),
+        )
+        if current is None:
+            await private_response(interaction, "No encontre ese Split.")
+            return None
+        if current["status"] not in {PAYOUT_PENDING, PAYOUT_CORRECTION}:
+            await private_response(interaction, "Ese Split ya no está pendiente; ya fue procesado.")
+            return None
+        return current
 
-    @discord.ui.button(label="Ver detalle", emoji="📋", style=discord.ButtonStyle.primary, row=1)
-    async def detail(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
+    async def require_pending_approval(self, interaction: discord.Interaction):
+        payout = await self.require_selected_payout(interaction)
+        if payout is None:
+            return None
+        if payout["status"] != PAYOUT_PENDING:
+            await private_response(interaction, "Ese Split ya requiere corrección y no está pendiente de aprobación.")
+            return None
+        return payout
+
+    @discord.ui.button(label="Aprobar", emoji="✅", style=discord.ButtonStyle.success, row=1)
+    async def approve(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
         if not await self.require_owner_admin(interaction):
             return
-        code = await self.require_selected_code(interaction)
-        if code is None:
+        payout = await self.require_pending_approval(interaction)
+        if payout is None:
             return
-        await dm_or_private(
-            self.cog,
+        await private_response(
             interaction,
-            self.cog.payout_detail_text(interaction.guild.id, code),
-            "detalle_split_pendiente_admin",
+            f"¿Confirmas esta operacion?\nAprobar Split `{payout['code']}` y depositar saldos.",
+            view=ConfirmAdminActionView(
+                self.cog,
+                admin_id=interaction.user.id,
+                action="approve_payout",
+                payload={"code": str(payout["code"])},
+            ),
         )
+
+    @discord.ui.button(label="Rechazar", emoji="❌", style=discord.ButtonStyle.danger, row=1)
+    async def reject(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
+        if not await self.require_owner_admin(interaction):
+            return
+        payout = await self.require_pending_approval(interaction)
+        if payout is None:
+            return
+        await interaction.response.send_modal(PayoutReasonModal(self.cog, str(payout["code"]), PAYOUT_REJECTED))
 
     @discord.ui.button(label="Corregir Split", emoji="🛠️", style=discord.ButtonStyle.secondary, row=1)
     async def correct(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
         if not await self.require_owner_admin(interaction):
             return
-        code = await self.require_selected_code(interaction)
-        if code is None:
+        payout = await self.require_selected_payout(interaction)
+        if payout is None:
             return
         activities_cog = self.cog.bot.get_cog("Activities")
         if activities_cog is None or not hasattr(activities_cog, "prompt_correct_payout_interaction"):
@@ -1217,22 +1252,41 @@ class PendingPayoutManagementView(discord.ui.View):
         await activities_cog.prompt_correct_payout_interaction(
             interaction,
             interaction.guild.id,
-            code,
+            str(payout["code"]),
         )
 
-    @discord.ui.button(label="Auditoria", emoji="🧾", style=discord.ButtonStyle.secondary, row=1)
+    @discord.ui.button(label="Pedir Corrección", emoji="🔁", style=discord.ButtonStyle.secondary, row=2)
+    async def request_correction(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
+        if not await self.require_owner_admin(interaction):
+            return
+        payout = await self.require_selected_payout(interaction)
+        if payout is None:
+            return
+        if payout["status"] == PAYOUT_CORRECTION:
+            await private_response(interaction, "Ese Split ya requiere corrección.")
+            return
+        await interaction.response.send_modal(PayoutReasonModal(self.cog, str(payout["code"]), PAYOUT_CORRECTION))
+
+    @discord.ui.button(label="Ver Detalle", emoji="🔍", style=discord.ButtonStyle.primary, row=2)
+    async def detail(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
+        if not await self.require_owner_admin(interaction):
+            return
+        payout = await self.require_selected_payout(interaction)
+        if payout is None:
+            return
+        await dm_or_private(
+            self.cog,
+            interaction,
+            self.cog.payout_detail_text(interaction.guild.id, str(payout["code"])),
+            "detalle_split_pendiente_admin",
+        )
+
+    @discord.ui.button(label="Auditoría", emoji="📋", style=discord.ButtonStyle.secondary, row=2)
     async def audit(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
         if not await self.require_owner_admin(interaction):
             return
-        code = await self.require_selected_code(interaction)
-        if code is None:
-            return
-        payout = self.cog.db.fetch_one(
-            "SELECT id FROM payouts WHERE guild_id = ? AND code = ?",
-            (interaction.guild.id, code),
-        )
+        payout = await self.require_selected_payout(interaction)
         if payout is None:
-            await private_response(interaction, "No encontre ese Split.")
             return
         await dm_or_private(
             self.cog,
@@ -3858,17 +3912,39 @@ class Admin(commands.Cog):
             SELECT code, caller_id, distributable, guild_amount,
                    caller_amount, status, created_at, reviewed_at
             FROM payouts
-            WHERE guild_id = ? AND status = ? AND sent_to_admin_at IS NOT NULL
-            ORDER BY id DESC LIMIT 25
+            WHERE guild_id = ? AND status IN (?, ?) AND sent_to_admin_at IS NOT NULL
+            ORDER BY CASE WHEN status = ? THEN 0 ELSE 1 END, id DESC LIMIT 25
             """,
-            (guild_id, PAYOUT_PENDING),
+            (guild_id, PAYOUT_PENDING, PAYOUT_CORRECTION, PAYOUT_PENDING),
         )
 
     def pending_payouts_text(self, guild_id: int) -> str:
-        return self.payouts_list_text(
-            guild_id,
-            mode="pending",
-        )
+        rows = self.pending_payout_rows(guild_id)
+        if not rows:
+            return "No hay Splits pendientes de aprobación."
+        pending = [row for row in rows if row["status"] == PAYOUT_PENDING]
+        correction = [row for row in rows if row["status"] == PAYOUT_CORRECTION]
+        lines = ["⏳ **Splits pendientes de aprobación**"]
+        if pending:
+            for row in pending:
+                lines.append(
+                    f"`{row['code']}` · Caller <@{row['caller_id']}> · "
+                    f"Repartible {format_amount(row['distributable'])} · "
+                    f"Gremio {format_amount(row['guild_amount'])} · "
+                    f"Caller {format_amount(row['caller_amount'])}"
+                )
+        else:
+            lines.append("Sin splits listos para aprobar.")
+        if correction:
+            lines.extend(["", "🔁 **Requiere corrección**"])
+            for row in correction:
+                lines.append(
+                    f"`{row['code']}` · Caller <@{row['caller_id']}> · "
+                    f"Repartible {format_amount(row['distributable'])} · "
+                    f"Gremio {format_amount(row['guild_amount'])} · "
+                    f"Caller {format_amount(row['caller_amount'])}"
+                )
+        return "\n".join(lines)[:1900]
 
     def approved_payouts_text(self, guild_id: int) -> str:
         return self.payouts_list_text(

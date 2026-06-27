@@ -47,7 +47,7 @@ def payout_audit_text(db: Database, guild_id: int, payout_id: int) -> str:
     )
     lines = [f"🧾 **Auditoria del Split {payout['code']}**"]
     if not rows:
-        lines.append("Sin eventos registrados.")
+        lines.append("No hay auditoría registrada para este split.")
         return "\n".join(lines)
     for row in rows:
         actor = f"<@{row['actor_id']}>" if row["actor_id"] else "Sistema"
