@@ -59,7 +59,7 @@ ACTIVITY_MANAGEMENT_DENIED_MESSAGE = (
 )
 VOICE_CHANNEL_ERROR = "❌ Debes ingresar un ID válido de canal de voz."
 ACTIVITY_EMBED_COLOR = discord.Color(0xE83E8C)
-ACTIVITY_SEPARATOR = "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+ACTIVITY_SEPARATOR = "────────────────────────────────"
 ACTIVITY_STATUS_LABELS = {
     ACTIVITY_OPEN: "🟢 ABIERTA",
     ACTIVITY_NOTICE: "🟡 EN AVISO",
@@ -102,10 +102,23 @@ def activity_status_label(status: str) -> str:
     return ACTIVITY_STATUS_LABELS.get(str(status), f"⚪ {str(status).upper()}")
 
 
+def activity_visual_length(value: str) -> int:
+    cleaned = re.sub(r"<@!?\d+>", "@Usuario", value)
+    cleaned = re.sub(r"<#\d+>", "#voz", cleaned)
+    cleaned = re.sub(r"\*\*", "", cleaned)
+    return len(cleaned)
+
+
+def activity_meta_row(left: str, right: str) -> str:
+    gap = max(6, 38 - activity_visual_length(left))
+    return f"{left}{' ' * gap}{right}"
+
+
 def activity_capacity_bar(current: int, required: int) -> str:
     filled = min(max(current, 0), max(required, 0))
     empty = max(required - filled, 0)
-    return ("🟩" * filled) + ("⬜" * empty)
+    slots = (["🟩"] * filled) + (["▫️"] * empty)
+    return " ".join(slots)
 
 
 def parse_role_lines(raw: str) -> list[dict]:
@@ -1992,23 +2005,29 @@ class Activities(commands.Cog):
         lines = [
             ACTIVITY_SEPARATOR,
             "",
-            f"⚔️ {activity_name}",
+            f"**⚔️ {activity_name}**",
             "",
         ]
         if notes:
-            lines.extend([f"📝 Nota: {notes}", ""])
+            lines.extend([f"📝 **Nota:** {notes}", ""])
         lines.extend(
             [
-                f"👤 Caller: <@{activity['caller_id']}>",
-                f"🆔 Actividad: {activity['code']}",
-                f"🕒 Horario: {activity['horario']}",
-                f"🔊 Voz: {voice_text}",
-                f"👥 Participantes: {registered_count}/{required_count}",
-                f"{status_icon} Estado: {status_name or status}",
+                activity_meta_row(
+                    f"👤 **Caller:** <@{activity['caller_id']}>",
+                    f"🆔 **ID:** {activity['code']}",
+                ),
+                activity_meta_row(
+                    f"🕒 **Hora:** {activity['horario']}",
+                    f"🔊 **Voz:** {voice_text}",
+                ),
+                activity_meta_row(
+                    f"👥 **Participantes:** {registered_count}/{required_count}",
+                    f"{status_icon} **Estado:** {status_name or status}",
+                ),
                 "",
                 ACTIVITY_SEPARATOR,
                 "",
-                "⚔️ COMPOSICIÓN",
+                "**⚔️ COMPOSICIÓN**",
                 "",
             ]
         )
@@ -2022,8 +2041,8 @@ class Activities(commands.Cog):
             required = max(0, int(role["slots"]))
             role_emoji = str(role["emoji"] or "").strip()
             role_name = " ".join(str(role["name"]).split())
-            role_label = " ".join(part for part in (role_emoji, role_name) if part).strip()
-            lines.append(f"{role_label}              【{current}/{required}】")
+            role_label = f"{role_emoji} **{role_name}**" if role_emoji else f"**{role_name}**"
+            lines.append(f"{role_label} 【{current}/{required}】")
             lines.append(activity_capacity_bar(current, required))
             if names:
                 lines.extend(f"• {name}" for name in names)
