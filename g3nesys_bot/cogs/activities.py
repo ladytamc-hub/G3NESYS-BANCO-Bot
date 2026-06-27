@@ -58,6 +58,16 @@ ACTIVITY_MANAGEMENT_DENIED_MESSAGE = (
     "No puedes administrar esta actividad porque no fuiste quien la creó."
 )
 VOICE_CHANNEL_ERROR = "❌ Debes ingresar un ID válido de canal de voz."
+ACTIVITY_EMBED_COLOR = discord.Color(0xE83E8C)
+ACTIVITY_SEPARATOR = "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+ACTIVITY_STATUS_LABELS = {
+    ACTIVITY_OPEN: "🟢 ABIERTA",
+    ACTIVITY_NOTICE: "🟡 EN AVISO",
+    ACTIVITY_IN_PROGRESS: "🔵 EN CURSO",
+    ACTIVITY_CANCELLED: "🔴 CANCELADA",
+    ACTIVITY_FINISHED: "⚫ FINALIZADA",
+    ACTIVITY_PAYOUT_CREATED: "🟣 EN SPLIT",
+}
 
 
 def looks_like_role_emoji_token(value: str) -> bool:
@@ -86,6 +96,16 @@ def resolve_role_custom_emojis(
         resolved["name"] = str(resolve_custom_emojis(name, guild) or name).strip()[:80]
         resolved_roles.append(resolved)
     return resolved_roles
+
+
+def activity_status_label(status: str) -> str:
+    return ACTIVITY_STATUS_LABELS.get(str(status), f"⚪ {str(status).upper()}")
+
+
+def activity_capacity_bar(current: int, required: int) -> str:
+    filled = min(max(current, 0), max(required, 0))
+    empty = max(required - filled, 0)
+    return ("🟩" * filled) + ("⬜" * empty)
 
 
 def parse_role_lines(raw: str) -> list[dict]:
@@ -1955,43 +1975,79 @@ class Activities(commands.Cog):
         participants = self.get_activity_participants(activity_id)
         by_role: dict[int, list[str]] = defaultdict(list)
         for participant in participants:
-            by_role[int(participant["role_id"])].append(participant["display_name"])
-
-        color = discord.Color.green()
-        if activity["status"] in {ACTIVITY_NOTICE, ACTIVITY_IN_PROGRESS}:
-            color = discord.Color.gold()
-        elif activity["status"] in {ACTIVITY_CANCELLED}:
-            color = discord.Color.red()
-        elif activity["status"] in {ACTIVITY_FINISHED, ACTIVITY_PAYOUT_CREATED}:
-            color = discord.Color.blue()
+            display_name = " ".join(str(participant["display_name"]).split())
+            by_role[int(participant["role_id"])].append(display_name)
 
         voice_text = "Sin canal"
         if activity["voice_channel_id"]:
             voice_text = f"<#{activity['voice_channel_id']}>"
-        embed = discord.Embed(
-            title=f"⚔️ {activity['name']}",
-            description=activity["notes"] or None,
-            color=color,
-        )
-        embed.add_field(name="Caller", value=f"<@{activity['caller_id']}>", inline=True)
-        embed.add_field(name="Horario", value=activity["horario"], inline=True)
-        embed.add_field(name="Canal de voz", value=voice_text, inline=True)
-        display_status = (
-            "Split generado" if activity["status"] == ACTIVITY_PAYOUT_CREATED else activity["status"]
-        )
-        embed.add_field(name="Estado", value=display_status, inline=True)
-        embed.add_field(name="ID", value=activity["code"], inline=True)
 
+        registered_count = len(participants)
+        required_count = sum(max(0, int(role["slots"])) for role in roles)
+        activity_name = " ".join(str(activity["name"]).split()).upper()
+        notes = " ".join(str(activity["notes"] or "").split())
+        status = activity_status_label(str(activity["status"]))
+        status_icon, _, status_name = status.partition(" ")
+
+        lines = [
+            ACTIVITY_SEPARATOR,
+            "",
+            f"⚔️ {activity_name}",
+            "",
+        ]
+        if notes:
+            lines.extend([f"📝 Nota: {notes}", ""])
+        lines.extend(
+            [
+                f"👤 Caller: <@{activity['caller_id']}>",
+                f"🆔 Actividad: {activity['code']}",
+                f"🕒 Horario: {activity['horario']}",
+                f"🔊 Voz: {voice_text}",
+                f"👥 Participantes: {registered_count}/{required_count}",
+                f"{status_icon} Estado: {status_name or status}",
+                "",
+                ACTIVITY_SEPARATOR,
+                "",
+                "⚔️ COMPOSICIÓN",
+                "",
+            ]
+        )
+
+        if not roles:
+            lines.append("• Sin roles configurados")
         for role in roles:
-            names = by_role.get(int(role["id"]), [])
-            value = "\n".join(f"• {name}" for name in names) if names else "• Vacio"
-            header = f"{role['emoji'] or ''} {role['name']} [{len(names)}/{role['slots']}]".strip()
-            embed.add_field(name=header[:256], value=value[:1024], inline=True)
-        embed.set_footer(
-            text=(
-                "Debes confirmar el check y permanecer al menos 50% en voz; "
-                "de lo contrario puede aplicarse multa."
-            )
+            role_id = int(role["id"])
+            names = by_role.get(role_id, [])
+            current = len(names)
+            required = max(0, int(role["slots"]))
+            role_emoji = str(role["emoji"] or "").strip()
+            role_name = " ".join(str(role["name"]).split())
+            role_label = " ".join(part for part in (role_emoji, role_name) if part).strip()
+            lines.append(f"{role_label}              【{current}/{required}】")
+            lines.append(activity_capacity_bar(current, required))
+            if names:
+                lines.extend(f"• {name}" for name in names)
+            else:
+                lines.append("• Vacío")
+            lines.append("")
+
+        lines.extend(
+            [
+                ACTIVITY_SEPARATOR,
+                "",
+                "✅ Haz check al entrar.",
+                "🎤 Permanece al menos el 50% en voz.",
+                "⚠️ La inasistencia puede generar multa.",
+            ]
+        )
+        description = "\n".join(lines)
+        if len(description) > 4096:
+            description = description[:4000].rstrip() + "\n\nLista recortada por límite de Discord."
+
+        embed = discord.Embed(
+            title="🦅 G3NESYS • PING DE ACTIVIDAD",
+            description=description,
+            color=ACTIVITY_EMBED_COLOR,
         )
         guild = self.bot.get_guild(int(activity["guild_id"]))
         return resolve_custom_emojis_in_embed(embed, guild) or embed
