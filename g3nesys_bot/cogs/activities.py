@@ -612,6 +612,28 @@ class EditCompositionModal(discord.ui.Modal, title="Modificar composicion"):
         )
 
 
+class EditActivityNotesModal(discord.ui.Modal, title="Editar observaciones"):
+    def __init__(self, cog: "Activities", activity_id: int, current_notes: str):
+        super().__init__(timeout=300)
+        self.cog = cog
+        self.activity_id = activity_id
+        self.notes = discord.ui.TextInput(
+            label="Observaciones",
+            required=False,
+            style=discord.TextStyle.paragraph,
+            max_length=600,
+            default=current_notes[:600],
+        )
+        self.add_item(self.notes)
+
+    async def on_submit(self, interaction: discord.Interaction) -> None:
+        await self.cog.edit_activity_notes_from_modal(
+            interaction,
+            self.activity_id,
+            str(self.notes.value),
+        )
+
+
 class JoinActivityRequestModal(discord.ui.Modal, title="Solicitar unirme"):
     requested_role = discord.ui.TextInput(
         label="Rol o arma solicitado",
@@ -1149,7 +1171,7 @@ class ActivityView(discord.ui.View):
             )
             self.add_control_button("Mandar check", "check", discord.ButtonStyle.primary, 3, False, "✅")
             self.add_control_button(
-                "Editar composicion", "edit_composition", discord.ButtonStyle.secondary, 3, False, "🛠️"
+                "Editar", "edit", discord.ButtonStyle.secondary, 3, False, "✏️"
             )
             self.add_control_button("Cancelar", "cancel", discord.ButtonStyle.danger, 4, False, "✖️")
         elif status == ACTIVITY_IN_PROGRESS:
@@ -1161,7 +1183,7 @@ class ActivityView(discord.ui.View):
             self.add_control_button("Finalizar", "finish", discord.ButtonStyle.success, 0, False, "🏁")
             self.add_control_button("Ver asistencia", "verify", discord.ButtonStyle.secondary, 0, False, "🔍")
             self.add_control_button(
-                "Editar composicion", "edit_composition", discord.ButtonStyle.secondary, 1, False, "🛠️"
+                "Editar", "edit", discord.ButtonStyle.secondary, 1, False, "✏️"
             )
             self.add_control_button("Cancelar", "cancel", discord.ButtonStyle.danger, 1, False, "✖️")
         elif status == ACTIVITY_FINISHED:
@@ -1202,6 +1224,59 @@ class ActivityView(discord.ui.View):
         _, _, action, activity_id = custom_id.split(":")
         await self.cog.handle_activity_action(interaction, action, int(activity_id))
 
+
+class ActivityEditMenuView(discord.ui.View):
+    def __init__(self, cog: "Activities", activity_id: int):
+        super().__init__(timeout=180)
+        self.cog = cog
+        self.activity_id = activity_id
+
+    async def get_activity(
+        self,
+        interaction: discord.Interaction,
+    ):
+        if interaction.guild is None:
+            await private_response(interaction, "Esta accion solo esta disponible en un servidor.")
+            return None
+        activity = self.cog.get_guild_activity(interaction.guild.id, self.activity_id)
+        if not activity:
+            await private_response(interaction, "No encontre esta actividad en este servidor.")
+            return None
+        return activity
+
+    @discord.ui.button(
+        label="Editar composición",
+        emoji="⚔️",
+        style=discord.ButtonStyle.secondary,
+    )
+    async def edit_composition(
+        self,
+        interaction: discord.Interaction,
+        _: discord.ui.Button,
+    ) -> None:
+        activity = await self.get_activity(interaction)
+        if activity is None:
+            return
+        if not await self.cog.require_activity_manager(interaction, activity, "editar composicion"):
+            return
+        await self.cog.prompt_edit_composition_modal(interaction, int(activity["id"]))
+
+    @discord.ui.button(
+        label="Editar observaciones",
+        emoji="📝",
+        style=discord.ButtonStyle.secondary,
+    )
+    async def edit_notes(
+        self,
+        interaction: discord.Interaction,
+        _: discord.ui.Button,
+    ) -> None:
+        activity = await self.get_activity(interaction)
+        if activity is None:
+            return
+        if not await self.cog.require_activity_notes_editor(interaction, activity):
+            return
+        await self.cog.prompt_edit_notes_modal(interaction, activity)
 
 class ConfirmAttendanceView(discord.ui.View):
     def __init__(self, cog: "Activities", activity_id: int):
@@ -1910,6 +1985,24 @@ class Activities(commands.Cog):
         await reject_caller_access(self.db, interaction, f"{action} actividades")
         return False
 
+    async def require_activity_notes_editor(
+        self,
+        interaction: discord.Interaction,
+        activity,
+    ) -> bool:
+        if interaction.guild is None or int(activity["guild_id"]) != interaction.guild.id:
+            await private_response(interaction, "No encontre esta actividad en este servidor.")
+            return False
+        if is_admin_subject(self.db, interaction):
+            return True
+        if interaction.user.id == int(activity["caller_id"]):
+            return True
+        await private_response(
+            interaction,
+            "Solo el caller creador o un admin puede editar las observaciones.",
+        )
+        return False
+
     def audit_admin_activity_action(
         self,
         interaction: discord.Interaction,
@@ -2287,6 +2380,76 @@ class Activities(commands.Cog):
             )
         except discord.HTTPException:
             return
+
+    async def prompt_activity_edit_menu(
+        self,
+        interaction: discord.Interaction,
+        activity_id: int,
+    ) -> None:
+        await private_response(
+            interaction,
+            "Selecciona qué quieres editar en este ping.",
+            view=ActivityEditMenuView(self, activity_id),
+        )
+
+    async def prompt_edit_composition_modal(
+        self,
+        interaction: discord.Interaction,
+        activity_id: int,
+    ) -> None:
+        current_roles = "\n".join(
+            f"{row['emoji'] or ''} | {row['name']} | {row['slots']}"
+            for row in self.get_activity_roles(activity_id)
+        )
+        await interaction.response.send_modal(
+            EditCompositionModal(self, activity_id, current_roles)
+        )
+
+    async def prompt_edit_notes_modal(
+        self,
+        interaction: discord.Interaction,
+        activity,
+    ) -> None:
+        await interaction.response.send_modal(
+            EditActivityNotesModal(
+                self,
+                int(activity["id"]),
+                str(activity["notes"] or ""),
+            ),
+        )
+
+    async def edit_activity_notes_from_modal(
+        self,
+        interaction: discord.Interaction,
+        activity_id: int,
+        raw_notes: str,
+    ) -> None:
+        activity = self.get_activity(activity_id)
+        if (
+            activity is None
+            or interaction.guild is None
+            or int(activity["guild_id"]) != interaction.guild.id
+        ):
+            await private_response(interaction, "No encontre esta actividad en este servidor.")
+            return
+        if not await self.require_activity_notes_editor(interaction, activity):
+            return
+
+        notes = resolve_template_text(raw_notes, interaction.guild)
+        self.db.execute(
+            "UPDATE activities SET notes = ? WHERE id = ?",
+            (notes, activity_id),
+        )
+        log_action(
+            self.db,
+            interaction.guild.id,
+            admin_id=interaction.user.id,
+            action="Modificar observaciones de actividad",
+            system="Actividades",
+            observation=str(activity["code"]),
+        )
+        await self.update_activity_message(activity_id)
+        await private_response(interaction, "Observaciones actualizadas y ping refrescado.")
 
     async def edit_composition_from_modal(
         self,
@@ -2883,19 +3046,18 @@ class Activities(commands.Cog):
                 return
             await admin_cog.prompt_quick_liquidation_for_activity(interaction, activity_id)
             return
+        if action == "edit":
+            if not await self.require_activity_notes_editor(interaction, activity):
+                return
+            await self.prompt_activity_edit_menu(interaction, activity_id)
+            return
         if not await self.require_activity_manager(interaction, activity, action):
             return
         if action == "payout":
             await interaction.response.send_modal(PayoutModal(self, activity_id))
             return
         if action == "edit_composition":
-            current_roles = "\n".join(
-                f"{row['emoji'] or ''} | {row['name']} | {row['slots']}"
-                for row in self.get_activity_roles(activity_id)
-            )
-            await interaction.response.send_modal(
-                EditCompositionModal(self, activity_id, current_roles)
-            )
+            await self.prompt_edit_composition_modal(interaction, activity_id)
             return
         await interaction.response.defer(ephemeral=True)
         if action == "notice":
