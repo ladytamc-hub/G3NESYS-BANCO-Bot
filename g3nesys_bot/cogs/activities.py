@@ -2077,7 +2077,7 @@ class Activities(commands.Cog):
             return
         channel_id_raw = self.db.get_setting(interaction.guild.id, "channel_pings_id")
         if not channel_id_raw:
-            await private_response(interaction, "Primero configura el canal con `!canal_pings_set`.")
+            await private_response(interaction, "No hay canal configurado para publicaciones de pings.")
             return
         channel = interaction.guild.get_channel(int(channel_id_raw))
         if channel is None:

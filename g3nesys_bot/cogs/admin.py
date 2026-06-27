@@ -70,6 +70,8 @@ NOTIFICATION_CHANNEL_CATEGORIES = (
     ("fines", "Multas o sanciones", "🚨"),
     ("general_admin", "Otras notificaciones admin", "🔔"),
 )
+PING_PUBLICATIONS_LABEL = "Canal de publicaciones de pings"
+PING_PUBLICATIONS_SETTING_KEY = "channel_pings_id"
 NOTIFICATION_CATEGORY_MAP = {
     category: (label, emoji)
     for category, label, emoji in NOTIFICATION_CHANNEL_CATEGORIES
@@ -1600,6 +1602,121 @@ class NotificationChannelConfigView(discord.ui.View):
         )
 
 
+def channel_setting_text(value: str | None) -> str:
+    if value:
+        return f"<#{value}>" if value.isdigit() else f"ID inválido: `{value}`"
+    return "Sin configurar"
+
+
+class PingPublicationChannelConfigView(discord.ui.View):
+    def __init__(self, cog: "Admin"):
+        super().__init__(timeout=300)
+        self.cog = cog
+        self.channel_select = discord.ui.ChannelSelect(
+            placeholder=f"Selecciona {PING_PUBLICATIONS_LABEL}"[:150],
+            channel_types=[discord.ChannelType.text, discord.ChannelType.news],
+            min_values=1,
+            max_values=1,
+            row=0,
+        )
+        self.channel_select.callback = self.select_channel
+        self.add_item(self.channel_select)
+
+    async def require_admin(self, interaction: discord.Interaction) -> bool:
+        if interaction.guild is not None and is_admin_subject(self.cog.db, interaction):
+            return True
+        await private_response(
+            interaction,
+            "Solo admins autorizados pueden configurar publicaciones de pings.",
+        )
+        return False
+
+    async def save_channel(
+        self,
+        interaction: discord.Interaction,
+        channel_id: int,
+    ) -> None:
+        self.cog.db.set_setting(
+            interaction.guild.id,
+            PING_PUBLICATIONS_SETTING_KEY,
+            str(channel_id),
+        )
+        log_action(
+            self.cog.db,
+            interaction.guild.id,
+            admin_id=interaction.user.id,
+            action="Configurar canal de publicaciones de pings",
+            system="Configuracion",
+            observation=str(channel_id),
+        )
+        await private_response(
+            interaction,
+            (
+                f"**{PING_PUBLICATIONS_LABEL}** actualizado a <#{channel_id}>.\n\n"
+                f"{self.cog.notification_settings_text(interaction.guild.id)}"
+            ),
+        )
+
+    async def select_channel(self, interaction: discord.Interaction) -> None:
+        if not await self.require_admin(interaction):
+            return
+        channel = self.channel_select.values[0]
+        await self.save_channel(interaction, int(channel.id))
+
+    @discord.ui.button(
+        label="Usar canal actual",
+        emoji="📍",
+        style=discord.ButtonStyle.primary,
+        row=1,
+    )
+    async def use_current(
+        self,
+        interaction: discord.Interaction,
+        _: discord.ui.Button,
+    ) -> None:
+        if not await self.require_admin(interaction):
+            return
+        channel = interaction.channel
+        if channel is None or not callable(getattr(channel, "send", None)):
+            await private_response(interaction, "Este canal no admite publicaciones de pings.")
+            return
+        await self.save_channel(interaction, int(channel.id))
+
+    @discord.ui.button(
+        label="Quitar canal",
+        emoji="↩️",
+        style=discord.ButtonStyle.secondary,
+        row=1,
+    )
+    async def clear_channel(
+        self,
+        interaction: discord.Interaction,
+        _: discord.ui.Button,
+    ) -> None:
+        if not await self.require_admin(interaction):
+            return
+        self.cog.db.set_setting(
+            interaction.guild.id,
+            PING_PUBLICATIONS_SETTING_KEY,
+            "",
+        )
+        log_action(
+            self.cog.db,
+            interaction.guild.id,
+            admin_id=interaction.user.id,
+            action="Quitar canal de publicaciones de pings",
+            system="Configuracion",
+            observation=PING_PUBLICATIONS_SETTING_KEY,
+        )
+        await private_response(
+            interaction,
+            (
+                f"**{PING_PUBLICATIONS_LABEL}** quedó sin canal configurado.\n\n"
+                f"{self.cog.notification_settings_text(interaction.guild.id)}"
+            ),
+        )
+
+
 class NotificationCategorySelect(discord.ui.Select):
     def __init__(self, cog: "Admin"):
         self.cog = cog
@@ -1646,6 +1763,37 @@ class NotificationsAdminView(discord.ui.View):
         super().__init__(timeout=300)
         self.cog = cog
         self.add_item(NotificationCategorySelect(cog))
+
+    @discord.ui.button(
+        label=PING_PUBLICATIONS_LABEL,
+        emoji="📣",
+        style=discord.ButtonStyle.primary,
+        row=1,
+    )
+    async def pings_publications(
+        self,
+        interaction: discord.Interaction,
+        _: discord.ui.Button,
+    ) -> None:
+        if interaction.guild is None or not is_admin_subject(self.cog.db, interaction):
+            await private_response(
+                interaction,
+                "Solo admins autorizados pueden configurar publicaciones de pings.",
+            )
+            return
+        current = self.cog.db.get_setting(
+            interaction.guild.id,
+            PING_PUBLICATIONS_SETTING_KEY,
+        )
+        await private_response(
+            interaction,
+            (
+                f"Configura **{PING_PUBLICATIONS_LABEL}**. "
+                f"Actualmente: {channel_setting_text(current)}.\n"
+                "Selecciona un canal, usa el canal actual o quita el canal configurado."
+            ),
+            view=PingPublicationChannelConfigView(self.cog),
+        )
 
     @discord.ui.button(
         label="Ver configuración",
@@ -3612,6 +3760,7 @@ class Admin(commands.Cog):
         )
 
     def notification_settings_text(self, guild_id: int) -> str:
+        pings_channel = self.db.get_setting(guild_id, PING_PUBLICATIONS_SETTING_KEY)
         lines = [
             "🔔 **Canales de notificaciones administrativas**",
             "Los avisos privados para usuarios continúan enviándose por DM.",
@@ -3644,7 +3793,10 @@ class Admin(commands.Cog):
         lines.extend(
             [
                 "",
+                f"📣 **{PING_PUBLICATIONS_LABEL}:** {channel_setting_text(pings_channel)}",
+                "",
                 "Selecciona una categoría para establecer o cambiar su canal.",
+                "Usa el botón de pings para elegir donde se publican las actividades.",
             ]
         )
         return "\n".join(lines)
