@@ -3,7 +3,7 @@ from __future__ import annotations
 import discord
 
 from ..database import Database
-from ..utils import utc_now_iso
+from ..utils import resolve_custom_emojis, resolve_custom_emojis_in_embed, utc_now_iso
 
 
 ADMIN_CHANNEL_SETTINGS = {
@@ -75,6 +75,8 @@ async def send_admin_notification(
     channel = get_admin_notification_channel(db, guild, category)
     if channel is None:
         return None
+    content = resolve_custom_emojis(content, guild)
+    embed = resolve_custom_emojis_in_embed(embed, guild)
     try:
         return await channel.send(content=content, embed=embed, view=view)
     except (discord.Forbidden, discord.HTTPException):
@@ -91,6 +93,9 @@ async def send_dm_safe(
     embed: discord.Embed | None = None,
     view: discord.ui.View | None = None,
 ) -> bool:
+    guild = getattr(user, "guild", None)
+    content = resolve_custom_emojis(content, guild)
+    embed = resolve_custom_emojis_in_embed(embed, guild)
     try:
         await user.send(content=content, embed=embed, view=view)
     except discord.HTTPException as exc:

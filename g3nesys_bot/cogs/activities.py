@@ -40,7 +40,17 @@ from ..services.fines import create_fine
 from ..services.notifications import send_admin_notification, send_dm_safe
 from ..services.payout_audit import log_payout_action
 from ..services.reports import create_caller_report
-from ..utils import format_amount, normalize_key, parse_channel_id, parse_int_amount, utc_now_iso
+from ..utils import (
+    format_amount,
+    is_custom_emoji_placeholder,
+    normalize_key,
+    parse_channel_id,
+    parse_int_amount,
+    resolve_custom_emojis,
+    resolve_custom_emojis_in_embed,
+    resolve_custom_emojis_in_send_kwargs,
+    utc_now_iso,
+)
 
 
 MAX_ACTIVITY_ROLES = 15
@@ -48,6 +58,34 @@ ACTIVITY_MANAGEMENT_DENIED_MESSAGE = (
     "No puedes administrar esta actividad porque no fuiste quien la creó."
 )
 VOICE_CHANNEL_ERROR = "❌ Debes ingresar un ID válido de canal de voz."
+
+
+def looks_like_role_emoji_token(value: str) -> bool:
+    token = (value or "").strip()
+    return bool(token) and (
+        token.startswith(("<:", "<a:"))
+        or is_custom_emoji_placeholder(token)
+        or not any(character.isalnum() for character in token)
+    )
+
+
+def resolve_template_text(value: str, guild: discord.Guild | None) -> str:
+    return str(resolve_custom_emojis(str(value).strip(), guild) or "").strip()
+
+
+def resolve_role_custom_emojis(
+    roles: list[dict],
+    guild: discord.Guild | None,
+) -> list[dict]:
+    resolved_roles: list[dict] = []
+    for role in roles:
+        resolved = dict(role)
+        emoji = str(resolved.get("emoji") or "").strip()
+        name = str(resolved.get("name") or "").strip()
+        resolved["emoji"] = str(resolve_custom_emojis(emoji, guild) or emoji).strip()
+        resolved["name"] = str(resolve_custom_emojis(name, guild) or name).strip()[:80]
+        resolved_roles.append(resolved)
+    return resolved_roles
 
 
 def parse_role_lines(raw: str) -> list[dict]:
@@ -83,10 +121,7 @@ def parse_role_lines(raw: str) -> list[dict]:
                 name_part = quantity_match.group(1).strip()
                 slots = int(quantity_match.group(2))
                 first_part, separator, remaining = name_part.partition(" ")
-                if separator and (
-                    first_part.startswith(("<:", "<a:"))
-                    or not any(character.isalnum() for character in first_part)
-                ):
+                if separator and looks_like_role_emoji_token(first_part):
                     emoji = first_part
                     name = remaining.strip()
                 else:
@@ -182,6 +217,8 @@ def parse_iso_datetime(value: str | None) -> datetime | None:
 
 async def private_response(interaction: discord.Interaction, content: str, **kwargs) -> None:
     ephemeral = interaction.guild is not None
+    content = resolve_custom_emojis(content, interaction.guild)
+    kwargs = resolve_custom_emojis_in_send_kwargs(kwargs, interaction.guild)
     if interaction.response.is_done():
         await interaction.followup.send(content, ephemeral=ephemeral, **kwargs)
     else:
@@ -944,6 +981,7 @@ class ActivityView(discord.ui.View):
         self.activity_id = activity_id
         activity = cog.get_activity(activity_id)
         roles = cog.get_activity_roles(activity_id)
+        guild = cog.bot.get_guild(int(activity["guild_id"])) if activity else None
         status = activity["status"] if activity else ACTIVITY_CANCELLED
         if status in {ACTIVITY_OPEN, ACTIVITY_NOTICE}:
             for index, row in enumerate(roles[:15]):
@@ -959,9 +997,10 @@ class ActivityView(discord.ui.View):
                     row=index // 5,
                     disabled=current >= slots,
                 )
-                if row["emoji"]:
+                emoji = str(resolve_custom_emojis(row["emoji"], guild) or row["emoji"] or "").strip()
+                if emoji and not is_custom_emoji_placeholder(emoji):
                     try:
-                        button.emoji = discord.PartialEmoji.from_str(row["emoji"])
+                        button.emoji = discord.PartialEmoji.from_str(emoji)
                     except ValueError:
                         pass
                 button.callback = self.role_button
@@ -1739,7 +1778,11 @@ class Activities(commands.Cog):
         except ValueError as exc:
             await private_response(interaction, str(exc))
             return
-        description = str(modal.description.value).strip()
+        roles = resolve_role_custom_emojis(roles, interaction.guild)
+        template_name = resolve_template_text(str(modal.template_name.value), interaction.guild)
+        activity_name = resolve_template_text(str(modal.activity_name.value), interaction.guild)
+        default_time = resolve_template_text(str(modal.default_time.value), interaction.guild)
+        description = resolve_template_text(str(modal.description.value), interaction.guild)
         if not description:
             await private_response(interaction, "La descripcion de la plantilla es obligatoria.")
             return
@@ -1757,9 +1800,9 @@ class Activities(commands.Cog):
             """,
             (
                 interaction.guild.id,
-                str(modal.template_name.value).strip(),
-                str(modal.activity_name.value).strip(),
-                str(modal.default_time.value).strip(),
+                template_name,
+                activity_name,
+                default_time,
                 voice_channel.id,
                 description,
                 1 if modal.publica else 0,
@@ -1831,6 +1874,10 @@ class Activities(commands.Cog):
         except ValueError as exc:
             await private_response(interaction, str(exc))
             return
+        roles = resolve_role_custom_emojis(roles, interaction.guild)
+        activity_name = resolve_template_text(str(modal.activity_name.value), interaction.guild)
+        horario = resolve_template_text(str(modal.horario.value), interaction.guild)
+        notes = resolve_template_text(str(modal.notes.value), interaction.guild)
 
         voice_channel = resolve_voice_channel(interaction.guild, str(modal.voice_channel.value))
         if voice_channel is None:
@@ -1850,11 +1897,11 @@ class Activities(commands.Cog):
                 code,
                 interaction.guild.id,
                 modal.template_id,
-                str(modal.activity_name.value).strip(),
+                activity_name,
                 interaction.user.id,
-                str(modal.horario.value).strip(),
+                horario,
                 voice_channel_id,
-                str(modal.notes.value).strip(),
+                notes,
                 ACTIVITY_OPEN,
                 utc_now_iso(),
             ),
@@ -1897,7 +1944,7 @@ class Activities(commands.Cog):
             category="activities",
             content=(
                 f"📍 Ping `{code}` creado por <@{interaction.user.id}>: "
-                f"**{str(modal.activity_name.value).strip()}** en <#{channel.id}>."
+                f"**{activity_name}** en <#{channel.id}>."
             ),
         )
         await private_response(interaction, f"Ping creado: `{code}`.")
@@ -1946,7 +1993,8 @@ class Activities(commands.Cog):
                 "de lo contrario puede aplicarse multa."
             )
         )
-        return embed
+        guild = self.bot.get_guild(int(activity["guild_id"]))
+        return resolve_custom_emojis_in_embed(embed, guild) or embed
 
     async def update_activity_message(self, activity_id: int) -> None:
         activity = self.get_activity(activity_id)
@@ -1992,6 +2040,7 @@ class Activities(commands.Cog):
         except ValueError as exc:
             await private_response(interaction, str(exc))
             return
+        requested_roles = resolve_role_custom_emojis(requested_roles, interaction.guild)
 
         existing_roles = {str(row["key"]): row for row in self.get_activity_roles(activity_id)}
         requested_by_key = {str(row["key"]): row for row in requested_roles}
