@@ -1106,9 +1106,8 @@ class ConfirmAttendanceView(discord.ui.View):
         self.cog = cog
         self.activity_id = activity_id
         button = discord.ui.Button(
-            label="Aqui estoy",
-            emoji="✅",
-            style=discord.ButtonStyle.success,
+            label="✅ Check",
+            style=discord.ButtonStyle.green,
             custom_id=f"g3n:attendance:confirm:{activity_id}",
         )
         button.callback = self.confirm
