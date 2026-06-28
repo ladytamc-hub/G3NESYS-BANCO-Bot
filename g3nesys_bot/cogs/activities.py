@@ -61,6 +61,9 @@ ACTIVITY_MANAGEMENT_DENIED_MESSAGE = (
 VOICE_CHANNEL_ERROR = "❌ Debes ingresar un ID válido de canal de voz."
 ACTIVITY_EMBED_COLOR = discord.Color(0xE83E8C)
 ACTIVITY_SEPARATOR = "────────────────────────────────"
+ACTIVITY_COMPOSITION_SEPARATOR = "━━━━━━━━━━━━"
+ACTIVITY_COMPOSITION_FIELD_LIMIT = 1024
+ACTIVITY_COMPOSITION_FIELDS_PER_EMBED = 24
 ACTIVITY_STATUS_LABELS = {
     ACTIVITY_OPEN: "🟢 ABIERTA",
     ACTIVITY_NOTICE: "🟡 EN AVISO",
@@ -120,6 +123,31 @@ def activity_capacity_bar(current: int, required: int) -> str:
     empty = max(required - filled, 0)
     slots = (["🟩"] * filled) + (["▫️"] * empty)
     return " ".join(slots)
+
+
+def activity_composition_marker(current: int, required: int) -> str:
+    if required > 0 and current >= required:
+        return "🟩"
+    if current > 0:
+        return "🟨"
+    return "⬜"
+
+
+def activity_composition_field_value(names: list[str]) -> str:
+    player_lines = [f"• {name}" for name in names] or ["• Vacío"]
+    value = "\n".join([ACTIVITY_COMPOSITION_SEPARATOR, *player_lines])
+    if len(value) <= ACTIVITY_COMPOSITION_FIELD_LIMIT:
+        return value
+
+    clipped_lines = [ACTIVITY_COMPOSITION_SEPARATOR]
+    notice = "• Lista recortada por límite de Discord."
+    for line in player_lines:
+        candidate = "\n".join([*clipped_lines, line, notice])
+        if len(candidate) > ACTIVITY_COMPOSITION_FIELD_LIMIT:
+            break
+        clipped_lines.append(line)
+    clipped_lines.append(notice)
+    return "\n".join(clipped_lines)
 
 
 def parse_role_lines(raw: str) -> list[dict]:
@@ -2246,9 +2274,9 @@ class Activities(commands.Cog):
                 ),
             )
 
-        embed = self.build_activity_embed(activity_id)
+        embeds = self.build_activity_embeds(activity_id)
         view = ActivityView(self, activity_id)
-        message = await channel.send(embed=embed, view=view)
+        message = await channel.send(embeds=embeds, view=view)
         self.db.execute(
             "UPDATE activities SET channel_id = ?, message_id = ? WHERE id = ?",
             (channel.id, message.id, activity_id),
@@ -2273,7 +2301,7 @@ class Activities(commands.Cog):
         )
         await private_response(interaction, f"Ping creado: `{code}`.")
 
-    def build_activity_embed(self, activity_id: int) -> discord.Embed:
+    def build_activity_embeds(self, activity_id: int) -> list[discord.Embed]:
         activity = self.get_activity(activity_id)
         roles = self.get_activity_roles(activity_id)
         participants = self.get_activity_participants(activity_id)
@@ -2319,12 +2347,12 @@ class Activities(commands.Cog):
                 ACTIVITY_SEPARATOR,
                 "",
                 "**⚔️ COMPOSICIÓN**",
-                "",
             ]
         )
 
+        composition_fields: list[tuple[str, str, bool]] = []
         if not roles:
-            lines.append("• Sin roles configurados")
+            composition_fields.append(("Sin roles configurados", "• Vacío", False))
         for role in roles:
             role_id = int(role["id"])
             names = by_role.get(role_id, [])
@@ -2332,19 +2360,15 @@ class Activities(commands.Cog):
             required = max(0, int(role["slots"]))
             role_emoji = str(role["emoji"] or "").strip()
             role_name = " ".join(str(role["name"]).split())
-            role_label = f"{role_emoji} **{role_name}**" if role_emoji else f"**{role_name}**"
-            lines.append(f"{role_label} 【{current}/{required}】")
-            lines.append(activity_capacity_bar(current, required))
-            if names:
-                lines.extend(f"• {name}" for name in names)
-            else:
-                lines.append("• Vacío")
-            lines.append("")
+            marker = activity_composition_marker(current, required)
+            role_prefix = f"{marker} {role_emoji}".strip()
+            field_name = f"{role_prefix} **{role_name}** [{current}/{required}]"
+            field_value = activity_composition_field_value(names)
+            composition_fields.append((field_name, field_value, True))
 
-        lines.extend(
+        reminders = "\n".join(
             [
                 ACTIVITY_SEPARATOR,
-                "",
                 "✅ No olvides realizar tu check cuando el caller lo solicite.",
                 "🎤 Permanece en el canal de voz durante toda la actividad.",
                 "⚠️ Respeta las indicaciones del caller durante toda la actividad.",
@@ -2354,13 +2378,34 @@ class Activities(commands.Cog):
         if len(description) > 4096:
             description = description[:4000].rstrip() + "\n\nLista recortada por límite de Discord."
 
-        embed = discord.Embed(
-            title="🦅 G3NESYS • PING DE ACTIVIDAD",
-            description=description,
-            color=ACTIVITY_EMBED_COLOR,
-        )
+        composition_chunks = [
+            composition_fields[index : index + ACTIVITY_COMPOSITION_FIELDS_PER_EMBED]
+            for index in range(0, len(composition_fields), ACTIVITY_COMPOSITION_FIELDS_PER_EMBED)
+        ]
+        embeds: list[discord.Embed] = []
+        total_chunks = len(composition_chunks)
+        for chunk_index, chunk in enumerate(composition_chunks):
+            if chunk_index == 0:
+                embed = discord.Embed(
+                    title="🦅 G3NESYS • PING DE ACTIVIDAD",
+                    description=description,
+                    color=ACTIVITY_EMBED_COLOR,
+                )
+            else:
+                embed = discord.Embed(
+                    title=f"⚔️ COMPOSICIÓN ({chunk_index + 1}/{total_chunks})",
+                    color=ACTIVITY_EMBED_COLOR,
+                )
+            for name, value, inline in chunk:
+                embed.add_field(name=name, value=value, inline=inline)
+            embeds.append(embed)
+
+        embeds[-1].add_field(name="​", value=reminders, inline=False)
         guild = self.bot.get_guild(int(activity["guild_id"]))
-        return resolve_custom_emojis_in_embed(embed, guild) or embed
+        return [resolve_custom_emojis_in_embed(embed, guild) or embed for embed in embeds]
+
+    def build_activity_embed(self, activity_id: int) -> discord.Embed:
+        return self.build_activity_embeds(activity_id)[0]
 
     async def update_activity_message(self, activity_id: int) -> None:
         activity = self.get_activity(activity_id)
@@ -2375,7 +2420,7 @@ class Activities(commands.Cog):
         try:
             message = await channel.fetch_message(int(activity["message_id"]))
             await message.edit(
-                embed=self.build_activity_embed(activity_id),
+                embeds=self.build_activity_embeds(activity_id),
                 view=ActivityView(self, activity_id),
             )
         except discord.HTTPException:
