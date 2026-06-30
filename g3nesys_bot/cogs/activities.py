@@ -453,6 +453,53 @@ class TemplateModal(discord.ui.Modal, title="Crear Plantilla"):
         await self.cog.create_template_from_modal(interaction, self)
 
 
+class EditTemplateModal(discord.ui.Modal):
+    def __init__(self, cog: "Activities", template, roles):
+        super().__init__(title="Editar plantilla", timeout=300)
+        self.cog = cog
+        self.template_id = int(template["id"])
+        roles_text = "\n".join(
+            f"{row['emoji'] or ''} | {row['name']} | {row['slots']}".strip()
+            for row in roles
+        )
+        self.template_name = discord.ui.TextInput(
+            label="Nombre de plantilla",
+            max_length=80,
+            default=str(template["name"] or "")[:80],
+        )
+        self.activity_name = discord.ui.TextInput(
+            label="Nombre base de actividad",
+            max_length=100,
+            default=str(template["activity_name"] or "")[:100],
+        )
+        self.default_time = discord.ui.TextInput(
+            label="Horario base",
+            max_length=40,
+            default=str(template["default_time"] or "")[:40],
+        )
+        self.description = discord.ui.TextInput(
+            label="Nota / observaciones",
+            style=discord.TextStyle.paragraph,
+            max_length=600,
+            default=str(template["description"] or "")[:600],
+        )
+        self.roles = discord.ui.TextInput(
+            label="Composición / armas / cantidades",
+            style=discord.TextStyle.paragraph,
+            placeholder="Falce 2\n🔮 Prisma 2\n🛡️ | Tanque | 1",
+            max_length=4000,
+            default=roles_text[:4000],
+        )
+        self.add_item(self.template_name)
+        self.add_item(self.activity_name)
+        self.add_item(self.default_time)
+        self.add_item(self.description)
+        self.add_item(self.roles)
+
+    async def on_submit(self, interaction: discord.Interaction) -> None:
+        await self.cog.update_template_from_modal(interaction, self)
+
+
 class TemplateImageModal(discord.ui.Modal):
     def __init__(
         self,
@@ -513,6 +560,33 @@ class TemplateVoiceChannelSelect(discord.ui.ChannelSelect):
             return
         self.parent_view.voice_channel_id = channel.id
         await interaction.response.edit_message(content=self.parent_view.visibility_text(), view=self.parent_view)
+
+
+class TemplateEditVoiceChannelSelect(discord.ui.ChannelSelect):
+    def __init__(self, cog: "Activities", template_id: int):
+        super().__init__(
+            placeholder="Cambiar canal de voz de la plantilla",
+            channel_types=[discord.ChannelType.voice, discord.ChannelType.stage_voice],
+            min_values=1,
+            max_values=1,
+            row=0,
+        )
+        self.cog = cog
+        self.template_id = template_id
+
+    async def callback(self, interaction: discord.Interaction) -> None:
+        if interaction.guild is None or not self.values:
+            await private_response(interaction, VOICE_CHANNEL_ERROR)
+            return
+        channel = resolve_selected_voice_channel(interaction.guild, self.values[0])
+        if channel is None:
+            await private_response(interaction, VOICE_CHANNEL_ERROR)
+            return
+        await self.cog.update_template_voice_channel(
+            interaction,
+            self.template_id,
+            channel.id,
+        )
 
 
 class TemplateVisibilityView(discord.ui.View):
@@ -886,15 +960,14 @@ class TemplateEditSelect(discord.ui.Select):
 
     async def callback(self, interaction: discord.Interaction) -> None:
         template_id = int(self.values[0])
-        template = self.cog.get_editable_template(interaction, template_id)
-        if template is None:
+        if self.cog.get_editable_template(interaction, template_id) is None:
             await private_response(interaction, "No encontre una plantilla editable para ti.")
             return
-        current = "configurada" if template["image_url"] else "sin imagen"
-        await private_response(
+        await self.cog.show_template_edit_panel(
             interaction,
-            f"Editando **{template['name']}**. Imagen actual: {current}.",
-            view=TemplateImageEditView(self.cog, template_id),
+            template_id,
+            "Administra la plantilla seleccionada:",
+            edit_current=True,
         )
 
 
@@ -904,13 +977,38 @@ class TemplateEditSelectView(discord.ui.View):
         self.add_item(TemplateEditSelect(cog, templates))
 
 
-class TemplateImageEditView(discord.ui.View):
-    def __init__(self, cog: "Activities", template_id: int):
-        super().__init__(timeout=180)
+class TemplateEditManageView(discord.ui.View):
+    def __init__(self, cog: "Activities", template):
+        super().__init__(timeout=300)
         self.cog = cog
-        self.template_id = template_id
+        self.template_id = int(template["id"])
+        self.publica = bool(int(template["publica"]))
+        self.add_item(TemplateEditVoiceChannelSelect(cog, self.template_id))
+        self.update_visibility_button()
 
-    @discord.ui.button(label="Cambiar imagen de composicion", emoji="🖼️", style=discord.ButtonStyle.primary)
+    def update_visibility_button(self) -> None:
+        self.visibility_toggle.label = "Plantilla publica: Si" if self.publica else "Plantilla publica: No"
+        self.visibility_toggle.style = discord.ButtonStyle.success if self.publica else discord.ButtonStyle.secondary
+        self.visibility_toggle.emoji = "🌐" if self.publica else "🔒"
+
+    @discord.ui.button(label="Editar datos", emoji="✏️", style=discord.ButtonStyle.primary, row=1)
+    async def edit_details(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
+        template = self.cog.get_editable_template(interaction, self.template_id)
+        if template is None:
+            await private_response(interaction, "No encontre una plantilla editable para ti.")
+            return
+        roles = self.cog.get_template_roles(self.template_id)
+        await interaction.response.send_modal(EditTemplateModal(self.cog, template, roles))
+
+    @discord.ui.button(label="Plantilla publica: No", emoji="🔒", style=discord.ButtonStyle.secondary, row=1)
+    async def visibility_toggle(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
+        await self.cog.update_template_visibility(
+            interaction,
+            self.template_id,
+            not self.publica,
+        )
+
+    @discord.ui.button(label="Cambiar imagen de composición", emoji="🖼️", style=discord.ButtonStyle.secondary, row=2)
     async def change_image(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
         template = self.cog.get_editable_template(interaction, self.template_id)
         if template is None:
@@ -924,13 +1022,27 @@ class TemplateImageEditView(discord.ui.View):
             )
         )
 
-    @discord.ui.button(label="Subir adjunto", emoji="📎", style=discord.ButtonStyle.secondary)
+    @discord.ui.button(label="Subir adjunto", emoji="📎", style=discord.ButtonStyle.secondary, row=2)
     async def upload_attachment(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
         await self.cog.capture_template_image_message(interaction, template_id=self.template_id)
 
-    @discord.ui.button(label="Quitar imagen de composicion", emoji="✖️", style=discord.ButtonStyle.danger)
+    @discord.ui.button(label="Quitar imagen de composición", emoji="✖️", style=discord.ButtonStyle.danger, row=2)
     async def remove_image(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
-        await self.cog.set_template_image_url(interaction, self.template_id, None)
+        await self.cog.set_template_image_url(
+            interaction,
+            self.template_id,
+            None,
+            edit_current=True,
+        )
+
+    @discord.ui.button(label="Dejar imagen actual", emoji="✅", style=discord.ButtonStyle.secondary, row=3)
+    async def keep_image(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
+        await self.cog.show_template_edit_panel(
+            interaction,
+            self.template_id,
+            "Imagen actual conservada.",
+            edit_current=True,
+        )
 
 
 class CallerConfigValueModal(discord.ui.Modal):
@@ -1244,8 +1356,8 @@ class PingsPanelView(discord.ui.View):
         await dm_or_private(self.cog, interaction, "\n".join(lines), "plantillas_panel")
 
     @discord.ui.button(
-        label="Editar Plantilla",
-        emoji="🖼️",
+        label="Editar plantilla",
+        emoji="✏️",
         style=discord.ButtonStyle.secondary,
         custom_id="g3n:pings:edit_template",
         row=2,
@@ -1821,6 +1933,27 @@ class Activities(commands.Cog):
         for guild in self.bot.guilds:
             self.recover_voice_tracking(guild)
             await evaluate_caller_penalties(self.db, guild)
+            await self.refresh_pings_panel_message(guild)
+
+    async def refresh_pings_panel_message(self, guild: discord.Guild) -> None:
+        row = self.db.fetch_one(
+            """
+            SELECT channel_id, message_id
+            FROM panel_messages
+            WHERE guild_id = ? AND panel_type = 'pings'
+            """,
+            (guild.id,),
+        )
+        if row is None:
+            return
+        channel = guild.get_channel(int(row["channel_id"]))
+        if channel is None or not hasattr(channel, "fetch_message"):
+            return
+        try:
+            message = await channel.fetch_message(int(row["message_id"]))
+            await message.edit(embed=self.build_pings_panel_embed(), view=PingsPanelView(self))
+        except discord.HTTPException:
+            return
 
     def recover_voice_tracking(self, guild: discord.Guild) -> None:
         recovered_at = utc_now_iso()
@@ -1922,10 +2055,7 @@ class Activities(commands.Cog):
             ]
         )
 
-    @commands.command(name="panel_pings")
-    async def panel_pings(self, ctx: commands.Context) -> None:
-        if not await require_caller_context(ctx, self.db):
-            return
+    def build_pings_panel_embed(self) -> discord.Embed:
         embed = discord.Embed(
             title="Panel de Callers",
             description=(
@@ -1935,7 +2065,13 @@ class Activities(commands.Cog):
             color=discord.Color.dark_gold(),
         )
         embed.set_image(url=PINGS_PANEL_IMAGE)
-        message = await ctx.send(embed=embed, view=PingsPanelView(self))
+        return embed
+
+    @commands.command(name="panel_pings")
+    async def panel_pings(self, ctx: commands.Context) -> None:
+        if not await require_caller_context(ctx, self.db):
+            return
+        message = await ctx.send(embed=self.build_pings_panel_embed(), view=PingsPanelView(self))
         self.db.execute(
             """
             INSERT INTO panel_messages (
@@ -1985,13 +2121,12 @@ class Activities(commands.Cog):
             "UPDATE templates SET image_url = ? WHERE id = ? AND guild_id = ?",
             (image_url, template_id, ctx.guild.id),
         )
-        log_action(
-            self.db,
+        self.log_template_edit(
             ctx.guild.id,
-            admin_id=ctx.author.id,
-            action="Actualizar imagen de plantilla",
-            system="Actividades",
-            observation=str(template["name"]),
+            ctx.author.id,
+            template_id,
+            str(template["name"]),
+            "campo=image_url; estado=" + ("configurada" if image_url else "quitada"),
         )
         await self.refresh_template_activity_messages(template_id)
         message = "Imagen de composicion actualizada." if image_url else "Imagen de composicion quitada."
@@ -2622,6 +2757,219 @@ class Activities(commands.Cog):
             (template_id, interaction.guild.id, interaction.user.id),
         )
 
+    def get_template_roles(self, template_id: int):
+        return self.db.fetch_all(
+            "SELECT * FROM template_roles WHERE template_id = ? ORDER BY position ASC",
+            (template_id,),
+        )
+
+    def build_template_preview_embed(self, template, *, title: str = "Vista previa de plantilla") -> discord.Embed:
+        roles = self.get_template_roles(int(template["id"]))
+        total_slots = sum(max(0, int(row["slots"])) for row in roles)
+        visibility = "Publica" if int(template["publica"]) else "Privada"
+        voice_text = f"<#{template['voice_channel_id']}>" if template["voice_channel_id"] else "Sin canal"
+        image_text = "Configurada" if template["image_url"] else "Sin imagen"
+        roles_text = "\n".join(
+            f"{row['emoji'] or ''} **{row['name']}** [{row['slots']}]".strip()
+            for row in roles
+        ) or "Sin composicion"
+        embed = discord.Embed(
+            title=title,
+            description=str(template["description"] or "Sin observaciones"),
+            color=ACTIVITY_EMBED_COLOR,
+        )
+        embed.add_field(name="🆔 ID", value=str(template["id"]), inline=True)
+        embed.add_field(name="📌 Plantilla", value=str(template["name"]), inline=True)
+        embed.add_field(name="⚔️ Actividad", value=str(template["activity_name"]), inline=True)
+        embed.add_field(name="🕒 Hora", value=str(template["default_time"]), inline=True)
+        embed.add_field(name="🔊 Voz", value=voice_text, inline=True)
+        embed.add_field(name="👥 Cupo máximo", value=str(total_slots), inline=True)
+        embed.add_field(name="🌐 Visibilidad", value=visibility, inline=True)
+        embed.add_field(name="🖼️ Imagen", value=image_text, inline=True)
+        embed.add_field(name="👤 Creador", value=f"<@{template['created_by']}>", inline=True)
+        embed.add_field(name="Composición", value=roles_text[:1024], inline=False)
+        if template["image_url"]:
+            embed.set_image(url=str(template["image_url"]))
+        return embed
+
+    async def show_template_edit_panel(
+        self,
+        interaction: discord.Interaction,
+        template_id: int,
+        content: str,
+        *,
+        edit_current: bool = False,
+    ) -> None:
+        template = self.get_editable_template(interaction, template_id)
+        if template is None:
+            await private_response(interaction, "No encontre una plantilla editable para ti.")
+            return
+        embed = self.build_template_preview_embed(template, title="Vista previa actualizada")
+        embed = resolve_custom_emojis_in_embed(embed, interaction.guild) or embed
+        view = TemplateEditManageView(self, template)
+        if edit_current and not interaction.response.is_done():
+            await interaction.response.edit_message(content=content, embed=embed, view=view)
+            return
+        await private_response(interaction, content, embed=embed, view=view)
+
+    def log_template_edit(
+        self,
+        guild_id: int,
+        user_id: int,
+        template_id: int,
+        template_name: str,
+        details: str,
+    ) -> None:
+        edited_at = utc_now_iso()
+        log_action(
+            self.db,
+            guild_id,
+            admin_id=user_id,
+            action="Editar plantilla",
+            system="Actividades",
+            observation=(
+                f"template_id={template_id}; name={template_name}; "
+                f"{details}; edited_at={edited_at}"
+            ),
+        )
+
+    async def update_template_from_modal(
+        self,
+        interaction: discord.Interaction,
+        modal: EditTemplateModal,
+    ) -> None:
+        if interaction.guild is None:
+            await private_response(interaction, "Este editor solo funciona dentro del servidor.")
+            return
+        template = self.get_editable_template(interaction, modal.template_id)
+        if template is None:
+            await private_response(interaction, "No encontre una plantilla editable para ti.")
+            return
+        try:
+            roles = parse_role_lines(str(modal.roles.value))
+        except ValueError as exc:
+            await private_response(interaction, str(exc))
+            return
+        roles = resolve_role_custom_emojis(roles, interaction.guild)
+        template_name = resolve_template_text(str(modal.template_name.value), interaction.guild)
+        activity_name = resolve_template_text(str(modal.activity_name.value), interaction.guild)
+        default_time = resolve_template_text(str(modal.default_time.value), interaction.guild)
+        description = resolve_template_text(str(modal.description.value), interaction.guild)
+        if not template_name or not activity_name or not default_time:
+            await private_response(interaction, "Nombre, actividad y hora son obligatorios.")
+            return
+        if not description:
+            await private_response(interaction, "La descripcion de la plantilla es obligatoria.")
+            return
+        with self.db.transaction() as cursor:
+            cursor.execute(
+                """
+                UPDATE templates
+                SET name = ?, activity_name = ?, default_time = ?, description = ?
+                WHERE id = ? AND guild_id = ?
+                """,
+                (
+                    template_name,
+                    activity_name,
+                    default_time,
+                    description,
+                    modal.template_id,
+                    interaction.guild.id,
+                ),
+            )
+            cursor.execute("DELETE FROM template_roles WHERE template_id = ?", (modal.template_id,))
+            for role in roles:
+                cursor.execute(
+                    """
+                    INSERT INTO template_roles (template_id, key, name, slots, emoji, position)
+                    VALUES (?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        modal.template_id,
+                        role["key"],
+                        role["name"],
+                        role["slots"],
+                        role["emoji"],
+                        role["position"],
+                    ),
+                )
+        self.log_template_edit(
+            interaction.guild.id,
+            interaction.user.id,
+            modal.template_id,
+            template_name,
+            f"campos=datos/composicion; roles={len(roles)}; cupos={sum(int(role['slots']) for role in roles)}",
+        )
+        await self.show_template_edit_panel(
+            interaction,
+            modal.template_id,
+            "Plantilla actualizada. Vista previa:",
+        )
+
+    async def update_template_voice_channel(
+        self,
+        interaction: discord.Interaction,
+        template_id: int,
+        voice_channel_id: int,
+    ) -> None:
+        if interaction.guild is None:
+            await private_response(interaction, "Este editor solo funciona dentro del servidor.")
+            return
+        template = self.get_editable_template(interaction, template_id)
+        if template is None:
+            await private_response(interaction, "No encontre una plantilla editable para ti.")
+            return
+        self.db.execute(
+            "UPDATE templates SET voice_channel_id = ? WHERE id = ? AND guild_id = ?",
+            (voice_channel_id, template_id, interaction.guild.id),
+        )
+        self.log_template_edit(
+            interaction.guild.id,
+            interaction.user.id,
+            template_id,
+            str(template["name"]),
+            f"campo=voice_channel_id; voice_channel_id={voice_channel_id}",
+        )
+        await self.show_template_edit_panel(
+            interaction,
+            template_id,
+            f"Canal de voz actualizado a <#{voice_channel_id}>.",
+            edit_current=True,
+        )
+
+    async def update_template_visibility(
+        self,
+        interaction: discord.Interaction,
+        template_id: int,
+        publica: bool,
+    ) -> None:
+        if interaction.guild is None:
+            await private_response(interaction, "Este editor solo funciona dentro del servidor.")
+            return
+        template = self.get_editable_template(interaction, template_id)
+        if template is None:
+            await private_response(interaction, "No encontre una plantilla editable para ti.")
+            return
+        publica_value = 1 if publica else 0
+        self.db.execute(
+            "UPDATE templates SET publica = ? WHERE id = ? AND guild_id = ?",
+            (publica_value, template_id, interaction.guild.id),
+        )
+        visibility = "publica" if publica else "privada"
+        self.log_template_edit(
+            interaction.guild.id,
+            interaction.user.id,
+            template_id,
+            str(template["name"]),
+            f"campo=publica; visibilidad={visibility}",
+        )
+        await self.show_template_edit_panel(
+            interaction,
+            template_id,
+            f"Plantilla marcada como **{visibility}**.",
+            edit_current=True,
+        )
+
     def get_template_image_url(self, activity) -> str:
         template_id = activity["template_id"]
         if not template_id:
@@ -2658,26 +3006,32 @@ class Activities(commands.Cog):
         interaction: discord.Interaction,
         template_id: int,
         image_url: str | None,
+        *,
+        edit_current: bool = False,
     ) -> None:
         template = self.get_editable_template(interaction, template_id)
-        if template is None:
+        if template is None or interaction.guild is None:
             await private_response(interaction, "No encontre una plantilla editable para ti.")
             return
         self.db.execute(
             "UPDATE templates SET image_url = ? WHERE id = ? AND guild_id = ?",
             (image_url, template_id, interaction.guild.id),
         )
-        log_action(
-            self.db,
+        self.log_template_edit(
             interaction.guild.id,
-            admin_id=interaction.user.id,
-            action="Actualizar imagen de plantilla",
-            system="Actividades",
-            observation=str(template["name"]),
+            interaction.user.id,
+            template_id,
+            str(template["name"]),
+            "campo=image_url; estado=" + ("configurada" if image_url else "quitada"),
         )
         await self.refresh_template_activity_messages(template_id)
         message = "Imagen de composicion actualizada." if image_url else "Imagen de composicion quitada."
-        await private_response(interaction, message)
+        await self.show_template_edit_panel(
+            interaction,
+            template_id,
+            message,
+            edit_current=edit_current,
+        )
 
     async def capture_template_image_message(
         self,
