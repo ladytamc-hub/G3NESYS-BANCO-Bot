@@ -67,9 +67,16 @@ VOICE_CHANNEL_ERROR = "❌ Debes ingresar un ID válido de canal de voz."
 ACTIVITY_EMBED_COLOR = discord.Color(0xE83E8C)
 ACTIVITY_SEPARATOR = "────────────────────────────────"
 ACTIVITY_COMPOSITION_SEPARATOR = "━━━━━━━━━━━━"
+ACTIVITY_EMBED_SPACER = "\u200b"
 ACTIVITY_COMPOSITION_FIELD_LIMIT = 1024
 ACTIVITY_COMPOSITION_FIELDS_PER_EMBED = 25
-ACTIVITY_PRIMARY_COMPOSITION_FIELDS = 19
+ACTIVITY_GENERAL_INFO_FIELD_COUNT = 6
+ACTIVITY_GENERAL_TO_COMPOSITION_SPACERS = 2
+ACTIVITY_PRIMARY_COMPOSITION_FIELDS = (
+    ACTIVITY_COMPOSITION_FIELDS_PER_EMBED
+    - ACTIVITY_GENERAL_INFO_FIELD_COUNT
+    - ACTIVITY_GENERAL_TO_COMPOSITION_SPACERS
+)
 ACTIVITY_FOOTER_TEXT = (
     "✅ Haz check cuando el caller lo indique • "
     "🎤 Permanece en el canal de voz • "
@@ -143,6 +150,12 @@ def activity_composition_marker(current: int, required: int) -> str:
     if current > 0:
         return "🟡"
     return "⚪"
+
+
+def activity_note_description(notes: str) -> str | None:
+    if not notes:
+        return None
+    return f"{ACTIVITY_EMBED_SPACER}\n📝 {notes}\n{ACTIVITY_EMBED_SPACER}"
 
 
 def activity_composition_field_value(names: list[str]) -> str:
@@ -2766,7 +2779,7 @@ class Activities(commands.Cog):
 
         embed = discord.Embed(
             title=f"⚔️ {activity_name}",
-            description=f"📝 {notes}" if notes else None,
+            description=activity_note_description(notes),
             color=ACTIVITY_EMBED_COLOR,
         )
         embed.add_field(name="👤 Caller", value=f"<@{activity['caller_id']}>", inline=True)
@@ -2775,6 +2788,12 @@ class Activities(commands.Cog):
         embed.add_field(name="🔊 Voz", value=voice_text, inline=True)
         embed.add_field(name="👥 Participantes", value=f"{registered_count}/{required_count}", inline=True)
         embed.add_field(name="🆔 ID", value=str(activity["code"]), inline=True)
+        for _ in range(ACTIVITY_GENERAL_TO_COMPOSITION_SPACERS):
+            embed.add_field(
+                name=ACTIVITY_EMBED_SPACER,
+                value=ACTIVITY_EMBED_SPACER,
+                inline=False,
+            )
         for name, value, inline in first_chunk:
             embed.add_field(name=name, value=value, inline=inline)
         embeds.append(embed)
