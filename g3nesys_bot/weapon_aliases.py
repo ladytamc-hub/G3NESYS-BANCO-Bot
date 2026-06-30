@@ -20,6 +20,16 @@ WEAPON_ALIASES: dict[str, dict[str, Any]] = {
         "display_name": "Árbol",
         "aliases": ["arbol"],
     },
+    "ballesta": {
+        "emoji": "<:ballesta:1521364639584096468>",
+        "display_name": "Ballesta",
+        "aliases": ["ballesta"],
+    },
+    "caido": {
+        "emoji": "<:caido:1521365082854920344>",
+        "display_name": "Caído",
+        "aliases": ["caido", "caído"],
+    },
     "cancion": {
         "emoji": "<:cancion:1512964764681240676>",
         "display_name": "Canción",
@@ -55,6 +65,11 @@ WEAPON_ALIASES: dict[str, dict[str, Any]] = {
         "display_name": "Gólem",
         "aliases": ["golem"],
     },
+    "gritogelido": {
+        "emoji": "<:gritogelido:1521364990412722439>",
+        "display_name": "Grito Gélido",
+        "aliases": ["gritogelido", "grito gelido", "grito gélido"],
+    },
     "guja": {
         "emoji": "<:guja:1512964112924016781>",
         "display_name": "Guja",
@@ -79,6 +94,11 @@ WEAPON_ALIASES: dict[str, dict[str, Any]] = {
         "emoji": "<:lecho:1512964711409385473>",
         "display_name": "Lecho",
         "aliases": ["lecho"],
+    },
+    "looter": {
+        "emoji": "<:looter:1521365127406817290>",
+        "display_name": "Looter",
+        "aliases": ["looter"],
     },
     "maldivida": {
         "emoji": "<:maldivida:1512956599348625449>",
