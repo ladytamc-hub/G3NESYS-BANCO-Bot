@@ -90,6 +90,11 @@ WEAPON_ALIASES: dict[str, dict[str, Any]] = {
         "display_name": "Mano de la Justicia",
         "aliases": ["manojusticia", "mano de la justicia"],
     },
+    "martillo1h": {
+        "emoji": "<:martillo1h:1521314781729001642>",
+        "display_name": "Martillo 1H",
+        "aliases": ["martillo", "martillo una mano", "martillo 1h"],
+    },
     "martillolargo": {
         "emoji": "<:martillolargo:1512964207388262460>",
         "display_name": "Martillo Largo",
@@ -99,6 +104,11 @@ WEAPON_ALIASES: dict[str, dict[str, Any]] = {
         "emoji": "<:martillorelampago:1520165145073029242>",
         "display_name": "Martillo Relámpago",
         "aliases": ["martillorelampago", "martillo relampago"],
+    },
+    "maza1h": {
+        "emoji": "<:maza1h:1521314729203597453>",
+        "display_name": "Maza 1H",
+        "aliases": ["maza", "maza una mano", "maza 1h"],
     },
     "monarca": {
         "emoji": "<:monarca:1520621356083839079>",

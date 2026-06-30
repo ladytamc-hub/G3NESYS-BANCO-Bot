@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import asyncio
 import logging
 import re
 from collections import defaultdict
 from datetime import datetime, timezone
+from urllib.parse import urlparse
 
 import discord
 from discord.ext import commands
@@ -66,7 +68,14 @@ ACTIVITY_EMBED_COLOR = discord.Color(0xE83E8C)
 ACTIVITY_SEPARATOR = "────────────────────────────────"
 ACTIVITY_COMPOSITION_SEPARATOR = "━━━━━━━━━━━━"
 ACTIVITY_COMPOSITION_FIELD_LIMIT = 1024
-ACTIVITY_COMPOSITION_FIELDS_PER_EMBED = 24
+ACTIVITY_COMPOSITION_FIELDS_PER_EMBED = 25
+ACTIVITY_PRIMARY_COMPOSITION_FIELDS = 19
+ACTIVITY_FOOTER_TEXT = (
+    "✅ Haz check cuando el caller lo indique • "
+    "🎤 Permanece en el canal de voz • "
+    "⚔️ Sigue las indicaciones del caller"
+)
+IMAGE_FILE_EXTENSIONS = (".png", ".jpg", ".jpeg", ".gif", ".webp")
 ACTIVITY_STATUS_LABELS = {
     ACTIVITY_OPEN: "🟢 ABIERTA",
     ACTIVITY_NOTICE: "🟡 EN AVISO",
@@ -130,20 +139,20 @@ def activity_capacity_bar(current: int, required: int) -> str:
 
 def activity_composition_marker(current: int, required: int) -> str:
     if required > 0 and current >= required:
-        return "🟩"
+        return "🟢"
     if current > 0:
-        return "🟨"
-    return "⬜"
+        return "🟡"
+    return "⚪"
 
 
 def activity_composition_field_value(names: list[str]) -> str:
-    player_lines = [f"• {name}" for name in names] or ["• Vacío"]
-    value = "\n".join([ACTIVITY_COMPOSITION_SEPARATOR, *player_lines])
+    player_lines = [f"▸ {name}" for name in names] or ["▸ Disponible"]
+    value = "\n".join(player_lines)
     if len(value) <= ACTIVITY_COMPOSITION_FIELD_LIMIT:
         return value
 
-    clipped_lines = [ACTIVITY_COMPOSITION_SEPARATOR]
-    notice = "• Lista recortada por límite de Discord."
+    clipped_lines: list[str] = []
+    notice = "▸ Lista recortada por límite de Discord."
     for line in player_lines:
         candidate = "\n".join([*clipped_lines, line, notice])
         if len(candidate) > ACTIVITY_COMPOSITION_FIELD_LIMIT:
@@ -152,6 +161,26 @@ def activity_composition_field_value(names: list[str]) -> str:
     clipped_lines.append(notice)
     return "\n".join(clipped_lines)
 
+
+def parse_template_image_url(value: str) -> str:
+    image_url = str(value or "").strip().strip("<>")
+    if not image_url:
+        raise ValueError("Pega una URL de imagen valida.")
+    parsed = urlparse(image_url)
+    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+        raise ValueError("La imagen debe ser una URL http(s) valida.")
+    if len(image_url) > 2000:
+        raise ValueError("La URL de imagen es demasiado larga.")
+    return image_url
+
+
+def image_url_from_attachments(attachments) -> str | None:
+    for attachment in attachments:
+        content_type = str(getattr(attachment, "content_type", "") or "").lower()
+        filename = str(getattr(attachment, "filename", "") or "").lower()
+        if content_type.startswith("image/") or filename.endswith(IMAGE_FILE_EXTENSIONS):
+            return str(attachment.url)
+    return None
 
 def parse_role_lines(raw: str) -> list[dict]:
     roles: list[dict] = []
@@ -393,14 +422,61 @@ class TemplateModal(discord.ui.Modal, title="Crear Plantilla"):
         max_length=1800,
     )
 
-    def __init__(self, cog: "Activities", *, voice_channel_id: int, publica: bool = False):
+    def __init__(
+        self,
+        cog: "Activities",
+        *,
+        voice_channel_id: int,
+        publica: bool = False,
+        image_url: str | None = None,
+    ):
         super().__init__(timeout=300)
         self.cog = cog
         self.voice_channel_id = voice_channel_id
         self.publica = publica
+        self.image_url = image_url
 
     async def on_submit(self, interaction: discord.Interaction) -> None:
         await self.cog.create_template_from_modal(interaction, self)
+
+
+class TemplateImageModal(discord.ui.Modal):
+    def __init__(
+        self,
+        cog: "Activities",
+        *,
+        template_id: int | None = None,
+        draft_view: "TemplateVisibilityView" | None = None,
+        current_url: str = "",
+    ):
+        super().__init__(title="Imagen de composicion", timeout=180)
+        self.cog = cog
+        self.template_id = template_id
+        self.draft_view = draft_view
+        self.image_url = discord.ui.TextInput(
+            label="URL de imagen",
+            placeholder="https://...",
+            max_length=2000,
+            default=current_url[:2000],
+        )
+        self.add_item(self.image_url)
+
+    async def on_submit(self, interaction: discord.Interaction) -> None:
+        try:
+            image_url = parse_template_image_url(str(self.image_url.value))
+        except ValueError as exc:
+            await private_response(interaction, str(exc))
+            return
+        if self.draft_view is not None:
+            if not await self.draft_view.require_author(interaction):
+                return
+            self.draft_view.image_url = image_url
+            await private_response(interaction, "Imagen de composicion guardada para esta plantilla.")
+            return
+        if self.template_id is None:
+            await private_response(interaction, "No encontre la plantilla a editar.")
+            return
+        await self.cog.set_template_image_url(interaction, self.template_id, image_url)
 
 
 class TemplateVoiceChannelSelect(discord.ui.ChannelSelect):
@@ -433,16 +509,19 @@ class TemplateVisibilityView(discord.ui.View):
         self.author_id = author_id
         self.publica = publica
         self.voice_channel_id: int | None = None
+        self.image_url: str | None = None
         self.add_item(TemplateVoiceChannelSelect(self))
         self.update_toggle_button()
 
     def visibility_text(self) -> str:
         voice_text = f"<#{self.voice_channel_id}>" if self.voice_channel_id else "Pendiente"
+        image_text = "configurada" if self.image_url else "sin imagen"
         return (
             "Elige la visibilidad de la plantilla antes de completar el formulario.\n"
             "Privada: solo tu puedes verla y usarla.\n"
             "Publica: cualquier Caller puede verla y usarla; solo tu o un admin podran administrarla.\n"
-            f"Canal de voz: {voice_text}"
+            f"Canal de voz: {voice_text}\n"
+            f"Imagen de composicion: {image_text}"
         )
 
     def update_toggle_button(self) -> None:
@@ -464,6 +543,22 @@ class TemplateVisibilityView(discord.ui.View):
         self.update_toggle_button()
         await interaction.response.edit_message(content=self.visibility_text(), view=self)
 
+    @discord.ui.button(label="Imagen", emoji="🖼️", style=discord.ButtonStyle.secondary, row=2)
+    async def image_button(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
+        if not await self.require_author(interaction):
+            return
+        await interaction.response.send_modal(
+            TemplateImageModal(
+                self.cog,
+                draft_view=self,
+                current_url=self.image_url or "",
+            )
+        )
+
+    @discord.ui.button(label="Adjunto", emoji="📎", style=discord.ButtonStyle.secondary, row=2)
+    async def attachment_button(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
+        await self.cog.capture_template_image_message(interaction, draft_view=self)
+
     @discord.ui.button(label="Continuar", emoji="➡️", style=discord.ButtonStyle.primary, row=2)
     async def continue_button(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
         if not await self.require_author(interaction):
@@ -480,6 +575,7 @@ class TemplateVisibilityView(discord.ui.View):
                 self.cog,
                 voice_channel_id=self.voice_channel_id,
                 publica=self.publica,
+                image_url=self.image_url,
             )
         )
 
@@ -753,6 +849,75 @@ class TemplateSelectView(discord.ui.View):
     def __init__(self, cog: "Activities", templates):
         super().__init__(timeout=180)
         self.add_item(TemplateSelect(cog, templates))
+
+
+class TemplateEditSelect(discord.ui.Select):
+    def __init__(self, cog: "Activities", templates):
+        self.cog = cog
+        options = []
+        for row in templates[:25]:
+            image_note = "con imagen" if row["image_url"] else "sin imagen"
+            options.append(
+                discord.SelectOption(
+                    label=row["name"][:100],
+                    description=f"{row['activity_name']} - {image_note}"[:100],
+                    value=str(row["id"]),
+                )
+            )
+        super().__init__(
+            placeholder="Selecciona una plantilla para editar",
+            min_values=1,
+            max_values=1,
+            options=options,
+        )
+
+    async def callback(self, interaction: discord.Interaction) -> None:
+        template_id = int(self.values[0])
+        template = self.cog.get_editable_template(interaction, template_id)
+        if template is None:
+            await private_response(interaction, "No encontre una plantilla editable para ti.")
+            return
+        current = "configurada" if template["image_url"] else "sin imagen"
+        await private_response(
+            interaction,
+            f"Editando **{template['name']}**. Imagen actual: {current}.",
+            view=TemplateImageEditView(self.cog, template_id),
+        )
+
+
+class TemplateEditSelectView(discord.ui.View):
+    def __init__(self, cog: "Activities", templates):
+        super().__init__(timeout=180)
+        self.add_item(TemplateEditSelect(cog, templates))
+
+
+class TemplateImageEditView(discord.ui.View):
+    def __init__(self, cog: "Activities", template_id: int):
+        super().__init__(timeout=180)
+        self.cog = cog
+        self.template_id = template_id
+
+    @discord.ui.button(label="Cambiar imagen de composicion", emoji="🖼️", style=discord.ButtonStyle.primary)
+    async def change_image(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
+        template = self.cog.get_editable_template(interaction, self.template_id)
+        if template is None:
+            await private_response(interaction, "No encontre una plantilla editable para ti.")
+            return
+        await interaction.response.send_modal(
+            TemplateImageModal(
+                self.cog,
+                template_id=self.template_id,
+                current_url=str(template["image_url"] or ""),
+            )
+        )
+
+    @discord.ui.button(label="Subir adjunto", emoji="📎", style=discord.ButtonStyle.secondary)
+    async def upload_attachment(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
+        await self.cog.capture_template_image_message(interaction, template_id=self.template_id)
+
+    @discord.ui.button(label="Quitar imagen de composicion", emoji="✖️", style=discord.ButtonStyle.danger)
+    async def remove_image(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
+        await self.cog.set_template_image_url(interaction, self.template_id, None)
 
 
 class CallerConfigValueModal(discord.ui.Modal):
@@ -1064,6 +1229,42 @@ class PingsPanelView(discord.ui.View):
                 f"{creator_note}"
             )
         await dm_or_private(self.cog, interaction, "\n".join(lines), "plantillas_panel")
+
+    @discord.ui.button(
+        label="Editar Plantilla",
+        emoji="🖼️",
+        style=discord.ButtonStyle.secondary,
+        custom_id="g3n:pings:edit_template",
+        row=2,
+    )
+    async def edit_template(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
+        if not is_caller_subject(self.cog.db, interaction):
+            await reject_caller_access(self.cog.db, interaction, "editar plantillas")
+            return
+        if is_admin_subject(self.cog.db, interaction):
+            templates = self.cog.db.fetch_all(
+                "SELECT * FROM templates WHERE guild_id = ? ORDER BY created_at DESC LIMIT 25",
+                (interaction.guild.id,),
+            )
+        else:
+            templates = self.cog.db.fetch_all(
+                """
+                SELECT *
+                FROM templates
+                WHERE guild_id = ? AND created_by = ?
+                ORDER BY created_at DESC
+                LIMIT 25
+                """,
+                (interaction.guild.id, interaction.user.id),
+            )
+        if not templates:
+            await private_response(interaction, "No tienes plantillas editables.")
+            return
+        await private_response(
+            interaction,
+            "Elige la plantilla que quieres editar:",
+            view=TemplateEditSelectView(self.cog, templates),
+        )
 
     @discord.ui.button(
         label="Ver mis Actividades",
@@ -1741,6 +1942,83 @@ class Activities(commands.Cog):
         except discord.HTTPException:
             pass
 
+    async def set_template_image_from_context(
+        self,
+        ctx: commands.Context,
+        template_id: int,
+        image_url: str | None,
+    ) -> None:
+        if ctx.guild is None:
+            await ctx.reply("Este comando solo funciona dentro del servidor.", mention_author=False)
+            return
+        if is_admin_subject(self.db, ctx):
+            template = self.db.fetch_one(
+                "SELECT * FROM templates WHERE id = ? AND guild_id = ?",
+                (template_id, ctx.guild.id),
+            )
+        else:
+            template = self.db.fetch_one(
+                """
+                SELECT *
+                FROM templates
+                WHERE id = ? AND guild_id = ? AND created_by = ?
+                """,
+                (template_id, ctx.guild.id, ctx.author.id),
+            )
+        if template is None:
+            await ctx.reply("No encontre una plantilla editable para ti.", mention_author=False)
+            return
+        self.db.execute(
+            "UPDATE templates SET image_url = ? WHERE id = ? AND guild_id = ?",
+            (image_url, template_id, ctx.guild.id),
+        )
+        log_action(
+            self.db,
+            ctx.guild.id,
+            admin_id=ctx.author.id,
+            action="Actualizar imagen de plantilla",
+            system="Actividades",
+            observation=str(template["name"]),
+        )
+        await self.refresh_template_activity_messages(template_id)
+        message = "Imagen de composicion actualizada." if image_url else "Imagen de composicion quitada."
+        await ctx.reply(message, mention_author=False)
+
+    @commands.command(name="plantilla_imagen")
+    async def plantilla_imagen(
+        self,
+        ctx: commands.Context,
+        template_id: int,
+        *,
+        image_url: str = "",
+    ) -> None:
+        if not await require_caller_context(ctx, self.db):
+            return
+        attachment_url = image_url_from_attachments(getattr(ctx.message, "attachments", []))
+        raw_image_url = attachment_url or image_url
+        if not raw_image_url:
+            await ctx.reply(
+                "Adjunta una imagen o pega una URL despues del ID de plantilla.",
+                mention_author=False,
+            )
+            return
+        try:
+            parsed_url = parse_template_image_url(raw_image_url)
+        except ValueError as exc:
+            await ctx.reply(str(exc), mention_author=False)
+            return
+        await self.set_template_image_from_context(ctx, template_id, parsed_url)
+
+    @commands.command(name="plantilla_imagen_quitar")
+    async def plantilla_imagen_quitar(
+        self,
+        ctx: commands.Context,
+        template_id: int,
+    ) -> None:
+        if not await require_caller_context(ctx, self.db):
+            return
+        await self.set_template_image_from_context(ctx, template_id, None)
+
     def my_caller_ranking_text(self, guild_id: int, user_id: int) -> str:
         ranking = caller_ranking(self.db, guild_id)
         for position, row in enumerate(ranking, start=1):
@@ -2158,9 +2436,9 @@ class Activities(commands.Cog):
             """
             INSERT INTO templates (
                 guild_id, name, activity_name, default_time,
-                voice_channel_id, description, publica, created_by, created_at
+                voice_channel_id, description, image_url, publica, created_by, created_at
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 interaction.guild.id,
@@ -2169,6 +2447,7 @@ class Activities(commands.Cog):
                 default_time,
                 voice_channel.id,
                 description,
+                modal.image_url,
                 1 if modal.publica else 0,
                 interaction.user.id,
                 utc_now_iso(),
@@ -2313,6 +2592,131 @@ class Activities(commands.Cog):
         )
         await private_response(interaction, f"Ping creado: `{code}`.")
 
+    def get_editable_template(self, interaction: discord.Interaction, template_id: int):
+        if interaction.guild is None:
+            return None
+        if is_admin_subject(self.db, interaction):
+            return self.db.fetch_one(
+                "SELECT * FROM templates WHERE id = ? AND guild_id = ?",
+                (template_id, interaction.guild.id),
+            )
+        return self.db.fetch_one(
+            """
+            SELECT *
+            FROM templates
+            WHERE id = ? AND guild_id = ? AND created_by = ?
+            """,
+            (template_id, interaction.guild.id, interaction.user.id),
+        )
+
+    def get_template_image_url(self, activity) -> str:
+        template_id = activity["template_id"]
+        if not template_id:
+            return ""
+        template = self.db.fetch_one(
+            "SELECT image_url FROM templates WHERE id = ? AND guild_id = ?",
+            (int(template_id), int(activity["guild_id"])),
+        )
+        if template is None:
+            return ""
+        return str(template["image_url"] or "").strip()
+
+    async def refresh_template_activity_messages(self, template_id: int) -> None:
+        rows = self.db.fetch_all(
+            """
+            SELECT id
+            FROM activities
+            WHERE template_id = ? AND message_id IS NOT NULL
+              AND status IN (?, ?, ?, ?)
+            """,
+            (
+                template_id,
+                ACTIVITY_OPEN,
+                ACTIVITY_NOTICE,
+                ACTIVITY_IN_PROGRESS,
+                ACTIVITY_FINISHED,
+            ),
+        )
+        for row in rows:
+            await self.update_activity_message(int(row["id"]))
+
+    async def set_template_image_url(
+        self,
+        interaction: discord.Interaction,
+        template_id: int,
+        image_url: str | None,
+    ) -> None:
+        template = self.get_editable_template(interaction, template_id)
+        if template is None:
+            await private_response(interaction, "No encontre una plantilla editable para ti.")
+            return
+        self.db.execute(
+            "UPDATE templates SET image_url = ? WHERE id = ? AND guild_id = ?",
+            (image_url, template_id, interaction.guild.id),
+        )
+        log_action(
+            self.db,
+            interaction.guild.id,
+            admin_id=interaction.user.id,
+            action="Actualizar imagen de plantilla",
+            system="Actividades",
+            observation=str(template["name"]),
+        )
+        await self.refresh_template_activity_messages(template_id)
+        message = "Imagen de composicion actualizada." if image_url else "Imagen de composicion quitada."
+        await private_response(interaction, message)
+
+    async def capture_template_image_message(
+        self,
+        interaction: discord.Interaction,
+        *,
+        draft_view: TemplateVisibilityView | None = None,
+        template_id: int | None = None,
+    ) -> None:
+        if interaction.channel is None:
+            await private_response(interaction, "No pude identificar el canal para recibir la imagen.")
+            return
+        if draft_view is not None:
+            if not await draft_view.require_author(interaction):
+                return
+        elif template_id is None or self.get_editable_template(interaction, template_id) is None:
+            await private_response(interaction, "No encontre una plantilla editable para ti.")
+            return
+
+        await private_response(
+            interaction,
+            "Envia una imagen adjunta o una URL de imagen en este canal durante los proximos 90 segundos.",
+        )
+
+        def check(message: discord.Message) -> bool:
+            return (
+                message.author.id == interaction.user.id
+                and message.channel.id == interaction.channel.id
+                and (bool(message.attachments) or bool(str(message.content).strip()))
+            )
+
+        try:
+            message = await self.bot.wait_for("message", timeout=90, check=check)
+        except asyncio.TimeoutError:
+            await interaction.followup.send("No recibi ninguna imagen a tiempo.", ephemeral=True)
+            return
+
+        raw_image_url = image_url_from_attachments(message.attachments) or str(message.content).strip()
+        try:
+            image_url = parse_template_image_url(raw_image_url)
+        except ValueError as exc:
+            await interaction.followup.send(str(exc), ephemeral=True)
+            return
+
+        if draft_view is not None:
+            draft_view.image_url = image_url
+            await interaction.followup.send(
+                "Imagen de composicion guardada para esta plantilla.",
+                ephemeral=True,
+            )
+            return
+        await self.set_template_image_url(interaction, int(template_id), image_url)
+
     def build_activity_embeds(self, activity_id: int) -> list[discord.Embed]:
         activity = self.get_activity(activity_id)
         roles = self.get_activity_roles(activity_id)
@@ -2332,39 +2736,12 @@ class Activities(commands.Cog):
         notes = " ".join(str(activity["notes"] or "").split())
         status = activity_status_label(str(activity["status"]))
         status_icon, _, status_name = status.partition(" ")
-
-        lines = [
-            ACTIVITY_SEPARATOR,
-            "",
-            f"**⚔️ {activity_name}**",
-            "",
-        ]
-        if notes:
-            lines.extend([f"📝 **Nota:** {notes}", ""])
-        lines.extend(
-            [
-                activity_meta_row(
-                    f"👤 **Caller:** <@{activity['caller_id']}>",
-                    f"🆔 **ID:** {activity['code']}",
-                ),
-                activity_meta_row(
-                    f"🕒 **Hora:** {activity['horario']}",
-                    f"🔊 **Voz:** {voice_text}",
-                ),
-                activity_meta_row(
-                    f"👥 **Participantes:** {registered_count}/{required_count}",
-                    f"{status_icon} **Estado:** {status_name or status}",
-                ),
-                "",
-                ACTIVITY_SEPARATOR,
-                "",
-                "**⚔️ COMPOSICIÓN**",
-            ]
-        )
+        status_name = status_name or status
+        image_url = self.get_template_image_url(activity)
 
         composition_fields: list[tuple[str, str, bool]] = []
         if not roles:
-            composition_fields.append(("Sin roles configurados", "• Vacío", False))
+            composition_fields.append(("Sin armas configuradas ⚪ 0/0", "▸ Disponible", False))
         for role in roles:
             role_id = int(role["id"])
             names = by_role.get(role_id, [])
@@ -2373,47 +2750,56 @@ class Activities(commands.Cog):
             role_emoji = str(role["emoji"] or "").strip()
             role_name = " ".join(str(role["name"]).split())
             marker = activity_composition_marker(current, required)
-            role_prefix = f"{marker} {role_emoji}".strip()
-            field_name = f"{role_prefix} **{role_name}** [{current}/{required}]"
+            role_prefix = f"{role_emoji} " if role_emoji else ""
+            field_name = f"{role_prefix}{role_name} {marker} {current}/{required}"
             field_value = activity_composition_field_value(names)
             composition_fields.append((field_name, field_value, True))
 
-        reminders = "\n".join(
-            [
-                ACTIVITY_SEPARATOR,
-                "✅ No olvides realizar tu check cuando el caller lo solicite.",
-                "🎤 Permanece en el canal de voz durante toda la actividad.",
-                "⚠️ Respeta las indicaciones del caller durante toda la actividad.",
-            ]
-        )
-        description = "\n".join(lines)
-        if len(description) > 4096:
-            description = description[:4000].rstrip() + "\n\nLista recortada por límite de Discord."
-
-        composition_chunks = [
-            composition_fields[index : index + ACTIVITY_COMPOSITION_FIELDS_PER_EMBED]
-            for index in range(0, len(composition_fields), ACTIVITY_COMPOSITION_FIELDS_PER_EMBED)
+        first_chunk = composition_fields[:ACTIVITY_PRIMARY_COMPOSITION_FIELDS]
+        remaining_fields = composition_fields[ACTIVITY_PRIMARY_COMPOSITION_FIELDS:]
+        extra_chunks = [
+            remaining_fields[index : index + ACTIVITY_COMPOSITION_FIELDS_PER_EMBED]
+            for index in range(0, len(remaining_fields), ACTIVITY_COMPOSITION_FIELDS_PER_EMBED)
         ]
+        total_chunks = 1 + len(extra_chunks)
         embeds: list[discord.Embed] = []
-        total_chunks = len(composition_chunks)
-        for chunk_index, chunk in enumerate(composition_chunks):
-            if chunk_index == 0:
-                embed = discord.Embed(
-                    title="🦅 G3NESYS • PING DE ACTIVIDAD",
-                    description=description,
-                    color=ACTIVITY_EMBED_COLOR,
-                )
-            else:
-                embed = discord.Embed(
-                    title=f"⚔️ COMPOSICIÓN ({chunk_index + 1}/{total_chunks})",
-                    color=ACTIVITY_EMBED_COLOR,
-                )
-            for name, value, inline in chunk:
-                embed.add_field(name=name, value=value, inline=inline)
-            embeds.append(embed)
 
-        embeds[-1].add_field(name="​", value=reminders, inline=False)
+        embed = discord.Embed(
+            title=f"⚔️ {activity_name}",
+            description=f"📝 {notes}" if notes else None,
+            color=ACTIVITY_EMBED_COLOR,
+        )
+        embed.add_field(name="👤 Caller", value=f"<@{activity['caller_id']}>", inline=True)
+        embed.add_field(name="🕒 Hora", value=str(activity["horario"]), inline=True)
+        embed.add_field(name=f"{status_icon} Estado", value=status_name, inline=True)
+        embed.add_field(name="🔊 Voz", value=voice_text, inline=True)
+        embed.add_field(name="👥 Participantes", value=f"{registered_count}/{required_count}", inline=True)
+        embed.add_field(name="🆔 ID", value=str(activity["code"]), inline=True)
+        for name, value, inline in first_chunk:
+            embed.add_field(name=name, value=value, inline=inline)
+        embeds.append(embed)
+
+        for chunk_index, chunk in enumerate(extra_chunks, start=2):
+            extra_embed = discord.Embed(
+                title=f"⚔️ COMPOSICIÓN ({chunk_index}/{total_chunks})",
+                color=ACTIVITY_EMBED_COLOR,
+            )
+            for name, value, inline in chunk:
+                extra_embed.add_field(name=name, value=value, inline=inline)
+            embeds.append(extra_embed)
+
+        for embed in embeds:
+            embed.set_footer(text=ACTIVITY_FOOTER_TEXT)
+
         guild = self.bot.get_guild(int(activity["guild_id"]))
+        caller = guild.get_member(int(activity["caller_id"])) if guild is not None else None
+        if caller is None:
+            caller = self.bot.get_user(int(activity["caller_id"]))
+        if caller is not None:
+            embeds[0].set_thumbnail(url=caller.display_avatar.url)
+        if image_url:
+            embeds[-1].set_image(url=image_url)
+
         return [resolve_custom_emojis_in_embed(embed, guild) or embed for embed in embeds]
 
     def build_activity_embed(self, activity_id: int) -> discord.Embed:

@@ -93,6 +93,8 @@ class Database:
             self._conn.execute(
                 "ALTER TABLE templates ADD COLUMN voice_channel_id INTEGER"
             )
+        if "image_url" not in template_columns:
+            self._conn.execute("ALTER TABLE templates ADD COLUMN image_url TEXT")
 
         activity_columns = {
             row["name"]
@@ -571,6 +573,7 @@ CREATE TABLE IF NOT EXISTS templates (
     default_time TEXT NOT NULL,
     voice_channel_id INTEGER,
     description TEXT NOT NULL,
+    image_url TEXT,
     publica INTEGER NOT NULL DEFAULT 0,
     created_by INTEGER NOT NULL,
     created_at TEXT NOT NULL
