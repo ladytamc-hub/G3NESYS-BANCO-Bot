@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import re
 from collections import defaultdict
 from datetime import datetime, timezone
@@ -52,8 +53,10 @@ from ..utils import (
     resolve_custom_emojis_in_send_kwargs,
     utc_now_iso,
 )
+from ..weapon_aliases import resolve_weapon_alias
 
 
+LOGGER = logging.getLogger("g3nesys.activities")
 MAX_ACTIVITY_ROLES = 15
 ACTIVITY_MANAGEMENT_DENIED_MESSAGE = (
     "No puedes administrar esta actividad porque no fuiste quien la creó."
@@ -199,10 +202,19 @@ def parse_role_lines(raw: str) -> list[dict]:
             raise ValueError(f"Linea {position}: escribe el nombre del rol o arma.")
         if slots <= 0:
             raise ValueError(f"Linea {position}: la cantidad debe ser mayor que cero.")
+        weapon = resolve_weapon_alias(name)
+        if weapon is None:
+            LOGGER.warning("Arma no reconocida en composicion de actividad: %s", name)
+            role_key = normalize_key(name)
+            display_name = name[:80]
+        else:
+            role_key = weapon.key
+            display_name = weapon.display_name[:80]
+            emoji = weapon.emoji
         roles.append(
             {
-                "key": normalize_key(name),
-                "name": name[:80],
+                "key": role_key,
+                "name": display_name,
                 "slots": slots,
                 "emoji": emoji,
                 "position": position,
@@ -2711,7 +2723,16 @@ class Activities(commands.Cog):
 
         now = utc_now_iso()
         if accepted:
-            role_key = normalize_key(str(request["requested_role"]))
+            requested_role_name = str(request["requested_role"]).strip()
+            requested_weapon = resolve_weapon_alias(requested_role_name)
+            if requested_weapon is None:
+                role_key = normalize_key(requested_role_name)
+                role_name = requested_role_name[:80]
+                role_emoji = ""
+            else:
+                role_key = requested_weapon.key
+                role_name = requested_weapon.display_name[:80]
+                role_emoji = requested_weapon.emoji
             role = self.db.fetch_one(
                 "SELECT * FROM activity_roles WHERE activity_id = ? AND key = ?",
                 (int(request["activity_id"]), role_key),
@@ -2724,12 +2745,13 @@ class Activities(commands.Cog):
                 role_id = self.db.execute(
                     """
                     INSERT INTO activity_roles (activity_id, key, name, slots, emoji, position)
-                    VALUES (?, ?, ?, 1, '', ?)
+                    VALUES (?, ?, ?, 1, ?, ?)
                     """,
                     (
                         int(request["activity_id"]),
                         role_key,
-                        str(request["requested_role"])[:80],
+                        role_name,
+                        role_emoji,
                         int(position_row["position"]) + 1,
                     ),
                 )
