@@ -90,7 +90,7 @@ class BankPanelView(discord.ui.View):
         super().__init__(timeout=None)
         self.cog = cog
 
-    @discord.ui.button(label="Consultar saldo", emoji="💰", style=discord.ButtonStyle.primary, custom_id="g3n:bank:balance")
+    @discord.ui.button(label="Consultar mi saldo", emoji="💰", style=discord.ButtonStyle.primary, custom_id="g3n:bank:balance")
     async def balance(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
         await self.cog.show_balance_interaction(interaction)
 

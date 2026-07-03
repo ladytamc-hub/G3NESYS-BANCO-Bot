@@ -1237,7 +1237,7 @@ class PingsPanelView(discord.ui.View):
         self.cog = cog
 
     @discord.ui.button(
-        label="Crear Ping",
+        label="Crear Ping Rápido",
         emoji="📍",
         style=discord.ButtonStyle.success,
         custom_id="g3n:pings:create_activity",
@@ -1250,22 +1250,8 @@ class PingsPanelView(discord.ui.View):
         await interaction.response.send_modal(ActivityModal(self.cog, template_id=None))
 
     @discord.ui.button(
-        label="Crear Plantilla",
-        emoji="📝",
-        style=discord.ButtonStyle.secondary,
-        custom_id="g3n:pings:create_template",
-        row=0,
-    )
-    async def create_template(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
-        if not is_caller_subject(self.cog.db, interaction):
-            await reject_caller_access(self.cog.db, interaction, "crear plantillas")
-            return
-        view = TemplateVisibilityView(self.cog, author_id=interaction.user.id)
-        await private_response(interaction, view.visibility_text(), view=view)
-
-    @discord.ui.button(
-        label="Seleccionar Plantilla",
-        emoji="📋",
+        label="Crear Ping desde Plantilla",
+        emoji="📍",
         style=discord.ButtonStyle.secondary,
         custom_id="g3n:pings:select_template",
         row=0,
@@ -1298,6 +1284,20 @@ class PingsPanelView(discord.ui.View):
             "Elige la plantilla que quieres usar:",
             view=TemplateSelectView(self.cog, templates),
         )
+
+    @discord.ui.button(
+        label="Crear Plantilla de Ping",
+        emoji="📝",
+        style=discord.ButtonStyle.secondary,
+        custom_id="g3n:pings:create_template",
+        row=0,
+    )
+    async def create_template(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
+        if not is_caller_subject(self.cog.db, interaction):
+            await reject_caller_access(self.cog.db, interaction, "crear plantillas")
+            return
+        view = TemplateVisibilityView(self.cog, author_id=interaction.user.id)
+        await private_response(interaction, view.visibility_text(), view=view)
 
     @discord.ui.button(
         label="Ver mis Plantillas",

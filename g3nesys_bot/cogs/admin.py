@@ -13,6 +13,7 @@ from ..constants import (
     PAYOUT_CORRECTION,
     PAYOUT_PENDING,
     PAYOUT_REJECTED,
+    RECRUITERS_PANEL_IMAGE,
     WITHDRAWAL_APPROVED,
     WITHDRAWAL_LIQUIDATED,
     WITHDRAWAL_PARTIAL,
@@ -2012,17 +2013,19 @@ class AdminPanelView(discord.ui.View):
     @discord.ui.button(label="Reclutadores", emoji="🛡️", style=discord.ButtonStyle.primary, custom_id="g3n:admin:recruiters", row=3)
     async def recruiters(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
         if await self.require_admin(interaction):
+            embed = discord.Embed(
+                title="🛡️ Gestion de Reclutadores G3NESYS",
+                description=(
+                    "Agrega, elimina o consulta a quienes tienen el rol de Reclutador. "
+                    "Si el rol no existe, se creara al agregar al primer reclutador."
+                ),
+                color=discord.Color.blurple(),
+            )
+            embed.set_image(url=RECRUITERS_PANEL_IMAGE)
             await private_response(
                 interaction,
                 "Menu de reclutadores:",
-                embed=discord.Embed(
-                    title="🛡️ Gestion de Reclutadores G3NESYS",
-                    description=(
-                        "Agrega, elimina o consulta a quienes tienen el rol de Reclutador. "
-                        "Si el rol no existe, se creara al agregar al primer reclutador."
-                    ),
-                    color=discord.Color.blurple(),
-                ),
+                embed=embed,
                 view=RecruitersAdminView(self.cog),
             )
 
