@@ -1208,7 +1208,7 @@ class CallerConfigPanelView(discord.ui.View):
             placeholder="5",
         )
 
-    @discord.ui.button(label="Multas ON/OFF", emoji="🟢", style=discord.ButtonStyle.secondary, row=2)
+    @discord.ui.button(label="Multas ON/OFF", emoji="🟢", style=discord.ButtonStyle.secondary, row=1)
     async def toggle_absence_fines(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
         if not await self.require_admin(interaction):
             return
@@ -1360,7 +1360,7 @@ class PingsPanelView(discord.ui.View):
         emoji="✏️",
         style=discord.ButtonStyle.secondary,
         custom_id="g3n:pings:edit_template",
-        row=2,
+        row=0,
     )
     async def edit_template(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
         if not is_caller_subject(self.cog.db, interaction):
@@ -1486,7 +1486,7 @@ class PingsPanelView(discord.ui.View):
         emoji="⚙️",
         style=discord.ButtonStyle.secondary,
         custom_id="g3n:pings:configuration",
-        row=2,
+        row=1,
     )
     async def configuration(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
         if not is_admin_subject(self.cog.db, interaction):

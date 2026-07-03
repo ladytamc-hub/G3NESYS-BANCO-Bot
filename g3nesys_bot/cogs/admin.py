@@ -40,6 +40,7 @@ from ..services.economy import (
     create_movement,
     deposit_to_user_from_treasury,
     ensure_treasury,
+    format_percent,
     get_account,
     movement_history_line,
     pending_fines_total,
@@ -94,6 +95,42 @@ def normalize_admin_message(value: str | None) -> str:
 
 def admin_message_block(message: str) -> str:
     return f"\n\n**Indicaciones del admin:**\n{message}" if message else ""
+
+
+
+DEFAULT_RATE_SETTINGS = {
+    "transfer_fee_percent": (
+        "Comision por transferencia",
+        "Comision transferencia %",
+        "3",
+    ),
+    "guild_percentage_default": (
+        "Porcentaje gremial",
+        "Porcentaje gremial %",
+        "10",
+    ),
+    "market_rate_default": (
+        "Tasa de mercado",
+        "Tasa mercado %",
+        "0",
+    ),
+    "caller_percentage_default": (
+        "Pago del caller",
+        "Porcentaje caller %",
+        "0",
+    ),
+}
+
+
+def parse_admin_percent(raw: str) -> str:
+    cleaned = str(raw or "0").replace("%", "").replace(",", ".").strip()
+    try:
+        value = float(cleaned or 0)
+    except ValueError as exc:
+        raise ValueError("El porcentaje debe ser un numero valido.") from exc
+    if value < 0 or value > 100:
+        raise ValueError("El porcentaje debe estar entre 0 y 100.")
+    return format_percent(value)
 
 
 async def private_response(interaction: discord.Interaction, content: str, **kwargs) -> None:
@@ -1841,6 +1878,88 @@ class ExtraAdminOptionsView(discord.ui.View):
             )
 
 
+class RateSettingModal(discord.ui.Modal):
+    def __init__(self, cog: "Admin", *, key: str, current_value: str):
+        title, label, placeholder = DEFAULT_RATE_SETTINGS[key]
+        super().__init__(title=title, timeout=180)
+        self.cog = cog
+        self.key = key
+        self.value_input = discord.ui.TextInput(
+            label=label,
+            placeholder=placeholder,
+            default=current_value[:40],
+            max_length=40,
+        )
+        self.add_item(self.value_input)
+
+    async def on_submit(self, interaction: discord.Interaction) -> None:
+        if interaction.guild is None or not is_admin_subject(self.cog.db, interaction):
+            await private_response(interaction, "Solo admins autorizados pueden modificar tasas.")
+            return
+        try:
+            value = parse_admin_percent(str(self.value_input.value))
+        except ValueError as exc:
+            await private_response(interaction, str(exc))
+            return
+        self.cog.db.set_setting(interaction.guild.id, self.key, value)
+        log_action(
+            self.cog.db,
+            interaction.guild.id,
+            admin_id=interaction.user.id,
+            action="Configurar tasas predeterminadas",
+            system="Configuracion",
+            observation=f"{self.key}={value}",
+        )
+        await private_response(
+            interaction,
+            f"Tasa actualizada: `{self.key}` = `{value}%`.\n\n"
+            f"{self.cog.default_rates_text(interaction.guild.id)}",
+            view=DefaultRatesAdminView(self.cog),
+        )
+
+
+class DefaultRatesAdminView(discord.ui.View):
+    def __init__(self, cog: "Admin"):
+        super().__init__(timeout=300)
+        self.cog = cog
+
+    async def require_admin(self, interaction: discord.Interaction) -> bool:
+        if interaction.guild is not None and is_admin_subject(self.cog.db, interaction):
+            return True
+        await private_response(interaction, "Solo admins autorizados pueden modificar tasas.")
+        return False
+
+    async def open_rate_modal(self, interaction: discord.Interaction, key: str) -> None:
+        if not await self.require_admin(interaction):
+            return
+        _title, _label, fallback = DEFAULT_RATE_SETTINGS[key]
+        current = self.cog.db.get_setting(interaction.guild.id, key, fallback)
+        await interaction.response.send_modal(
+            RateSettingModal(self.cog, key=key, current_value=current)
+        )
+
+    @discord.ui.button(label="Ver tasas", style=discord.ButtonStyle.primary, row=0)
+    async def show_rates(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
+        if await self.require_admin(interaction):
+            await private_response(interaction, self.cog.default_rates_text(interaction.guild.id), view=self)
+
+    @discord.ui.button(label="Comision transferencia", style=discord.ButtonStyle.secondary, row=0)
+    async def transfer_fee(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
+        await self.open_rate_modal(interaction, "transfer_fee_percent")
+
+    @discord.ui.button(label="Gremio", style=discord.ButtonStyle.secondary, row=1)
+    async def guild_rate(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
+        await self.open_rate_modal(interaction, "guild_percentage_default")
+
+    @discord.ui.button(label="Mercado", style=discord.ButtonStyle.secondary, row=1)
+    async def market_rate(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
+        await self.open_rate_modal(interaction, "market_rate_default")
+
+    @discord.ui.button(label="Caller", style=discord.ButtonStyle.secondary, row=1)
+    async def caller_rate(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
+        await self.open_rate_modal(interaction, "caller_percentage_default")
+
+
 class ConfigAdminView(discord.ui.View):
     def __init__(self, cog: "Admin"):
         super().__init__(timeout=300)
@@ -1859,6 +1978,15 @@ class ConfigAdminView(discord.ui.View):
                 interaction,
                 self.cog.notification_settings_text(interaction.guild.id),
                 view=NotificationsAdminView(self.cog),
+            )
+
+    @discord.ui.button(label="Tasas predeterminadas", style=discord.ButtonStyle.secondary)
+    async def default_rates(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
+        if await self.require_admin(interaction):
+            await private_response(
+                interaction,
+                self.cog.default_rates_text(interaction.guild.id),
+                view=DefaultRatesAdminView(self.cog),
             )
 
 
@@ -2079,6 +2207,15 @@ class AdminPanelView(discord.ui.View):
                 interaction,
                 "Usa `!config_ver`, comandos `!canal_*_set`, `!caller_set` y `!economia_set`.",
                 view=ConfigAdminView(self.cog),
+            )
+
+    @discord.ui.button(label="Tasas predeterminadas", style=discord.ButtonStyle.secondary, custom_id="g3n:admin:default_rates", row=4)
+    async def default_rates(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
+        if await self.require_admin(interaction):
+            await private_response(
+                interaction,
+                self.cog.default_rates_text(interaction.guild.id),
+                view=DefaultRatesAdminView(self.cog),
             )
 
 
@@ -3761,6 +3898,21 @@ class Admin(commands.Cog):
                 f"Liquidaciones: {format_amount(totals.get('LIQUIDACION', 0))}",
             ]
         )
+
+    def default_rates_text(self, guild_id: int) -> str:
+        lines = [
+            "**Tasas predeterminadas**",
+            "Estas tasas se usan como sugerencia inicial. El caller puede cambiarlas al crear o corregir un split.",
+            "",
+        ]
+        for key, (title, _label, fallback) in DEFAULT_RATE_SETTINGS.items():
+            value = self.db.get_setting(guild_id, key, fallback)
+            try:
+                value = parse_admin_percent(value)
+            except ValueError:
+                value = fallback
+            lines.append(f"{title}: `{value}%`")
+        return "\n".join(lines)
 
     def notification_settings_text(self, guild_id: int) -> str:
         pings_channel = self.db.get_setting(guild_id, PING_PUBLICATIONS_SETTING_KEY)

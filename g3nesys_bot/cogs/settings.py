@@ -16,6 +16,17 @@ from ..services.notifications import send_dm_safe
 from ..utils import join_csv_ids, split_csv_ids
 
 
+def format_percent_value(raw: str) -> str:
+    cleaned = str(raw or "0").replace("%", "").replace(",", ".").strip()
+    try:
+        value = float(cleaned or 0)
+    except ValueError as exc:
+        raise ValueError("El porcentaje debe ser un numero valido.") from exc
+    if value < 0 or value > 100:
+        raise ValueError("El porcentaje debe estar entre 0 y 100.")
+    return f"{value:.2f}".rstrip("0").rstrip(".") or "0"
+
+
 class Settings(commands.Cog):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
@@ -254,6 +265,9 @@ class Settings(commands.Cog):
             ("Rol invitado", "guest_role_name"),
             ("Multa inasistencia", "absence_fine_amount"),
             ("Multa inasistencia activa", "absence_fine_enabled"),
+            ("Comision transferencia %", "transfer_fee_percent"),
+            ("Porcentaje gremial predeterminado", "guild_percentage_default"),
+            ("Tasa mercado predeterminada", "market_rate_default"),
             ("Permanencia minima en voz %", "voice_minimum_percent"),
             ("Porcentaje caller predeterminado", "caller_percentage_default"),
         ]
@@ -284,6 +298,19 @@ class Settings(commands.Cog):
                 mention_author=False,
             )
             return
+        percent_keys = {
+            "guild_percentage_default",
+            "market_rate_default",
+            "transfer_fee_percent",
+            "voice_minimum_percent",
+            "caller_percentage_default",
+        }
+        if key in percent_keys:
+            try:
+                value = format_percent_value(value)
+            except ValueError as exc:
+                await ctx.reply(str(exc), mention_author=False)
+                return
         self.db.set_setting(ctx.guild.id, key, value)
         await ctx.reply(f"Configuracion actualizada: `{key}` = `{value}`", mention_author=False)
 

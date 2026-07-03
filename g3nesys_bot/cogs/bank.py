@@ -7,6 +7,7 @@ from ..constants import BANK_PANEL_IMAGE, WITHDRAWAL_APPROVED, WITHDRAWAL_PENDIN
 from ..permissions import has_bank_access, is_admin_subject, is_full_member, require_admin_context
 from ..services.economy import (
     create_withdrawal_request,
+    format_percent,
     get_account,
     movement_history_line,
     pending_fines_total,
@@ -35,6 +36,20 @@ async def dm_or_private(cog: "Bank", interaction: discord.Interaction, content: 
         await private_response(interaction, "Te envie la informacion por DM.")
     else:
         await private_response(interaction, content[:1900])
+
+
+def parse_percent_setting(raw: str, default: float = 0) -> float:
+    try:
+        value = float(str(raw).replace(",", ".").strip())
+    except (TypeError, ValueError):
+        return default
+    if value < 0 or value > 100:
+        return default
+    return value
+
+
+def transfer_fee_amount(amount: int, fee_percent: float) -> int:
+    return int(round(amount * (fee_percent / 100)))
 
 
 class PayFineModal(discord.ui.Modal, title="Pagar multa"):
@@ -70,12 +85,17 @@ class WithdrawalModal(discord.ui.Modal, title="Cobrar saldo"):
 
 
 class TransferModal(discord.ui.Modal, title="Transferir plata"):
-    receiver = discord.ui.TextInput(label="Usuario destino (ID o mencion)")
-    amount = discord.ui.TextInput(label="Monto", placeholder="100000")
-
-    def __init__(self, cog: "Bank"):
+    def __init__(self, cog: "Bank", guild_id: int | None):
         super().__init__(timeout=180)
         self.cog = cog
+        fee_percent = cog.transfer_fee_percent(guild_id) if guild_id is not None else 3
+        self.receiver = discord.ui.TextInput(label="Usuario destino (ID o mencion)")
+        self.amount = discord.ui.TextInput(
+            label=f"Monto (comision {format_percent(fee_percent)}%)"[:45],
+            placeholder="100000",
+        )
+        self.add_item(self.receiver)
+        self.add_item(self.amount)
 
     async def on_submit(self, interaction: discord.Interaction) -> None:
         await self.cog.transfer_interaction(
@@ -85,36 +105,96 @@ class TransferModal(discord.ui.Modal, title="Transferir plata"):
         )
 
 
+class TransferConfirmationView(discord.ui.View):
+    def __init__(
+        self,
+        cog: "Bank",
+        *,
+        guild_id: int,
+        sender_id: int,
+        receiver_id: int,
+        amount: int,
+        fee_percent: float,
+    ):
+        super().__init__(timeout=120)
+        self.cog = cog
+        self.guild_id = guild_id
+        self.sender_id = sender_id
+        self.receiver_id = receiver_id
+        self.amount = amount
+        self.fee_percent = fee_percent
+
+    async def require_sender(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id == self.sender_id:
+            return True
+        await private_response(interaction, "Solo quien inicio la transferencia puede confirmar.")
+        return False
+
+    @discord.ui.button(label="Confirmar", style=discord.ButtonStyle.success)
+    async def confirm(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
+        if not await self.require_sender(interaction):
+            return
+        if interaction.guild is None or interaction.guild.id != self.guild_id:
+            await private_response(interaction, "Esta transferencia pertenece a otro servidor.")
+            return
+        sender = interaction.guild.get_member(self.sender_id)
+        receiver = interaction.guild.get_member(self.receiver_id)
+        if sender is None or receiver is None:
+            await private_response(interaction, "No pude encontrar a uno de los usuarios en el servidor.")
+            return
+        await interaction.response.defer(ephemeral=True)
+        try:
+            movement = await self.cog.perform_member_transfer(
+                interaction.guild,
+                sender,
+                receiver,
+                self.amount,
+                self.fee_percent,
+            )
+        except ValueError as exc:
+            await interaction.followup.send(str(exc), ephemeral=True)
+            return
+        await interaction.edit_original_response(
+            content=f"Transferencia realizada.\n{movement_history_line(movement)}",
+            view=None,
+        )
+
+    @discord.ui.button(label="Cancelar", style=discord.ButtonStyle.secondary)
+    async def cancel(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
+        if await self.require_sender(interaction):
+            await interaction.response.edit_message(content="Transferencia cancelada.", view=None)
+
+
 class BankPanelView(discord.ui.View):
     def __init__(self, cog: "Bank"):
         super().__init__(timeout=None)
         self.cog = cog
 
-    @discord.ui.button(label="Consultar mi saldo", emoji="💰", style=discord.ButtonStyle.primary, custom_id="g3n:bank:balance")
+    @discord.ui.button(label="Consultar mi saldo", emoji="💰", style=discord.ButtonStyle.primary, custom_id="g3n:bank:balance", row=0)
     async def balance(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
         await self.cog.show_balance_interaction(interaction)
 
-    @discord.ui.button(label="Mis multas", emoji="🚨", style=discord.ButtonStyle.danger, custom_id="g3n:bank:fines")
+    @discord.ui.button(label="Mis multas", emoji="🚨", style=discord.ButtonStyle.danger, custom_id="g3n:bank:fines", row=0)
     async def fines(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
         await self.cog.show_fines_interaction(interaction)
 
-    @discord.ui.button(label="Pagar multa", emoji="✅", style=discord.ButtonStyle.success, custom_id="g3n:bank:pay_fine")
+    @discord.ui.button(label="Pagar multa", emoji="✅", style=discord.ButtonStyle.success, custom_id="g3n:bank:pay_fine", row=0)
     async def pay_fine(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
         await interaction.response.send_modal(PayFineModal(self.cog))
 
-    @discord.ui.button(label="Cobrar saldo", emoji="💳", style=discord.ButtonStyle.success, custom_id="g3n:bank:withdraw")
+    @discord.ui.button(label="Cobrar saldo", emoji="💳", style=discord.ButtonStyle.success, custom_id="g3n:bank:withdraw", row=0)
     async def withdraw(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
         await interaction.response.send_modal(WithdrawalModal(self.cog))
 
-    @discord.ui.button(label="Transferir plata", emoji="🔁", style=discord.ButtonStyle.secondary, custom_id="g3n:bank:transfer")
+    @discord.ui.button(label="Transferir plata", emoji="🔁", style=discord.ButtonStyle.secondary, custom_id="g3n:bank:transfer", row=1)
     async def transfer(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
-        await interaction.response.send_modal(TransferModal(self.cog))
+        await interaction.response.send_modal(TransferModal(self.cog, interaction.guild.id if interaction.guild else None))
 
-    @discord.ui.button(label="Estado de cuenta", emoji="📜", style=discord.ButtonStyle.secondary, custom_id="g3n:bank:statement")
+    @discord.ui.button(label="Estado de cuenta", emoji="📜", style=discord.ButtonStyle.secondary, custom_id="g3n:bank:statement", row=1)
     async def statement(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
         await self.cog.show_statement_interaction(interaction)
 
-    @discord.ui.button(label="Depositos", emoji="🪙", style=discord.ButtonStyle.secondary, custom_id="g3n:bank:deposits")
+    @discord.ui.button(label="Depositos", emoji="🪙", style=discord.ButtonStyle.secondary, custom_id="g3n:bank:deposits", row=1)
     async def deposits(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
         await self.cog.show_deposits_interaction(interaction)
 
@@ -268,6 +348,69 @@ class Bank(commands.Cog):
                 WithdrawalReviewView(self, int(row["guild_id"]), str(row["code"]))
             )
 
+    def transfer_fee_percent(self, guild_id: int) -> float:
+        return parse_percent_setting(
+            self.db.get_setting(guild_id, "transfer_fee_percent", "3"),
+            3,
+        )
+
+    def transfer_confirmation_text(
+        self,
+        receiver: discord.Member,
+        amount: int,
+        fee_percent: float,
+    ) -> str:
+        fee = transfer_fee_amount(amount, fee_percent)
+        net_amount = amount - fee
+        return "\n".join(
+            [
+                "Confirma la transferencia:",
+                f"Destinatario: {receiver.mention}",
+                f"Monto a transferir: **{format_amount(amount)}**",
+                f"Comision aplicada ({format_percent(fee_percent)}%): **{format_amount(fee)}**",
+                f"Total recibido por destinatario: **{format_amount(net_amount)}**",
+                f"Total descontado de tu saldo: **{format_amount(amount)}**",
+            ]
+        )
+
+    async def perform_member_transfer(
+        self,
+        guild: discord.Guild,
+        sender: discord.Member,
+        receiver: discord.Member,
+        amount: int,
+        fee_percent: float,
+    ):
+        movement_id = transfer_between_members(
+            self.db,
+            guild.id,
+            sender_id=sender.id,
+            receiver_id=receiver.id,
+            amount=amount,
+            fee_percent=fee_percent,
+        )
+        movement = self.db.fetch_one(
+            "SELECT * FROM movements WHERE guild_id = ? AND id = ?",
+            (guild.id, movement_id),
+        )
+        await send_dm_safe(
+            self.db,
+            guild_id=guild.id,
+            user=receiver,
+            action="transferencia_recibida",
+            content=(
+                f"Has recibido una transferencia de {sender.display_name}.\n\n"
+                f"{movement_history_line(movement)}"
+            ),
+        )
+        await send_admin_notification(
+            self.db,
+            guild=guild,
+            category="general_admin",
+            content=f"Transferencia: {movement_history_line(movement)}",
+        )
+        return movement
+
     @commands.command(name="panel_banco")
     async def panel_banco(self, ctx: commands.Context) -> None:
         if not await require_admin_context(ctx, self.db):
@@ -316,38 +459,17 @@ class Bank(commands.Cog):
             return
         try:
             amount = parse_int_amount(amount_raw)
-            fee_percent = self.db.get_int_setting(ctx.guild.id, "transfer_fee_percent", 3)
-            movement_id = transfer_between_members(
-                self.db,
-                ctx.guild.id,
-                sender_id=ctx.author.id,
-                receiver_id=member.id,
-                amount=amount,
-                fee_percent=fee_percent,
+            fee_percent = self.transfer_fee_percent(ctx.guild.id)
+            movement = await self.perform_member_transfer(
+                ctx.guild,
+                ctx.author,
+                member,
+                amount,
+                fee_percent,
             )
         except ValueError as exc:
             await ctx.reply(str(exc), mention_author=False)
             return
-        movement = self.db.fetch_one(
-            "SELECT * FROM movements WHERE guild_id = ? AND id = ?",
-            (ctx.guild.id, movement_id),
-        )
-        await send_dm_safe(
-            self.db,
-            guild_id=ctx.guild.id,
-            user=member,
-            action="transferencia_recibida",
-            content=(
-                f"Has recibido una transferencia de {ctx.author.display_name}.\n\n"
-                f"{movement_history_line(movement)}"
-            ),
-        )
-        await send_admin_notification(
-            self.db,
-            guild=ctx.guild,
-            category="general_admin",
-            content=f"🔁 {movement_history_line(movement)}",
-        )
         await ctx.reply(
             f"Transferencia realizada.\n{movement_history_line(movement)}",
             mention_author=False,
@@ -498,41 +620,25 @@ class Bank(commands.Cog):
             return
         try:
             amount = parse_int_amount(amount_raw)
-            fee_percent = self.db.get_int_setting(interaction.guild.id, "transfer_fee_percent", 3)
-            movement_id = transfer_between_members(
-                self.db,
-                interaction.guild.id,
+            fee_percent = self.transfer_fee_percent(interaction.guild.id)
+            fee = transfer_fee_amount(amount, fee_percent)
+            net_amount = amount - fee
+            if net_amount <= 0:
+                raise ValueError("La comision consume todo el monto.")
+        except ValueError as exc:
+            await private_response(interaction, str(exc))
+            return
+        await private_response(
+            interaction,
+            self.transfer_confirmation_text(receiver, amount, fee_percent),
+            view=TransferConfirmationView(
+                self,
+                guild_id=interaction.guild.id,
                 sender_id=interaction.user.id,
                 receiver_id=receiver.id,
                 amount=amount,
                 fee_percent=fee_percent,
-            )
-        except ValueError as exc:
-            await private_response(interaction, str(exc))
-            return
-        movement = self.db.fetch_one(
-            "SELECT * FROM movements WHERE guild_id = ? AND id = ?",
-            (interaction.guild.id, movement_id),
-        )
-        await send_dm_safe(
-            self.db,
-            guild_id=interaction.guild.id,
-            user=receiver,
-            action="transferencia_recibida",
-            content=(
-                f"Has recibido una transferencia de {interaction.user.display_name}.\n\n"
-                f"{movement_history_line(movement)}"
             ),
-        )
-        await send_admin_notification(
-            self.db,
-            guild=interaction.guild,
-            category="general_admin",
-            content=f"🔁 {movement_history_line(movement)}",
-        )
-        await private_response(
-            interaction,
-            f"Transferencia realizada.\n{movement_history_line(movement)}",
         )
 
     async def create_withdrawal_and_notify(

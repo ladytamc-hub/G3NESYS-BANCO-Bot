@@ -6,6 +6,10 @@ from ..utils import format_amount, utc_now_iso
 from .audit import log_action
 
 
+def format_percent(value: float) -> str:
+    return f"{float(value):.2f}".rstrip("0").rstrip(".") or "0"
+
+
 def ensure_account(db: Database, guild_id: int, user_id: int) -> None:
     db.execute(
         """
@@ -97,12 +101,15 @@ def create_movement(
 def movement_history_line(row) -> str:
     identifier = f"`{row['code']}` (#{row['id']})"
     if row["type"] == "TRANSFERENCIA":
+        gross_amount = int(row["amount"])
+        fee_amount = int(row["fee_amount"] or 0)
         net_amount = int(row["net_amount"] if row["net_amount"] is not None else row["amount"])
+        fee_percent = (fee_amount / gross_amount * 100) if gross_amount else 0
         return (
-            f"{identifier} TRANSFERENCIA | Remitente <@{row['user_id']}> → "
+            f"{identifier} TRANSFERENCIA | Remitente <@{row['user_id']}> -> "
             f"Destinatario <@{row['counterparty_id']}> | "
-            f"Bruto {format_amount(row['amount'])} | "
-            f"Comision {format_amount(row['fee_amount'] or 0)} | "
+            f"Bruto {format_amount(gross_amount)} | "
+            f"Comision {format_percent(fee_percent)}% ({format_amount(fee_amount)}) | "
             f"Neto {format_amount(net_amount)} | {row['created_at']}"
         )
     return (
@@ -274,10 +281,13 @@ def transfer_between_members(
     sender_id: int,
     receiver_id: int,
     amount: int,
-    fee_percent: int,
+    fee_percent: float,
 ) -> int:
     if sender_id == receiver_id:
         raise ValueError("No puedes transferirte plata a ti mismo.")
+    fee_percent = float(fee_percent)
+    if fee_percent < 0 or fee_percent > 100:
+        raise ValueError("La tasa de comision debe estar entre 0 y 100%.")
     fine_count, _ = pending_fines_total(db, guild_id, sender_id)
     if fine_count > 0:
         raise ValueError("No puedes transferir mientras tengas multas pendientes.")
@@ -293,7 +303,8 @@ def transfer_between_members(
 
     adjust_user_balance(db, guild_id, sender_id, available_delta=-amount)
     adjust_user_balance(db, guild_id, receiver_id, available_delta=receiver_amount)
-    adjust_treasury(db, guild_id, fee)
+    if fee:
+        adjust_treasury(db, guild_id, fee)
 
     movement_id = create_movement(
         db,
@@ -301,13 +312,32 @@ def transfer_between_members(
         movement_type="TRANSFERENCIA",
         category="Transferencia entre miembros",
         amount=amount,
-        description=f"Transferencia con comision {fee_percent}% ({format_amount(fee)})",
+        description=(
+            f"Transferencia con comision {format_percent(fee_percent)}% "
+            f"({format_amount(fee)})"
+        ),
         created_by=sender_id,
         user_id=sender_id,
         counterparty_id=receiver_id,
         fee_amount=fee,
         net_amount=receiver_amount,
     )
+    if fee:
+        create_movement(
+            db,
+            guild_id,
+            movement_type="INGRESO",
+            category="Comision por transferencia",
+            amount=fee,
+            description=(
+                f"Comision {format_percent(fee_percent)}% de transferencia "
+                f"#{movement_id}: <@{sender_id}> a <@{receiver_id}>"
+            ),
+            created_by=sender_id,
+            source_table="movements",
+            source_id=movement_id,
+            code_prefix="ING",
+        )
     log_action(
         db,
         guild_id,
@@ -316,7 +346,10 @@ def transfer_between_members(
         system="Banco",
         affected_user_id=receiver_id,
         amount=amount,
-        observation=f"Comision a tesoreria: {fee}",
+        observation=(
+            f"Comision {format_percent(fee_percent)}% a tesoreria: {fee}; "
+            f"neto receptor: {receiver_amount}; operacion: {movement_id}"
+        ),
     )
     return movement_id
 
