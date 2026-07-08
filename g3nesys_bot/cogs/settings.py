@@ -61,6 +61,7 @@ class Settings(commands.Cog):
                     "`!canal_historial_set` - Canal historial.",
                     "`!canal_splits_set` - Canal de Splits.",
                     "`!canal_requips_set` - Canal de Requips.",
+                    "`!canal_notify_requips_set` - Notificaciones de Requips.",
                     "`!canal_notify_splits_set` - Avisos administrativos de Splits.",
                     "`!canal_notify_withdrawals_set` - Avisos administrativos de cobros.",
                     "`!canal_notify_registration_set` - Avisos de inscripciones.",
@@ -279,6 +280,7 @@ class Settings(commands.Cog):
             ("Canal historial", "channel_historial_id"),
             ("Canal Splits", "channel_repartos_id"),
             ("Canal Requips", "channel_requips_id"),
+            ("Notificaciones Requips", "channel_notify_requips_id"),
             ("Avisos Splits", "channel_notify_splits_id"),
             ("Avisos cobros", "channel_notify_withdrawals_id"),
             ("Avisos inscripciones", "channel_notify_registration_id"),
@@ -386,6 +388,12 @@ class Settings(commands.Cog):
     @commands.command(name="canal_requips_set", aliases=["canal_regear_set"])
     async def canal_requips_set(self, ctx: commands.Context) -> None:
         await self.set_channel(ctx, "channel_requips_id")
+
+    @commands.command(name="canal_notify_requips_set", aliases=["canal_notif_requips_set", "canal_notify_regear_set"])
+    async def canal_notify_requips_set(self, ctx: commands.Context) -> None:
+        await self.set_channel(ctx, "channel_notify_requips_id")
+
+
 
 
 

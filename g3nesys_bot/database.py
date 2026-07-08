@@ -154,6 +154,13 @@ class Database:
                 "ALTER TABLE withdrawals ADD COLUMN liquidation_admin_message TEXT"
             )
 
+        regear_columns = {
+            row["name"]
+            for row in self._conn.execute("PRAGMA table_info(regear_requests)").fetchall()
+        }
+        if "bot_channel_id" not in regear_columns:
+            self._conn.execute("ALTER TABLE regear_requests ADD COLUMN bot_channel_id INTEGER")
+
         caller_penalty_columns = {
             row["name"]
             for row in self._conn.execute("PRAGMA table_info(caller_penalties)").fetchall()
@@ -833,6 +840,9 @@ CREATE TABLE IF NOT EXISTS regear_requests (
     channel_id INTEGER NOT NULL,
     message_id INTEGER NOT NULL,
     bot_message_id INTEGER,
+    bot_channel_id INTEGER,
+    approved_amount INTEGER,
+    review_notes TEXT,
     image_url TEXT NOT NULL,
     message_url TEXT,
     status TEXT NOT NULL DEFAULT 'pending',

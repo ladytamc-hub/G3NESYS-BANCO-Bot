@@ -81,6 +81,7 @@ DEFAULT_SETTINGS = {
     "channel_historial_id": "",
     "channel_repartos_id": "",
     "channel_requips_id": "",
+    "channel_notify_requips_id": "",
     "channel_notify_splits_id": "",
     "channel_notify_withdrawals_id": "",
     "channel_notify_registration_id": "",

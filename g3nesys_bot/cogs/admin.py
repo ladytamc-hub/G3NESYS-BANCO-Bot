@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import discord
@@ -76,6 +77,8 @@ PING_PUBLICATIONS_LABEL = "Canal de publicaciones de pings"
 PING_PUBLICATIONS_SETTING_KEY = "channel_pings_id"
 REGEAR_CHANNEL_LABEL = "Canal de Requips"
 REGEAR_CHANNEL_SETTING_KEY = "channel_requips_id"
+REGEAR_NOTIFICATION_CHANNEL_LABEL = "Notificaciones de Requips"
+REGEAR_NOTIFICATION_CHANNEL_SETTING_KEY = "channel_notify_requips_id"
 NOTIFICATION_CATEGORY_MAP = {
     category: (label, emoji)
     for category, label, emoji in NOTIFICATION_CHANNEL_CATEGORIES
@@ -91,6 +94,21 @@ ADMIN_ROLE_NAMES = {
 }
 
 
+REGEAR_STATUS_LABELS = {
+    "pending": ("⏳", "Pendiente de revisión"),
+    "paid": ("✅", "Pagado"),
+    "pending_payment": ("🕒", "Pendiente de pago"),
+    "rejected": ("❌", "Rechazado"),
+}
+REGEAR_RANKING_FILTERS = (
+    ("general", "General", None),
+    ("weekly", "Semanal", 7),
+    ("monthly", "Mensual", 30),
+)
+REGEAR_RANKING_FILTER_MAP = {
+    key: (label, days)
+    for key, label, days in REGEAR_RANKING_FILTERS
+}
 def normalize_admin_message(value: str | None) -> str:
     return (value or "").strip()[:600]
 
@@ -98,6 +116,38 @@ def normalize_admin_message(value: str | None) -> str:
 def admin_message_block(message: str) -> str:
     return f"\n\n**Indicaciones del admin:**\n{message}" if message else ""
 
+
+def regear_status_display(status: str) -> str:
+    emoji, label = REGEAR_STATUS_LABELS.get(status, REGEAR_STATUS_LABELS["pending"])
+    return f"{emoji} {label}"
+
+
+def regear_filter_label(filter_key: str) -> str:
+    return REGEAR_RANKING_FILTER_MAP.get(filter_key, REGEAR_RANKING_FILTER_MAP["general"])[0]
+
+
+def regear_filter_cutoff(filter_key: str) -> str | None:
+    _label, days = REGEAR_RANKING_FILTER_MAP.get(filter_key, REGEAR_RANKING_FILTER_MAP["general"])
+    if days is None:
+        return None
+    return (datetime.now(timezone.utc) - timedelta(days=days)).isoformat(timespec="seconds")
+
+
+def discord_date(value: str | None, style: str = "d") -> str:
+    if not value:
+        return "Sin fecha"
+    try:
+        parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except ValueError:
+        return str(value)
+    return f"<t:{int(parsed.timestamp())}:{style}>"
+
+
+def short_member_label(guild: discord.Guild, user_id: int) -> str:
+    member = guild.get_member(user_id)
+    if member is not None:
+        return member.display_name[:80]
+    return f"Usuario {user_id}"
 
 
 DEFAULT_RATE_SETTINGS = {
@@ -1861,6 +1911,112 @@ class RegearChannelConfigView(discord.ui.View):
             ),
         )
 
+
+class RegearNotificationChannelConfigView(discord.ui.View):
+    def __init__(self, cog: "Admin"):
+        super().__init__(timeout=300)
+        self.cog = cog
+        self.channel_select = discord.ui.ChannelSelect(
+            placeholder=f"Selecciona {REGEAR_NOTIFICATION_CHANNEL_LABEL}"[:150],
+            channel_types=[discord.ChannelType.text, discord.ChannelType.news],
+            min_values=1,
+            max_values=1,
+            row=0,
+        )
+        self.channel_select.callback = self.select_channel
+        self.add_item(self.channel_select)
+
+    async def require_admin(self, interaction: discord.Interaction) -> bool:
+        if interaction.guild is not None and is_admin_subject(self.cog.db, interaction):
+            return True
+        await private_response(
+            interaction,
+            "Solo admins autorizados pueden configurar las notificaciones de Requips.",
+        )
+        return False
+
+    async def save_channel(
+        self,
+        interaction: discord.Interaction,
+        channel_id: int,
+    ) -> None:
+        self.cog.db.set_setting(
+            interaction.guild.id,
+            REGEAR_NOTIFICATION_CHANNEL_SETTING_KEY,
+            str(channel_id),
+        )
+        log_action(
+            self.cog.db,
+            interaction.guild.id,
+            admin_id=interaction.user.id,
+            action="Configurar notificaciones de Requips",
+            system="Configuracion",
+            observation=str(channel_id),
+        )
+        await private_response(
+            interaction,
+            (
+                f"✅ Notificaciones de Requips configuradas correctamente:\n<#{channel_id}>\n\n"
+                f"{self.cog.notification_settings_text(interaction.guild.id)}"
+            ),
+        )
+
+    async def select_channel(self, interaction: discord.Interaction) -> None:
+        if not await self.require_admin(interaction):
+            return
+        channel = self.channel_select.values[0]
+        await self.save_channel(interaction, int(channel.id))
+
+    @discord.ui.button(
+        label="Usar canal actual",
+        emoji="📍",
+        style=discord.ButtonStyle.primary,
+        row=1,
+    )
+    async def use_current(
+        self,
+        interaction: discord.Interaction,
+        _: discord.ui.Button,
+    ) -> None:
+        if not await self.require_admin(interaction):
+            return
+        channel = interaction.channel
+        if channel is None or not callable(getattr(channel, "send", None)):
+            await private_response(interaction, "Este canal no admite notificaciones de Requips.")
+            return
+        await self.save_channel(interaction, int(channel.id))
+
+    @discord.ui.button(
+        label="Quitar canal",
+        emoji="↩️",
+        style=discord.ButtonStyle.secondary,
+        row=1,
+    )
+    async def clear_channel(
+        self,
+        interaction: discord.Interaction,
+        _: discord.ui.Button,
+    ) -> None:
+        if not await self.require_admin(interaction):
+            return
+        self.cog.db.set_setting(interaction.guild.id, REGEAR_NOTIFICATION_CHANNEL_SETTING_KEY, "")
+        log_action(
+            self.cog.db,
+            interaction.guild.id,
+            admin_id=interaction.user.id,
+            action="Quitar notificaciones de Requips",
+            system="Configuracion",
+            observation=REGEAR_NOTIFICATION_CHANNEL_SETTING_KEY,
+        )
+        await private_response(
+            interaction,
+            (
+                f"**{REGEAR_NOTIFICATION_CHANNEL_LABEL}** quedó sin canal configurado.\n\n"
+                f"{self.cog.notification_settings_text(interaction.guild.id)}"
+            ),
+        )
+
+
 class NotificationCategorySelect(discord.ui.Select):
     def __init__(self, cog: "Admin"):
         self.cog = cog
@@ -1968,6 +2124,34 @@ class NotificationsAdminView(discord.ui.View):
         )
 
     @discord.ui.button(
+        label=REGEAR_NOTIFICATION_CHANNEL_LABEL,
+        emoji="🛡️",
+        style=discord.ButtonStyle.primary,
+        row=1,
+    )
+    async def regear_notifications(
+        self,
+        interaction: discord.Interaction,
+        _: discord.ui.Button,
+    ) -> None:
+        if interaction.guild is None or not is_admin_subject(self.cog.db, interaction):
+            await private_response(
+                interaction,
+                "Solo admins autorizados pueden configurar las notificaciones de Requips.",
+            )
+            return
+        current = self.cog.db.get_setting(interaction.guild.id, REGEAR_NOTIFICATION_CHANNEL_SETTING_KEY)
+        await private_response(
+            interaction,
+            (
+                f"Configura **{REGEAR_NOTIFICATION_CHANNEL_LABEL}**. "
+                f"Actualmente: {channel_setting_text(current)}.\n"
+                "Selecciona un canal, usa el canal actual o quita el canal configurado."
+            ),
+            view=RegearNotificationChannelConfigView(self.cog),
+        )
+
+    @discord.ui.button(
         label="Ver configuración",
         emoji="👁️",
         style=discord.ButtonStyle.secondary,
@@ -1990,6 +2174,126 @@ class NotificationsAdminView(discord.ui.View):
         )
 
 
+class RegearRankingUserSelect(discord.ui.Select):
+    def __init__(
+        self,
+        cog: "Admin",
+        guild: discord.Guild,
+        filter_key: str,
+        rows: list,
+    ):
+        self.cog = cog
+        self.guild_id = guild.id
+        self.filter_key = filter_key
+        options: list[discord.SelectOption] = []
+        for index, row in enumerate(rows[:25], start=1):
+            user_id = int(row["user_id"])
+            label = f"{index}. {short_member_label(guild, user_id)}"[:100]
+            description = (
+                f"Total {row['total_requests']} | Pagados {row['paid_count']} | "
+                f"Ult. {discord_date(row['last_created'], 'd')}"
+            )[:100]
+            options.append(
+                discord.SelectOption(
+                    label=label,
+                    value=str(user_id),
+                    description=description,
+                    emoji="🛡️",
+                )
+            )
+        super().__init__(
+            placeholder="Selecciona un jugador para ver su historial de requips",
+            min_values=1,
+            max_values=1,
+            options=options,
+            row=0,
+        )
+
+    async def callback(self, interaction: discord.Interaction) -> None:
+        if interaction.guild is None or not is_admin_subject(self.cog.db, interaction):
+            await private_response(interaction, "Solo admins autorizados pueden consultar este ranking.")
+            return
+        user_id = int(self.values[0])
+        chunks = self.cog.regear_user_history_chunks(interaction.guild, user_id)
+        await interaction.response.send_message(
+            chunks[0],
+            ephemeral=True,
+            allowed_mentions=discord.AllowedMentions.none(),
+        )
+        for chunk in chunks[1:]:
+            await interaction.followup.send(
+                chunk,
+                ephemeral=True,
+                allowed_mentions=discord.AllowedMentions.none(),
+            )
+
+
+class RegearRankingView(discord.ui.View):
+    def __init__(self, cog: "Admin", guild: discord.Guild, filter_key: str = "general"):
+        super().__init__(timeout=300)
+        self.cog = cog
+        self.guild_id = guild.id
+        self.filter_key = filter_key if filter_key in REGEAR_RANKING_FILTER_MAP else "general"
+        rows = cog.regear_ranking_rows(guild.id, self.filter_key, limit=25)
+        if rows:
+            self.add_item(RegearRankingUserSelect(cog, guild, self.filter_key, rows))
+        for key, label, _days in REGEAR_RANKING_FILTERS:
+            button = discord.ui.Button(
+                label=label,
+                style=(
+                    discord.ButtonStyle.primary
+                    if key == self.filter_key
+                    else discord.ButtonStyle.secondary
+                ),
+                row=1,
+            )
+            button.callback = self._filter_callback(key)
+            self.add_item(button)
+
+    def _filter_callback(self, filter_key: str):
+        async def callback(interaction: discord.Interaction) -> None:
+            if interaction.guild is None or not is_admin_subject(self.cog.db, interaction):
+                await private_response(interaction, "Solo admins autorizados pueden consultar este ranking.")
+                return
+            await interaction.response.edit_message(
+                content="Ranking de Requips:",
+                embed=self.cog.regear_ranking_embed(interaction.guild, filter_key),
+                view=RegearRankingView(self.cog, interaction.guild, filter_key),
+            )
+
+        return callback
+
+
+class RankingsAdminView(discord.ui.View):
+    def __init__(self, cog: "Admin"):
+        super().__init__(timeout=300)
+        self.cog = cog
+
+    async def require_admin(self, interaction: discord.Interaction) -> bool:
+        if interaction.guild is not None and is_admin_subject(self.cog.db, interaction):
+            return True
+        await private_response(interaction, "Solo admins autorizados pueden consultar rankings.")
+        return False
+
+    @discord.ui.button(label="Resumen", emoji="🏆", style=discord.ButtonStyle.secondary, row=0)
+    async def summary(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
+        if await self.require_admin(interaction):
+            await interaction.response.edit_message(
+                content=self.cog.rankings_text(interaction.guild.id),
+                embed=None,
+                view=RankingsAdminView(self.cog),
+            )
+
+    @discord.ui.button(label="Ranking de Requips", emoji="🛡️", style=discord.ButtonStyle.primary, row=0)
+    async def regear_ranking(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
+        if await self.require_admin(interaction):
+            await interaction.response.edit_message(
+                content="Ranking de Requips:",
+                embed=self.cog.regear_ranking_embed(interaction.guild, "general"),
+                view=RegearRankingView(self.cog, interaction.guild, "general"),
+            )
+
+
 class ExtraAdminOptionsView(discord.ui.View):
     def __init__(self, cog: "Admin"):
         super().__init__(timeout=300)
@@ -2004,11 +2308,10 @@ class ExtraAdminOptionsView(discord.ui.View):
     @discord.ui.button(label="Rankings", emoji="🏆", style=discord.ButtonStyle.secondary)
     async def rankings(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
         if await self.require_admin(interaction):
-            await dm_or_private(
-                self.cog,
+            await private_response(
                 interaction,
                 self.cog.rankings_text(interaction.guild.id),
-                "rankings_panel",
+                view=RankingsAdminView(self.cog),
             )
 
 
@@ -2140,11 +2443,10 @@ class LegacyAdminPanelCallbacksView(discord.ui.View):
     @discord.ui.button(label="Rankings", custom_id="g3n:admin:rankings")
     async def rankings(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
         if await self.require_admin(interaction):
-            await dm_or_private(
-                self.cog,
+            await private_response(
                 interaction,
                 self.cog.rankings_text(interaction.guild.id),
-                "rankings_panel",
+                view=RankingsAdminView(self.cog),
             )
 
     @discord.ui.button(label="Notificaciones", custom_id="g3n:admin:notifications")
@@ -4051,6 +4353,7 @@ class Admin(commands.Cog):
     def notification_settings_text(self, guild_id: int) -> str:
         pings_channel = self.db.get_setting(guild_id, PING_PUBLICATIONS_SETTING_KEY)
         regear_channel = self.db.get_setting(guild_id, REGEAR_CHANNEL_SETTING_KEY)
+        regear_notification_channel = self.db.get_setting(guild_id, REGEAR_NOTIFICATION_CHANNEL_SETTING_KEY)
         lines = [
             "🔔 **Canales de notificaciones administrativas**",
             "Los avisos privados para usuarios continúan enviándose por DM.",
@@ -4085,9 +4388,10 @@ class Admin(commands.Cog):
                 "",
                 f"📣 **{PING_PUBLICATIONS_LABEL}:** {channel_setting_text(pings_channel)}",
                 f"🛡️ **{REGEAR_CHANNEL_LABEL}:** {channel_setting_text(regear_channel)}",
+                f"🛡️ **{REGEAR_NOTIFICATION_CHANNEL_LABEL}:** {channel_setting_text(regear_notification_channel)}",
                 "",
                 "Selecciona una categoría para establecer o cambiar su canal.",
-                "Usa los botones de pings y Requips para elegir sus canales de trabajo.",
+                "Usa los botones de pings, Requips y Notificaciones de Requips para elegir sus canales de trabajo.",
             ]
         )
         return "\n".join(lines)
@@ -4531,6 +4835,149 @@ class Admin(commands.Cog):
             amount = f" {format_amount(row['amount'])}" if row["amount"] else ""
             lines.append(f"{row['action']}{affected}{amount} [{row['system']}] {row['observation'] or ''}")
         return "\n".join(lines)
+
+    def regear_table_columns(self) -> set[str]:
+        return {
+            row["name"]
+            for row in self.db.fetch_all("PRAGMA table_info(regear_requests)")
+        }
+
+    def regear_ranking_rows(
+        self,
+        guild_id: int,
+        filter_key: str,
+        *,
+        limit: int = 25,
+    ) -> list:
+        columns = self.regear_table_columns()
+        amount_expr = (
+            "COALESCE(SUM(CASE WHEN status = 'paid' "
+            "THEN COALESCE(approved_amount, 0) ELSE 0 END), 0) AS approved_total"
+            if "approved_amount" in columns
+            else "0 AS approved_total"
+        )
+        where = ["guild_id = ?"]
+        params: list = [guild_id]
+        cutoff = regear_filter_cutoff(filter_key)
+        if cutoff is not None:
+            where.append("created_at >= ?")
+            params.append(cutoff)
+        params.append(limit)
+        return self.db.fetch_all(
+            f"""
+            SELECT
+                user_id,
+                COUNT(*) AS total_requests,
+                SUM(CASE WHEN status = 'pending' THEN 1 ELSE 0 END) AS pending_count,
+                SUM(CASE WHEN status = 'paid' THEN 1 ELSE 0 END) AS paid_count,
+                SUM(CASE WHEN status = 'pending_payment' THEN 1 ELSE 0 END) AS pending_payment_count,
+                SUM(CASE WHEN status = 'rejected' THEN 1 ELSE 0 END) AS rejected_count,
+                {amount_expr},
+                MAX(created_at) AS last_created
+            FROM regear_requests
+            WHERE {' AND '.join(where)}
+            GROUP BY user_id
+            ORDER BY total_requests DESC, paid_count DESC, last_created DESC
+            LIMIT ?
+            """,
+            params,
+        )
+
+    def regear_ranking_embed(self, guild: discord.Guild, filter_key: str) -> discord.Embed:
+        rows = self.regear_ranking_rows(guild.id, filter_key, limit=25)
+        label = regear_filter_label(filter_key)
+        currency = self.db.get_setting(guild.id, "currency_name", "plata")
+        embed = discord.Embed(
+            title=f"🛡️ Ranking de Requips - {label}",
+            color=discord.Color.gold(),
+        )
+        embed.description = (
+            "Ordenado por mayor número de solicitudes, luego más pagados y luego solicitud más reciente.\n"
+            "Usa el selector para consultar el historial completo de un jugador."
+        )
+        if not rows:
+            embed.add_field(name="Sin datos", value="No hay solicitudes de requip en este filtro.", inline=False)
+            return embed
+        lines = []
+        for index, row in enumerate(rows[:15], start=1):
+            user_id = int(row["user_id"])
+            amount = format_amount(int(row["approved_total"] or 0), currency)
+            lines.append(
+                f"**{index}.** <@{user_id}> | "
+                f"Total: **{row['total_requests']}** | "
+                f"✅ {row['paid_count']} | 🕒 {row['pending_payment_count']} | "
+                f"❌ {row['rejected_count']} | ⏳ {row['pending_count']} | "
+                f"Monto: {amount} | Última: {discord_date(row['last_created'], 'd')}"
+            )
+        embed.add_field(name="Jugadores", value="\n".join(lines), inline=False)
+        if len(rows) > 15:
+            embed.set_footer(text="El selector incluye hasta 25 jugadores del ranking.")
+        return embed
+
+    def regear_user_history_rows(self, guild_id: int, user_id: int) -> list:
+        columns = self.regear_table_columns()
+        optional_columns = []
+        if "approved_amount" in columns:
+            optional_columns.append("approved_amount")
+        if "review_notes" in columns:
+            optional_columns.append("review_notes")
+        optional_sql = ", " + ", ".join(optional_columns) if optional_columns else ""
+        return self.db.fetch_all(
+            f"""
+            SELECT request_code, status, created_at, reviewed_at, reviewed_by,
+                   image_url, message_url{optional_sql}
+            FROM regear_requests
+            WHERE guild_id = ? AND user_id = ?
+            ORDER BY created_at DESC, id DESC
+            """,
+            (guild_id, user_id),
+        )
+
+    def regear_user_history_chunks(self, guild: discord.Guild, user_id: int) -> list[str]:
+        rows = self.regear_user_history_rows(guild.id, user_id)
+        member = guild.get_member(user_id)
+        subject = member.mention if member is not None else f"<@{user_id}>"
+        header = f"🛡️ **Requips de {subject}**"
+        if not rows:
+            return [f"{header}\nSin solicitudes registradas."]
+        currency = self.db.get_setting(guild.id, "currency_name", "plata")
+        lines: list[str] = []
+        for row in rows:
+            reviewed_by = f"<@{row['reviewed_by']}>" if row["reviewed_by"] else "Sin revisar"
+            reviewed_at = discord_date(row["reviewed_at"], "f") if row["reviewed_at"] else "Sin revisión"
+            capture = f"[Ver captura]({row['image_url']})" if row["image_url"] else "Sin captura"
+            message = f"[Ver mensaje]({row['message_url']})" if row["message_url"] else "Sin mensaje"
+            parts = [
+                f"**{row['request_code']}**",
+                regear_status_display(str(row["status"] or "pending")),
+                f"Creada: {discord_date(row['created_at'], 'd')}",
+                f"Revisión: {reviewed_at}",
+                f"Revisado por: {reviewed_by}",
+                capture,
+                message,
+            ]
+            if "approved_amount" in row.keys():
+                amount = row["approved_amount"]
+                parts.append(
+                    f"Monto: {format_amount(int(amount), currency)}"
+                    if amount is not None
+                    else "Monto: sin registrar"
+                )
+            if "review_notes" in row.keys() and row["review_notes"]:
+                parts.append(f"Obs: {str(row['review_notes'])[:180]}")
+            lines.append(" | ".join(parts))
+
+        chunks: list[str] = []
+        current = header
+        for line in lines:
+            candidate = f"{current}\n{line}"
+            if len(candidate) > 1800 and current != header:
+                chunks.append(current)
+                current = f"{header} (cont.)\n{line}"
+            else:
+                current = candidate
+        chunks.append(current)
+        return chunks
 
     def rankings_text(self, guild_id: int) -> str:
         economy = self.db.fetch_all(

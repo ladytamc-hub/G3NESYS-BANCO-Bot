@@ -15,6 +15,7 @@ from ..utils import utc_now_iso
 LOGGER = logging.getLogger("g3nesys.regears")
 
 REGEAR_CHANNEL_SETTING_KEY = "channel_requips_id"
+REGEAR_NOTIFICATION_CHANNEL_SETTING_KEY = "channel_notify_requips_id"
 REGEAR_REVIEWER_ROLE_SETTING_KEY = "regear_reviewer_role_ids"
 REGEAR_CODE_PREFIX = "REQ"
 IMAGE_EXTENSIONS = (".png", ".jpg", ".jpeg", ".webp")
@@ -38,6 +39,10 @@ async def private_response(
         await interaction.followup.send(content, **kwargs)
         return
     await interaction.response.send_message(content, **kwargs)
+
+
+def row_value(row: sqlite3.Row, key: str, default=None):
+    return row[key] if key in row.keys() else default
 
 
 def status_display(status: str) -> str:
@@ -152,12 +157,39 @@ class Regears(commands.Cog):
             seen.add(request_code)
             self.bot.add_view(RegearReviewView(self, request_code))
 
-    def configured_channel_id(self, guild_id: int) -> int | None:
-        raw = self.db.get_setting(guild_id, REGEAR_CHANNEL_SETTING_KEY)
+    def int_setting(self, guild_id: int, key: str) -> int | None:
+        raw = self.db.get_setting(guild_id, key)
         try:
             return int(raw) if raw else None
         except ValueError:
             return None
+
+    def configured_channel_id(self, guild_id: int) -> int | None:
+        return self.int_setting(guild_id, REGEAR_CHANNEL_SETTING_KEY)
+
+    def configured_notification_channel_id(self, guild_id: int) -> int | None:
+        return self.int_setting(guild_id, REGEAR_NOTIFICATION_CHANNEL_SETTING_KEY)
+
+    async def messageable_channel(
+        self,
+        guild: discord.Guild,
+        channel_id: int | None,
+    ) -> discord.abc.Messageable | None:
+        if channel_id is None:
+            return None
+        channel = guild.get_channel(channel_id)
+        if channel is None:
+            try:
+                channel = await self.bot.fetch_channel(channel_id)
+            except discord.HTTPException:
+                return None
+        if not isinstance(channel, discord.abc.Messageable):
+            return None
+        return channel
+
+    async def notification_channel(self, guild: discord.Guild) -> discord.abc.Messageable | None:
+        channel_id = self.configured_notification_channel_id(guild.id)
+        return await self.messageable_channel(guild, channel_id)
 
     def can_review(self, interaction: discord.Interaction) -> bool:
         if interaction.guild is None or not isinstance(interaction.user, discord.Member):
@@ -204,7 +236,15 @@ class Regears(commands.Cog):
             return
         if self.message_already_registered(message.guild.id, message.id):
             return
-        await self.create_request(message, image)
+
+        review_channel = await self.notification_channel(message.guild)
+        if review_channel is None:
+            LOGGER.warning(
+                "Canal de notificaciones de Requips no configurado o invalido en guild %s",
+                message.guild.id,
+            )
+            return
+        await self.create_request(message, image, review_channel)
 
     def _is_command_message(self, message: discord.Message) -> bool:
         prefix = self.bot.command_prefix
@@ -241,6 +281,7 @@ class Regears(commands.Cog):
         self,
         message: discord.Message,
         attachment: discord.Attachment,
+        review_channel: discord.abc.Messageable,
     ) -> None:
         guild = message.guild
         if guild is None:
@@ -281,22 +322,30 @@ class Regears(commands.Cog):
             return
         view = RegearReviewView(self, request_code)
         try:
-            bot_message = await message.reply(
-                embed=build_regear_embed(request),
-                view=view,
-                mention_author=False,
-            )
+            if int(getattr(review_channel, "id", 0)) == message.channel.id:
+                bot_message = await message.reply(
+                    embed=build_regear_embed(request),
+                    view=view,
+                    mention_author=False,
+                    allowed_mentions=discord.AllowedMentions.none(),
+                )
+            else:
+                bot_message = await review_channel.send(
+                    embed=build_regear_embed(request),
+                    view=view,
+                    allowed_mentions=discord.AllowedMentions.none(),
+                )
         except discord.HTTPException:
-            LOGGER.exception("No pude responder la solicitud de requip %s", request_code)
+            LOGGER.exception("No pude publicar la solicitud de requip %s", request_code)
             return
 
         self.db.execute(
             """
             UPDATE regear_requests
-            SET bot_message_id = ?, updated_at = ?
+            SET bot_message_id = ?, bot_channel_id = ?, updated_at = ?
             WHERE id = ?
             """,
-            (bot_message.id, utc_now_iso(), request_id),
+            (bot_message.id, int(getattr(bot_message.channel, "id", 0)), utc_now_iso(), request_id),
         )
         self.bot.add_view(view)
         log_action(
@@ -383,25 +432,31 @@ class Regears(commands.Cog):
         except discord.HTTPException:
             pass
 
+    async def fetch_message_from_channel(
+        self,
+        guild: discord.Guild,
+        channel_id: int,
+        message_id: int,
+    ) -> discord.Message | None:
+        channel = await self.messageable_channel(guild, channel_id)
+        fetch_message = getattr(channel, "fetch_message", None)
+        if fetch_message is None:
+            return None
+        try:
+            return await fetch_message(message_id)
+        except discord.HTTPException:
+            return None
+
     async def fetch_request_message(
         self,
         guild: discord.Guild,
         request: sqlite3.Row,
     ) -> discord.Message | None:
-        channel = guild.get_channel(int(request["channel_id"]))
-        if channel is None:
-            try:
-                fetched = await self.bot.fetch_channel(int(request["channel_id"]))
-            except discord.HTTPException:
-                return None
-            channel = fetched if isinstance(fetched, discord.abc.Messageable) else None
-        fetch_message = getattr(channel, "fetch_message", None)
-        if fetch_message is None:
-            return None
-        try:
-            return await fetch_message(int(request["message_id"]))
-        except discord.HTTPException:
-            return None
+        return await self.fetch_message_from_channel(
+            guild,
+            int(request["channel_id"]),
+            int(request["message_id"]),
+        )
 
     async def edit_review_message(
         self,
@@ -418,16 +473,17 @@ class Regears(commands.Cog):
             LOGGER.warning("No pude editar el mensaje de requip %s: %s", request["request_code"], exc)
 
         bot_message_id = request["bot_message_id"]
-        if not bot_message_id:
+        if not bot_message_id or interaction.guild is None:
             return
-        channel = interaction.guild.get_channel(int(request["channel_id"])) if interaction.guild else None
-        if channel is None:
-            return
-        fetch_message = getattr(channel, "fetch_message", None)
-        if fetch_message is None:
+        bot_channel_id = row_value(request, "bot_channel_id") or request["channel_id"]
+        bot_message = await self.fetch_message_from_channel(
+            interaction.guild,
+            int(bot_channel_id),
+            int(bot_message_id),
+        )
+        if bot_message is None:
             return
         try:
-            bot_message = await fetch_message(int(bot_message_id))
             await bot_message.edit(embed=embed, view=view)
         except discord.HTTPException as exc:
             LOGGER.warning("No pude editar el mensaje persistente de requip %s: %s", request["request_code"], exc)
