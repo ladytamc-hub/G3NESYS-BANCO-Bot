@@ -419,6 +419,14 @@ class Database:
             "CREATE INDEX IF NOT EXISTS idx_quick_liquidations_guild_created "
             "ON quick_liquidations(guild_id, created_at)"
         )
+        self._conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_regear_requests_guild_status "
+            "ON regear_requests(guild_id, status)"
+        )
+        self._conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_regear_requests_message "
+            "ON regear_requests(guild_id, message_id)"
+        )
 
     def _has_unique_index(self, table: str, columns: tuple[str, ...]) -> bool:
         for index in self._conn.execute(f"PRAGMA index_list({table})").fetchall():
@@ -817,6 +825,25 @@ CREATE TABLE IF NOT EXISTS quick_liquidation_items (
     UNIQUE(payout_participant_id)
 );
 
+CREATE TABLE IF NOT EXISTS regear_requests (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    guild_id INTEGER NOT NULL,
+    request_code TEXT NOT NULL,
+    user_id INTEGER NOT NULL,
+    channel_id INTEGER NOT NULL,
+    message_id INTEGER NOT NULL,
+    bot_message_id INTEGER,
+    image_url TEXT NOT NULL,
+    message_url TEXT,
+    status TEXT NOT NULL DEFAULT 'pending',
+    reviewed_by INTEGER,
+    created_at TEXT NOT NULL,
+    reviewed_at TEXT,
+    updated_at TEXT,
+    UNIQUE(guild_id, request_code),
+    UNIQUE(guild_id, message_id)
+);
+
 CREATE TABLE IF NOT EXISTS movements (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     code TEXT NOT NULL,
@@ -884,5 +911,11 @@ ON payout_audit_logs(guild_id, payout_id, created_at);
 
 CREATE INDEX IF NOT EXISTS idx_withdrawals_guild_status
 ON withdrawals(guild_id, status);
+
+CREATE INDEX IF NOT EXISTS idx_regear_requests_guild_status
+ON regear_requests(guild_id, status);
+
+CREATE INDEX IF NOT EXISTS idx_regear_requests_message
+ON regear_requests(guild_id, message_id);
 
 """

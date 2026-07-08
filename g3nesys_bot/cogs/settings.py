@@ -60,6 +60,7 @@ class Settings(commands.Cog):
                     "`!canal_multas_set` - Canal de multas.",
                     "`!canal_historial_set` - Canal historial.",
                     "`!canal_splits_set` - Canal de Splits.",
+                    "`!canal_requips_set` - Canal de Requips.",
                     "`!canal_notify_splits_set` - Avisos administrativos de Splits.",
                     "`!canal_notify_withdrawals_set` - Avisos administrativos de cobros.",
                     "`!canal_notify_registration_set` - Avisos de inscripciones.",
@@ -67,6 +68,7 @@ class Settings(commands.Cog):
                     "`!canal_notify_fines_set` - Avisos de multas.",
                     "`!canal_notify_general_admin_set` - Avisos administrativos generales.",
                     "`!admin_role_set @rol` - Autoriza rol admin.",
+                    "`!rol_requipador_set @rol` - Autoriza rol requipador.",
                     "`!caller_set @usuario` - Autoriza caller.",
                     "`!caller_remove @usuario` - Quita caller.",
                     "`!economia_set clave valor` - Ajusta economia.",
@@ -215,6 +217,27 @@ class Settings(commands.Cog):
             mention_author=False,
         )
 
+    @commands.command(name="rol_requipador_set", aliases=["rol_regear_set"])
+    async def rol_requipador_set(self, ctx: commands.Context, role: discord.Role) -> None:
+        if not await require_admin_context(ctx, self.db):
+            return
+        current = split_csv_ids(self.db.get_setting(ctx.guild.id, "regear_reviewer_role_ids"))
+        current.add(role.id)
+        self.db.set_setting(ctx.guild.id, "regear_reviewer_role_ids", join_csv_ids(current))
+        await ctx.reply(f"Rol requipador autorizado: {role.mention}", mention_author=False)
+
+    @commands.command(name="rol_requipador_remove", aliases=["rol_regear_remove"])
+    async def rol_requipador_remove(self, ctx: commands.Context, role: discord.Role) -> None:
+        if not await require_admin_context(ctx, self.db):
+            return
+        current = split_csv_ids(self.db.get_setting(ctx.guild.id, "regear_reviewer_role_ids"))
+        if role.id not in current:
+            await ctx.reply(f"{role.mention} no estaba autorizado como requipador.", mention_author=False)
+            return
+        current.remove(role.id)
+        self.db.set_setting(ctx.guild.id, "regear_reviewer_role_ids", join_csv_ids(current))
+        await ctx.reply(f"Rol requipador retirado: {role.mention}", mention_author=False)
+
     @commands.command(name="caller_remove")
     async def caller_remove(self, ctx: commands.Context, member: discord.Member) -> None:
         if not await require_admin_context(ctx, self.db):
@@ -255,12 +278,14 @@ class Settings(commands.Cog):
             ("Canal multas", "channel_multas_id"),
             ("Canal historial", "channel_historial_id"),
             ("Canal Splits", "channel_repartos_id"),
+            ("Canal Requips", "channel_requips_id"),
             ("Avisos Splits", "channel_notify_splits_id"),
             ("Avisos cobros", "channel_notify_withdrawals_id"),
             ("Avisos inscripciones", "channel_notify_registration_id"),
             ("Avisos actividades", "channel_notify_activities_id"),
             ("Avisos multas", "channel_notify_fines_id"),
             ("Avisos admin generales", "channel_notify_general_admin_id"),
+            ("Roles requipadores", "regear_reviewer_role_ids"),
             ("Rol miembro", "member_role_name"),
             ("Rol invitado", "guest_role_name"),
             ("Multa inasistencia", "absence_fine_amount"),
@@ -357,6 +382,12 @@ class Settings(commands.Cog):
     @commands.command(name="canal_repartos_set", aliases=["canal_splits_set"])
     async def canal_repartos_set(self, ctx: commands.Context) -> None:
         await self.set_channel(ctx, "channel_repartos_id")
+
+    @commands.command(name="canal_requips_set", aliases=["canal_regear_set"])
+    async def canal_requips_set(self, ctx: commands.Context) -> None:
+        await self.set_channel(ctx, "channel_requips_id")
+
+
 
     @commands.command(name="canal_notify_splits_set", aliases=["canal_notif_splits_set"])
     async def canal_notify_splits_set(self, ctx: commands.Context) -> None:

@@ -74,6 +74,8 @@ NOTIFICATION_CHANNEL_CATEGORIES = (
 )
 PING_PUBLICATIONS_LABEL = "Canal de publicaciones de pings"
 PING_PUBLICATIONS_SETTING_KEY = "channel_pings_id"
+REGEAR_CHANNEL_LABEL = "Canal de Requips"
+REGEAR_CHANNEL_SETTING_KEY = "channel_requips_id"
 NOTIFICATION_CATEGORY_MAP = {
     category: (label, emoji)
     for category, label, emoji in NOTIFICATION_CHANNEL_CATEGORIES
@@ -1755,6 +1757,110 @@ class PingPublicationChannelConfigView(discord.ui.View):
         )
 
 
+class RegearChannelConfigView(discord.ui.View):
+    def __init__(self, cog: "Admin"):
+        super().__init__(timeout=300)
+        self.cog = cog
+        self.channel_select = discord.ui.ChannelSelect(
+            placeholder=f"Selecciona {REGEAR_CHANNEL_LABEL}"[:150],
+            channel_types=[discord.ChannelType.text, discord.ChannelType.news],
+            min_values=1,
+            max_values=1,
+            row=0,
+        )
+        self.channel_select.callback = self.select_channel
+        self.add_item(self.channel_select)
+
+    async def require_admin(self, interaction: discord.Interaction) -> bool:
+        if interaction.guild is not None and is_admin_subject(self.cog.db, interaction):
+            return True
+        await private_response(
+            interaction,
+            "Solo admins autorizados pueden configurar el canal de Requips.",
+        )
+        return False
+
+    async def save_channel(
+        self,
+        interaction: discord.Interaction,
+        channel_id: int,
+    ) -> None:
+        self.cog.db.set_setting(
+            interaction.guild.id,
+            REGEAR_CHANNEL_SETTING_KEY,
+            str(channel_id),
+        )
+        log_action(
+            self.cog.db,
+            interaction.guild.id,
+            admin_id=interaction.user.id,
+            action="Configurar canal de Requips",
+            system="Configuracion",
+            observation=str(channel_id),
+        )
+        await private_response(
+            interaction,
+            (
+                f"✅ Canal de Requips configurado correctamente:\n<#{channel_id}>\n\n"
+                f"{self.cog.notification_settings_text(interaction.guild.id)}"
+            ),
+        )
+
+    async def select_channel(self, interaction: discord.Interaction) -> None:
+        if not await self.require_admin(interaction):
+            return
+        channel = self.channel_select.values[0]
+        await self.save_channel(interaction, int(channel.id))
+
+    @discord.ui.button(
+        label="Usar canal actual",
+        emoji="📍",
+        style=discord.ButtonStyle.primary,
+        row=1,
+    )
+    async def use_current(
+        self,
+        interaction: discord.Interaction,
+        _: discord.ui.Button,
+    ) -> None:
+        if not await self.require_admin(interaction):
+            return
+        channel = interaction.channel
+        if channel is None or not callable(getattr(channel, "send", None)):
+            await private_response(interaction, "Este canal no admite solicitudes de Requips.")
+            return
+        await self.save_channel(interaction, int(channel.id))
+
+    @discord.ui.button(
+        label="Quitar canal",
+        emoji="↩️",
+        style=discord.ButtonStyle.secondary,
+        row=1,
+    )
+    async def clear_channel(
+        self,
+        interaction: discord.Interaction,
+        _: discord.ui.Button,
+    ) -> None:
+        if not await self.require_admin(interaction):
+            return
+        self.cog.db.set_setting(interaction.guild.id, REGEAR_CHANNEL_SETTING_KEY, "")
+        log_action(
+            self.cog.db,
+            interaction.guild.id,
+            admin_id=interaction.user.id,
+            action="Quitar canal de Requips",
+            system="Configuracion",
+            observation=REGEAR_CHANNEL_SETTING_KEY,
+        )
+        await private_response(
+            interaction,
+            (
+                f"**{REGEAR_CHANNEL_LABEL}** quedó sin canal configurado.\n\n"
+                f"{self.cog.notification_settings_text(interaction.guild.id)}"
+            ),
+        )
+
 class NotificationCategorySelect(discord.ui.Select):
     def __init__(self, cog: "Admin"):
         self.cog = cog
@@ -1831,6 +1937,34 @@ class NotificationsAdminView(discord.ui.View):
                 "Selecciona un canal, usa el canal actual o quita el canal configurado."
             ),
             view=PingPublicationChannelConfigView(self.cog),
+        )
+
+    @discord.ui.button(
+        label=REGEAR_CHANNEL_LABEL,
+        emoji="🛡️",
+        style=discord.ButtonStyle.primary,
+        row=1,
+    )
+    async def regear_channel(
+        self,
+        interaction: discord.Interaction,
+        _: discord.ui.Button,
+    ) -> None:
+        if interaction.guild is None or not is_admin_subject(self.cog.db, interaction):
+            await private_response(
+                interaction,
+                "Solo admins autorizados pueden configurar el canal de Requips.",
+            )
+            return
+        current = self.cog.db.get_setting(interaction.guild.id, REGEAR_CHANNEL_SETTING_KEY)
+        await private_response(
+            interaction,
+            (
+                f"Configura **{REGEAR_CHANNEL_LABEL}**. "
+                f"Actualmente: {channel_setting_text(current)}.\n"
+                "Selecciona un canal, usa el canal actual o quita el canal configurado."
+            ),
+            view=RegearChannelConfigView(self.cog),
         )
 
     @discord.ui.button(
@@ -3916,6 +4050,7 @@ class Admin(commands.Cog):
 
     def notification_settings_text(self, guild_id: int) -> str:
         pings_channel = self.db.get_setting(guild_id, PING_PUBLICATIONS_SETTING_KEY)
+        regear_channel = self.db.get_setting(guild_id, REGEAR_CHANNEL_SETTING_KEY)
         lines = [
             "🔔 **Canales de notificaciones administrativas**",
             "Los avisos privados para usuarios continúan enviándose por DM.",
@@ -3949,9 +4084,10 @@ class Admin(commands.Cog):
             [
                 "",
                 f"📣 **{PING_PUBLICATIONS_LABEL}:** {channel_setting_text(pings_channel)}",
+                f"🛡️ **{REGEAR_CHANNEL_LABEL}:** {channel_setting_text(regear_channel)}",
                 "",
                 "Selecciona una categoría para establecer o cambiar su canal.",
-                "Usa el botón de pings para elegir donde se publican las actividades.",
+                "Usa los botones de pings y Requips para elegir sus canales de trabajo.",
             ]
         )
         return "\n".join(lines)

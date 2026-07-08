@@ -86,6 +86,7 @@ class G3NBot(commands.Bot):
         await self.load_extension("g3nesys_bot.cogs.fines")
         await self.load_extension("g3nesys_bot.cogs.bank")
         await self.load_extension("g3nesys_bot.cogs.admin")
+        await self.load_extension("g3nesys_bot.cogs.regears")
         self.backup_task = asyncio.create_task(
             backup_loop(
                 self.db,
