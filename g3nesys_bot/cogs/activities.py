@@ -1369,6 +1369,30 @@ class PingsPanelView(discord.ui.View):
     def __init__(self, cog: "Activities"):
         super().__init__(timeout=None)
         self.cog = cog
+        layout = [
+            ("g3n:pings:create_mandatory", 0),
+            ("g3n:pings:create_activity", 0),
+            ("g3n:pings:select_template", 0),
+            ("g3n:pings:create_template", 1),
+            ("g3n:pings:edit_template", 1),
+            ("g3n:pings:view_templates", 1),
+            ("g3n:pings:my_activities", 3),
+            ("g3n:pings:my_caller_penalties", 3),
+            ("g3n:pings:my_caller_ranking", 3),
+            ("g3n:pings:my_caller_report", 3),
+            ("g3n:pings:configuration", 4),
+        ]
+        items = {
+            item.custom_id: item
+            for item in self.children
+            if isinstance(item, discord.ui.Button) and item.custom_id
+        }
+        self.clear_items()
+        for custom_id, row in layout:
+            item = items.get(custom_id)
+            if item is not None:
+                item.row = row
+                self.add_item(item)
 
     @discord.ui.button(
         label="Ping Mandatory",
@@ -1658,12 +1682,14 @@ class ActivityView(discord.ui.View):
         if activity is not None and is_mandatory_activity(activity):
             if status in {ACTIVITY_OPEN, ACTIVITY_NOTICE}:
                 self.add_control_button("Participar", "mandatory_join", discord.ButtonStyle.success, 0, False, "✅")
+                self.add_control_button("Salir", "mandatory_leave", discord.ButtonStyle.danger, 0, False, "🚪")
                 self.add_control_button("Ver participantes", "mandatory_participants", discord.ButtonStyle.secondary, 0, False, "👥")
                 self.add_control_button("Mandar aviso", "notice", discord.ButtonStyle.primary, 0, False, "📢")
                 self.add_control_button("Iniciar actividad", "start", discord.ButtonStyle.success, 1, False, "▶️")
                 self.add_control_button("Cancelar actividad", "cancel", discord.ButtonStyle.danger, 1, False, "✖️")
             elif status == ACTIVITY_IN_PROGRESS:
                 self.add_control_button("Participar", "mandatory_join", discord.ButtonStyle.success, 0, False, "✅")
+                self.add_control_button("Salir", "mandatory_leave", discord.ButtonStyle.danger, 0, False, "🚪")
                 self.add_control_button("Ver participantes", "mandatory_participants", discord.ButtonStyle.secondary, 0, False, "👥")
                 self.add_control_button("Mandar aviso", "notice", discord.ButtonStyle.primary, 0, False, "📢")
                 self.add_control_button("Finalizar actividad", "finish", discord.ButtonStyle.success, 1, False, "⏹️")
@@ -2154,10 +2180,12 @@ class Activities(commands.Cog):
         for activity in activities:
             attendees = self.db.fetch_all(
                 """
-                SELECT usuario_id FROM asistencia_actividades
-                WHERE actividad_id = ? AND confirmo_boton = 1
+                SELECT user_id AS usuario_id FROM activity_participants
+                WHERE activity_id = ?
+                UNION
+                SELECT ? AS usuario_id
                 """,
-                (int(activity["id"]),),
+                (int(activity["id"]), int(activity["caller_id"])),
             )
             for attendee in attendees:
                 member = guild.get_member(int(attendee["usuario_id"]))
@@ -3368,29 +3396,32 @@ class Activities(commands.Cog):
         notes = str(activity["notes"] or "Sin descripcion.").strip()
         loot = activity["mandatory_loot_amount"]
         loot_text = format_amount(int(loot)) if loot is not None else "No registrado"
+        participant_names = [
+            " ".join(str(participant["display_name"] or f"Usuario {participant['user_id']}").split())
+            for participant in participants
+        ]
+        participants_text = ", ".join(participant_names) if participant_names else "Sin participantes todavia"
+        if len(participants_text) > 1024:
+            participants_text = participants_text[:1000].rstrip(", ") + "\n... lista recortada"
         embed = discord.Embed(
-            title="⚔️ Ping Mandatory",
+            title="\u2694\ufe0f Ping Mandatory",
             description=activity_note_description(notes),
             color=discord.Color.red(),
         )
-        embed.add_field(name="👤 Caller", value=f"<@{activity['caller_id']}>", inline=True)
-        embed.add_field(name="🕒 Horario", value=str(activity["horario"]), inline=True)
-        embed.add_field(name=f"{status_icon} Estado", value=status_name, inline=True)
-        embed.add_field(name="🔊 Canal de voz", value=voice_text, inline=True)
-        embed.add_field(name="👥 Participantes", value=str(len(participants)), inline=True)
-        embed.add_field(name="🆔 ID", value=str(activity["code"]), inline=True)
-        embed.add_field(name="💰 Botin", value=loot_text, inline=False)
+        embed.add_field(name="\U0001F464 CALLER", value=f"<@{activity['caller_id']}>", inline=True)
+        embed.add_field(name="\U0001F50A CANAL", value=voice_text, inline=True)
+        embed.add_field(name="\U0001F552 HORARIO", value=str(activity["horario"]), inline=True)
+        embed.add_field(name=f"{status_icon} ESTADO", value=status_name, inline=True)
+        embed.add_field(name="\U0001F194 ID", value=str(activity["code"]), inline=True)
+        embed.add_field(name="\U0001F4B0 BOTIN", value=loot_text, inline=True)
+        embed.add_field(name=f"\U0001F465 PARTICIPANTES: {len(participants)}", value=participants_text, inline=False)
         embed.set_footer(text=MANDATORY_FOOTER_TEXT)
         guild = self.bot.get_guild(int(activity["guild_id"]))
-        caller = guild.get_member(int(activity["caller_id"])) if guild is not None else None
-        if caller is None:
-            caller = self.bot.get_user(int(activity["caller_id"]))
-        if caller is not None:
-            embed.set_thumbnail(url=caller.display_avatar.url)
-        image_url = str(activity["image_url"] or "").strip() or PINGS_PANEL_IMAGE
+        image_url = str(activity["image_url"] or "").strip()
         if image_url:
             embed.set_image(url=image_url)
         return [resolve_custom_emojis_in_embed(embed, guild) or embed]
+
     def build_activity_embeds(self, activity_id: int) -> list[discord.Embed]:
         activity = self.get_activity(activity_id)
         if is_mandatory_activity(activity):
@@ -3884,8 +3915,8 @@ class Activities(commands.Cog):
                     action="solicitud_actividad_aceptada",
                     content=(
                         f"✅ Tu solicitud para **{request['activity_name']}** fue aceptada.\n"
-                        "Entra al canal de voz y pulsa **Aqui estoy**. Si permaneces menos del 50% "
-                        "de la actividad, se aplicara la sancion configurada."
+                        "Entra al canal de voz. Si el caller pide check, puedes pulsar **Aqui estoy**; "
+                        "si permaneces menos del 50% de la actividad, se aplicara la sancion configurada."
                     ),
                     view=ConfirmAttendanceView(self, int(request["activity_id"])),
                 )
@@ -3911,7 +3942,7 @@ class Activities(commands.Cog):
             """,
             (activity_id, user_id),
         )
-        if attendance is None or int(attendance["confirmo_boton"]) != 1:
+        if attendance is None:
             return
         open_session = self.db.fetch_one(
             """
@@ -4071,6 +4102,40 @@ class Activities(commands.Cog):
         await self.update_activity_message(activity_id)
         await interaction.followup.send("Quedaste registrado en el Ping Mandatory.", ephemeral=True)
 
+    async def leave_mandatory_activity(self, interaction: discord.Interaction, activity_id: int) -> None:
+        await interaction.response.defer(ephemeral=True)
+        activity = self.get_activity(activity_id)
+        if (
+            activity is None
+            or interaction.guild is None
+            or int(activity["guild_id"]) != interaction.guild.id
+            or not is_mandatory_activity(activity)
+        ):
+            await interaction.followup.send("No encontre esta convocatoria Mandatory.", ephemeral=True)
+            return
+        if activity["status"] not in {ACTIVITY_OPEN, ACTIVITY_NOTICE, ACTIVITY_IN_PROGRESS}:
+            await interaction.followup.send("Ya no puedes salir de este Ping Mandatory.", ephemeral=True)
+            return
+        participant = self.db.fetch_one(
+            "SELECT 1 FROM activity_participants WHERE activity_id = ? AND user_id = ?",
+            (activity_id, interaction.user.id),
+        )
+        if participant is None:
+            await interaction.followup.send("No estabas registrado en este Ping Mandatory.", ephemeral=True)
+            return
+        if activity["status"] == ACTIVITY_IN_PROGRESS:
+            self.close_voice_session(activity_id, interaction.guild.id, interaction.user.id)
+        self.db.execute(
+            "DELETE FROM activity_participants WHERE activity_id = ? AND user_id = ?",
+            (activity_id, interaction.user.id),
+        )
+        self.db.execute(
+            "DELETE FROM asistencia_actividades WHERE actividad_id = ? AND usuario_id = ?",
+            (activity_id, interaction.user.id),
+        )
+        await self.update_activity_message(activity_id)
+        await interaction.followup.send("Saliste del Ping Mandatory.", ephemeral=True)
+
     async def join_role(
         self,
         interaction: discord.Interaction,
@@ -4160,7 +4225,7 @@ class Activities(commands.Cog):
             action="registro_actividad",
             content=(
                 f"⚔️ Te registraste en **{activity['name']}** como **{role['name']}**.\n"
-                "Debes confirmar el check y permanecer al menos el 50% de la actividad "
+                "El check es opcional si el caller lo solicita. Permanece al menos el 50% "
                 "en el canal de voz; de lo contrario puede aplicarse la multa configurada."
             ),
             view=check_view,
@@ -4231,6 +4296,9 @@ class Activities(commands.Cog):
             return
         if action == "mandatory_join":
             await self.join_mandatory_activity(interaction, activity_id)
+            return
+        if action == "mandatory_leave":
+            await self.leave_mandatory_activity(interaction, activity_id)
             return
         if action == "mandatory_participants":
             await private_response(interaction, self.mandatory_participants_text(activity_id))
@@ -4482,12 +4550,6 @@ class Activities(commands.Cog):
         if is_mandatory_activity(activity):
             await self.start_mandatory_activity(interaction, activity_id, activity)
             return
-        if not activity["check_sent_at"]:
-            await interaction.followup.send(
-                "Antes de iniciar debes usar **Mandar check** para avisar a los participantes.",
-                ephemeral=True,
-            )
-            return
         self.audit_admin_activity_action(interaction, activity, "iniciar")
         started_at = utc_now_iso()
         self.db.execute(
@@ -4619,7 +4681,7 @@ class Activities(commands.Cog):
                 )
         await self.update_activity_message(activity_id)
         await interaction.followup.send(
-            "Check enviado por DM. La actividad ya cumple el requisito previo para iniciar.",
+            "Check opcional enviado por DM. Puedes iniciar o continuar la actividad sin bloquear procesos.",
             ephemeral=True,
         )
 
@@ -4638,7 +4700,7 @@ class Activities(commands.Cog):
             user_id = int(participant["user_id"])
             row = attendance.get(user_id)
             name = f"{participant['display_name']} (<@{user_id}>)"
-            if row and int(row["confirmo_boton"]) == 1 and row["estado"] == ATTENDANCE_CONFIRMED:
+            if row and row["estado"] == ATTENDANCE_CONFIRMED:
                 confirmed.append(name)
             elif row and int(row["confirmo_boton"]) == 1:
                 checked_absent.append(name)
@@ -4656,11 +4718,11 @@ class Activities(commands.Cog):
             f"🔍 **Verificacion de asistencia**",
             f"Actividad: `{activity['code']}` {activity['name']}",
             "",
-            *block("Confirmados con check y voz", confirmed),
+            *block("Confirmados por voz", confirmed),
             "",
-            *block("Dieron check pero no estan en voz", checked_absent),
+            *block("Dieron check pero no cumplen voz", checked_absent),
             "",
-            *block("Sin check", pending),
+            *block("Sin check registrado", pending),
         ]
         content = "\n".join(lines)
         if len(content) > 1900:
@@ -4802,7 +4864,7 @@ class Activities(commands.Cog):
                 "Justificado"
                 if justified
                 else ATTENDANCE_CONFIRMED
-                if checked and participation_percent >= minimum_percent
+                if participation_percent >= minimum_percent
                 else ATTENDANCE_ABSENT
             )
             self.db.execute(
@@ -4874,7 +4936,7 @@ class Activities(commands.Cog):
             caller_checked = caller_row is not None and int(caller_row["confirmo_boton"]) == 1
             caller_state = (
                 ATTENDANCE_CONFIRMED
-                if caller_checked and caller_percent >= minimum_percent
+                if caller_percent >= minimum_percent
                 else ATTENDANCE_ABSENT
             )
             self.db.execute(
