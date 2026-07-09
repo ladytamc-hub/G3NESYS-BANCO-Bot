@@ -78,6 +78,7 @@ NOTIFICATION_CHANNEL_CATEGORIES = (
 )
 PING_PUBLICATIONS_LABEL = "Canal de publicaciones de pings"
 PING_PUBLICATIONS_SETTING_KEY = "channel_pings_id"
+APPROVED_PING_CHANNELS_SETTING_KEY = "approved_ping_channel_ids"
 REGEAR_CHANNEL_LABEL = "Canal de Requips"
 REGEAR_CHANNEL_SETTING_KEY = "channel_requips_id"
 REGEAR_NOTIFICATION_CHANNEL_LABEL = "Notificaciones de Requips"
@@ -1728,6 +1729,57 @@ class NotificationChannelConfigView(discord.ui.View):
         )
 
 
+class ApprovedPingChannelRemoveSelect(discord.ui.Select):
+    def __init__(self, cog: "Admin", guild: discord.Guild):
+        self.cog = cog
+        options = []
+        for channel_id in sorted(cog.approved_ping_channel_ids(guild.id))[:25]:
+            channel = guild.get_channel(channel_id)
+            label = f"#{channel.name}" if channel is not None and hasattr(channel, "name") else str(channel_id)
+            options.append(
+                discord.SelectOption(
+                    label=label[:100],
+                    value=str(channel_id),
+                    description=f"ID {channel_id}"[:100],
+                )
+            )
+        super().__init__(
+            placeholder="Selecciona el canal aprobado a quitar",
+            min_values=1,
+            max_values=1,
+            options=options,
+        )
+
+    async def callback(self, interaction: discord.Interaction) -> None:
+        if interaction.guild is None or not is_admin_subject(self.cog.db, interaction):
+            await private_response(interaction, "Solo admins autorizados pueden administrar canales aprobados.")
+            return
+        channel_id = int(self.values[0])
+        approved = self.cog.approved_ping_channel_ids(interaction.guild.id)
+        if channel_id not in approved:
+            await private_response(interaction, "Ese canal ya no esta en la lista aprobada.")
+            return
+        approved.discard(channel_id)
+        self.cog.set_approved_ping_channel_ids(interaction.guild.id, approved)
+        log_action(
+            self.cog.db,
+            interaction.guild.id,
+            admin_id=interaction.user.id,
+            action="Quitar canal aprobado para pings",
+            system="Configuracion",
+            observation=str(channel_id),
+        )
+        await private_response(
+            interaction,
+            f"Canal <#{channel_id}> quitado de aprobados.\n\n{self.cog.approved_ping_channels_text(interaction.guild.id)}",
+        )
+
+
+class ApprovedPingChannelRemoveView(discord.ui.View):
+    def __init__(self, cog: "Admin", guild: discord.Guild):
+        super().__init__(timeout=180)
+        self.add_item(ApprovedPingChannelRemoveSelect(cog, guild))
+
 def channel_setting_text(value: str | None) -> str:
     if value:
         return f"<#{value}>" if value.isdigit() else f"ID inválido: `{value}`"
@@ -1747,6 +1799,15 @@ class PingPublicationChannelConfigView(discord.ui.View):
         )
         self.channel_select.callback = self.select_channel
         self.add_item(self.channel_select)
+        self.approved_channel_select = discord.ui.ChannelSelect(
+            placeholder="Selecciona canal para aprobar pings"[:150],
+            channel_types=[discord.ChannelType.text, discord.ChannelType.news],
+            min_values=1,
+            max_values=1,
+            row=2,
+        )
+        self.approved_channel_select.callback = self.approve_selected_channel
+        self.add_item(self.approved_channel_select)
 
     async def require_admin(self, interaction: discord.Interaction) -> bool:
         if interaction.guild is not None and is_admin_subject(self.cog.db, interaction):
@@ -1788,6 +1849,27 @@ class PingPublicationChannelConfigView(discord.ui.View):
             return
         channel = self.channel_select.values[0]
         await self.save_channel(interaction, int(channel.id))
+
+    async def approve_selected_channel(self, interaction: discord.Interaction) -> None:
+        if not await self.require_admin(interaction):
+            return
+        channel = self.approved_channel_select.values[0]
+        channel_id = int(channel.id)
+        approved = self.cog.approved_ping_channel_ids(interaction.guild.id)
+        approved.add(channel_id)
+        self.cog.set_approved_ping_channel_ids(interaction.guild.id, approved)
+        log_action(
+            self.cog.db,
+            interaction.guild.id,
+            admin_id=interaction.user.id,
+            action="Agregar canal aprobado para pings",
+            system="Configuracion",
+            observation=str(channel_id),
+        )
+        await private_response(
+            interaction,
+            f"Canal <#{channel_id}> aprobado para pings.\n\n{self.cog.approved_ping_channels_text(interaction.guild.id)}",
+        )
 
     @discord.ui.button(
         label="Usar canal actual",
@@ -1840,6 +1922,42 @@ class PingPublicationChannelConfigView(discord.ui.View):
                 f"**{PING_PUBLICATIONS_LABEL}** quedó sin canal configurado.\n\n"
                 f"{self.cog.notification_settings_text(interaction.guild.id)}"
             ),
+        )
+
+
+
+    @discord.ui.button(
+        label="Ver aprobados",
+        style=discord.ButtonStyle.secondary,
+        row=3,
+    )
+    async def show_approved_channels(
+        self,
+        interaction: discord.Interaction,
+        _: discord.ui.Button,
+    ) -> None:
+        if await self.require_admin(interaction):
+            await private_response(interaction, self.cog.approved_ping_channels_text(interaction.guild.id))
+
+    @discord.ui.button(
+        label="Quitar aprobado",
+        style=discord.ButtonStyle.danger,
+        row=3,
+    )
+    async def remove_approved_channel(
+        self,
+        interaction: discord.Interaction,
+        _: discord.ui.Button,
+    ) -> None:
+        if not await self.require_admin(interaction):
+            return
+        if not self.cog.approved_ping_channel_ids(interaction.guild.id):
+            await private_response(interaction, "No hay canales aprobados para quitar.")
+            return
+        await private_response(
+            interaction,
+            "Elige el canal aprobado que quieres quitar:",
+            view=ApprovedPingChannelRemoveView(self.cog, interaction.guild),
         )
 
 
@@ -2126,7 +2244,8 @@ class NotificationsAdminView(discord.ui.View):
             (
                 f"Configura **{PING_PUBLICATIONS_LABEL}**. "
                 f"Actualmente: {channel_setting_text(current)}.\n"
-                "Selecciona un canal, usa el canal actual o quita el canal configurado."
+                f"Aprobados para callers: {self.cog.approved_ping_channels_summary(interaction.guild.id)}.\n"
+                "El primer selector cambia el canal predeterminado; el segundo aprueba canales para callers."
             ),
             view=PingPublicationChannelConfigView(self.cog),
         )
@@ -4498,6 +4617,33 @@ class Admin(commands.Cog):
             ]
         )
 
+    def approved_ping_channel_ids(self, guild_id: int) -> set[int]:
+        return split_csv_ids(self.db.get_setting(guild_id, APPROVED_PING_CHANNELS_SETTING_KEY))
+
+    def set_approved_ping_channel_ids(self, guild_id: int, channel_ids: set[int]) -> None:
+        self.db.set_setting(guild_id, APPROVED_PING_CHANNELS_SETTING_KEY, join_csv_ids(channel_ids))
+
+    def approved_ping_channels_summary(self, guild_id: int) -> str:
+        channel_ids = sorted(self.approved_ping_channel_ids(guild_id))
+        if not channel_ids:
+            return "Sin canales aprobados"
+        shown = ", ".join(f"<#{channel_id}>" for channel_id in channel_ids[:12])
+        if len(channel_ids) > 12:
+            shown += f" y {len(channel_ids) - 12} mas"
+        return shown
+
+    def approved_ping_channels_text(self, guild_id: int) -> str:
+        channel_ids = sorted(self.approved_ping_channel_ids(guild_id))
+        if not channel_ids:
+            return "**Canales aprobados para pings**\nNo hay canales aprobados."
+        guild = self.bot.get_guild(guild_id)
+        lines = ["**Canales aprobados para pings**"]
+        for channel_id in channel_ids:
+            if guild is not None and guild.get_channel(channel_id) is None:
+                lines.append(f"- ID `{channel_id}` (no encontrado)")
+            else:
+                lines.append(f"- <#{channel_id}>")
+        return "\n".join(lines)
     def default_rates_text(self, guild_id: int) -> str:
         lines = [
             "**Tasas predeterminadas**",
@@ -4550,6 +4696,7 @@ class Admin(commands.Cog):
             [
                 "",
                 f"📣 **{PING_PUBLICATIONS_LABEL}:** {channel_setting_text(pings_channel)}",
+                f"   Aprobados para callers: {self.approved_ping_channels_summary(guild_id)}",
                 f"🛡️ **{REGEAR_CHANNEL_LABEL}:** {channel_setting_text(regear_channel)}",
                 f"🛡️ **{REGEAR_NOTIFICATION_CHANNEL_LABEL}:** {channel_setting_text(regear_notification_channel)}",
                 "",

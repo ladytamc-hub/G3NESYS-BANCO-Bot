@@ -122,6 +122,10 @@ class Database:
             self._conn.execute("ALTER TABLE activities ADD COLUMN mandatory_loot_recorded_by INTEGER")
         if "mandatory_loot_recorded_at" not in activity_columns:
             self._conn.execute("ALTER TABLE activities ADD COLUMN mandatory_loot_recorded_at TEXT")
+        if "deleted_by" not in activity_columns:
+            self._conn.execute("ALTER TABLE activities ADD COLUMN deleted_by INTEGER")
+        if "deleted_at" not in activity_columns:
+            self._conn.execute("ALTER TABLE activities ADD COLUMN deleted_at TEXT")
 
         attendance_columns = {
             row["name"]
@@ -252,6 +256,8 @@ class Database:
                     mandatory_loot_amount INTEGER,
                     mandatory_loot_recorded_by INTEGER,
                     mandatory_loot_recorded_at TEXT,
+                    deleted_by INTEGER,
+                    deleted_at TEXT,
                     UNIQUE(guild_id, code)
                 )
                 """,
@@ -260,7 +266,8 @@ class Database:
                 "created_at, started_at, ended_at, cancelled_by, "
                 "cancellation_reputation_exempt, cancellation_reason, check_sent_at, "
                 "activity_type, image_url, mandatory_loot_amount, "
-                "mandatory_loot_recorded_by, mandatory_loot_recorded_at",
+                "mandatory_loot_recorded_by, mandatory_loot_recorded_at, "
+                "deleted_by, deleted_at",
             ),
             "fines": (
                 """
@@ -648,6 +655,8 @@ CREATE TABLE IF NOT EXISTS activities (
     mandatory_loot_amount INTEGER,
     mandatory_loot_recorded_by INTEGER,
     mandatory_loot_recorded_at TEXT,
+    deleted_by INTEGER,
+    deleted_at TEXT,
     UNIQUE(guild_id, code)
 );
 

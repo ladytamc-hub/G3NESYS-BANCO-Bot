@@ -12,6 +12,8 @@ from discord.ext import commands
 
 from ..constants import (
     ACTIVITY_CANCELLED,
+    ACTIVITY_DELETED,
+    ACTIVITY_DRAFT,
     ACTIVITY_TYPE_MANDATORY,
     ACTIVITY_TYPE_REGULAR,
     ACTIVITY_FINISHED,
@@ -56,6 +58,7 @@ from ..utils import (
     resolve_custom_emojis,
     resolve_custom_emojis_in_embed,
     resolve_custom_emojis_in_send_kwargs,
+    split_csv_ids,
     utc_now_iso,
 )
 from ..weapon_aliases import resolve_weapon_alias
@@ -91,13 +94,17 @@ MANDATORY_PARTICIPANT_ROLE_NAME = "Participante"
 MANDATORY_ROLE_SLOTS = 100000
 IMAGE_FILE_EXTENSIONS = (".png", ".jpg", ".jpeg", ".gif", ".webp")
 ACTIVITY_STATUS_LABELS = {
+    ACTIVITY_DRAFT: "⚪ BORRADOR",
     ACTIVITY_OPEN: "🟢 ABIERTA",
     ACTIVITY_NOTICE: "🟡 EN AVISO",
     ACTIVITY_IN_PROGRESS: "🔵 EN CURSO",
     ACTIVITY_CANCELLED: "🔴 CANCELADA",
+    ACTIVITY_DELETED: "⚫ ELIMINADA",
     ACTIVITY_FINISHED: "⚫ FINALIZADA",
     ACTIVITY_PAYOUT_CREATED: "🟣 EN SPLIT",
 }
+APPROVED_PING_CHANNELS_SETTING_KEY = "approved_ping_channel_ids"
+PING_THREAD_MESSAGE = "\U0001F4CC **Cualquier asunto relacionado con la composici\u00f3n o la actividad, favor de comentarlo en este hilo.**"
 
 
 def is_mandatory_activity(activity) -> bool:
@@ -700,6 +707,94 @@ class TemplateVisibilityView(discord.ui.View):
         await interaction.response.edit_message(content="Creacion de plantilla cancelada.", view=None)
 
 
+class PingPublicationChannelSelect(discord.ui.Select):
+    def __init__(self, parent_view, guild: discord.Guild, *, row: int):
+        self.parent_view = parent_view
+        super().__init__(
+            placeholder="Canal aprobado donde se publicara el ping",
+            min_values=1,
+            max_values=1,
+            options=parent_view.cog.approved_ping_channel_options(
+                guild,
+                selected_channel_id=parent_view.publish_channel_id,
+            ),
+            row=row,
+        )
+
+    async def callback(self, interaction: discord.Interaction) -> None:
+        if interaction.guild is None or not self.parent_view.can_use(interaction):
+            await private_response(interaction, "Solo quien abrio este menu puede elegir canal.")
+            return
+        channel_id = int(self.values[0])
+        if channel_id not in self.parent_view.cog.approved_ping_channel_ids(interaction.guild.id):
+            await private_response(interaction, "Ese canal ya no esta aprobado para pings.")
+            return
+        self.parent_view.publish_channel_id = channel_id
+        await interaction.response.edit_message(
+            content=self.parent_view.text(interaction.guild),
+            view=self.parent_view,
+        )
+
+
+class ActivityCreationChannelView(discord.ui.View):
+    def __init__(
+        self,
+        cog: "Activities",
+        *,
+        author_id: int,
+        guild: discord.Guild,
+        template_id: int | None,
+        default_name: str = "",
+        default_time: str = "",
+        default_notes: str = "",
+        default_voice_channel_id: int | None = None,
+        publish_channel_id: int | None = None,
+    ):
+        super().__init__(timeout=180)
+        self.cog = cog
+        self.author_id = author_id
+        self.template_id = template_id
+        self.default_name = default_name
+        self.default_time = default_time
+        self.default_notes = default_notes
+        self.default_voice_channel_id = default_voice_channel_id
+        self.publish_channel_id: int | None = publish_channel_id
+        self.add_item(PingPublicationChannelSelect(self, guild, row=0))
+
+    def can_use(self, interaction: discord.Interaction) -> bool:
+        return interaction.user.id == self.author_id and is_caller_panel_subject(self.cog.db, interaction)
+
+    def text(self, guild: discord.Guild) -> str:
+        return (
+            "**Canal de publicacion del ping**\n"
+            f"Destino: {self.cog.ping_publication_channel_text(guild, self.publish_channel_id)}\n"
+            "Si no eliges canal, se usara el canal predeterminado actual."
+        )
+
+    @discord.ui.button(label="Continuar", style=discord.ButtonStyle.success, row=1)
+    async def continue_button(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
+        if not self.can_use(interaction):
+            await private_response(interaction, "Solo quien abrio este menu puede continuar.")
+            return
+        await interaction.response.send_modal(
+            ActivityModal(
+                self.cog,
+                template_id=self.template_id,
+                default_name=self.default_name,
+                default_time=self.default_time,
+                default_notes=self.default_notes,
+                default_voice_channel_id=self.default_voice_channel_id,
+                publish_channel_id=self.publish_channel_id,
+            )
+        )
+
+    @discord.ui.button(label="Cancelar", style=discord.ButtonStyle.secondary, row=2)
+    async def cancel_button(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
+        if not self.can_use(interaction):
+            await private_response(interaction, "Solo quien abrio este menu puede cancelarlo.")
+            return
+        await interaction.response.edit_message(content="Creacion de ping cancelada.", view=None)
+
 class ActivityModal(discord.ui.Modal):
     def __init__(
         self,
@@ -710,11 +805,16 @@ class ActivityModal(discord.ui.Modal):
         default_time: str = "",
         default_notes: str = "",
         default_voice_channel_id: int | None = None,
+        publish_channel_id: int | None = None,
+        draft_id: int | None = None,
+        default_roles: str = "",
     ):
         title = "Crear Ping"
         super().__init__(title=title, timeout=300)
         self.cog = cog
         self.template_id = template_id
+        self.publish_channel_id = publish_channel_id
+        self.draft_id = draft_id
         self.activity_name = discord.ui.TextInput(
             label="Nombre de actividad",
             max_length=100,
@@ -750,11 +850,12 @@ class ActivityModal(discord.ui.Modal):
                 style=discord.TextStyle.paragraph,
                 placeholder="Falce 2\n🔮 Prisma 2\n🛡️ | Tanque | 1",
                 max_length=1800,
+                default=default_roles[:1800],
             )
             self.add_item(self.roles)
 
     async def on_submit(self, interaction: discord.Interaction) -> None:
-        await self.cog.publish_activity_from_modal(interaction, self)
+        await self.cog.save_activity_draft_from_modal(interaction, self)
 
 
 class MandatoryActivityModal(discord.ui.Modal, title="Ping Mandatory"):
@@ -778,14 +879,29 @@ class MandatoryActivityModal(discord.ui.Modal, title="Ping Mandatory"):
         placeholder="https://...",
     )
 
-    def __init__(self, cog: "Activities", *, default_voice_channel_id: int | None = None):
+    def __init__(
+        self,
+        cog: "Activities",
+        *,
+        default_voice_channel_id: int | None = None,
+        default_horario: str = "",
+        default_description: str = "",
+        default_image_url: str = "",
+        publish_channel_id: int | None = None,
+        draft_id: int | None = None,
+    ):
         super().__init__(timeout=300)
         self.cog = cog
+        self.publish_channel_id = publish_channel_id
+        self.draft_id = draft_id
+        self.horario.default = default_horario[:40]
+        self.description.default = default_description[:900]
+        self.image_url.default = default_image_url[:500]
         if default_voice_channel_id:
             self.voice_channel.default = str(default_voice_channel_id)
 
     async def on_submit(self, interaction: discord.Interaction) -> None:
-        await self.cog.publish_mandatory_activity_from_modal(interaction, self)
+        await self.cog.save_mandatory_draft_from_modal(interaction, self)
 
 
 class MandatoryVoiceChannelSelect(discord.ui.ChannelSelect):
@@ -811,38 +927,42 @@ class MandatoryVoiceChannelSelect(discord.ui.ChannelSelect):
             await private_response(interaction, VOICE_CHANNEL_ERROR)
             return
         self.parent_view.voice_channel_id = channel.id
-        await interaction.response.edit_message(content=self.parent_view.text(), view=self.parent_view)
+        await interaction.response.edit_message(content=self.parent_view.text(interaction.guild), view=self.parent_view)
 
 
 class MandatoryPingDraftView(discord.ui.View):
-    def __init__(self, cog: "Activities", *, author_id: int):
+    def __init__(self, cog: "Activities", *, author_id: int, guild: discord.Guild):
         super().__init__(timeout=180)
         self.cog = cog
         self.author_id = author_id
         self.voice_channel_id: int | None = None
+        self.publish_channel_id: int | None = None
         self.add_item(MandatoryVoiceChannelSelect(self))
+        if cog.can_author_choose_ping_channel(guild.id, author_id) and cog.approved_ping_channel_options(guild):
+            self.add_item(PingPublicationChannelSelect(self, guild, row=1))
 
     def can_use(self, interaction: discord.Interaction) -> bool:
         return interaction.user.id == self.author_id and self.cog.can_create_mandatory_ping(interaction)
 
-    def text(self) -> str:
+    def text(self, guild: discord.Guild | None = None) -> str:
         voice_text = f"<#{self.voice_channel_id}>" if self.voice_channel_id else "Puedes seleccionarlo aqui o escribir el ID en el formulario."
         return (
             "**Ping Mandatory**\n"
             "Convocatoria oficial sin composicion, roles, check ni split.\n"
-            f"Canal de voz: {voice_text}"
+            f"Canal de voz: {voice_text}\n"
+            f"Publicacion: {self.cog.ping_publication_channel_text(guild, self.publish_channel_id) if guild else ''}"
         )
 
-    @discord.ui.button(label="Continuar", style=discord.ButtonStyle.danger, row=1)
+    @discord.ui.button(label="Continuar", style=discord.ButtonStyle.danger, row=2)
     async def continue_button(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
         if not self.can_use(interaction):
             await private_response(interaction, "Solo el caller oficial o admin que abrio este menu puede continuar.")
             return
         await interaction.response.send_modal(
-            MandatoryActivityModal(self.cog, default_voice_channel_id=self.voice_channel_id)
+            MandatoryActivityModal(self.cog, default_voice_channel_id=self.voice_channel_id, publish_channel_id=self.publish_channel_id)
         )
 
-    @discord.ui.button(label="Cancelar", style=discord.ButtonStyle.secondary, row=1)
+    @discord.ui.button(label="Cancelar", style=discord.ButtonStyle.secondary, row=2)
     async def cancel_button(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
         if not self.can_use(interaction):
             await private_response(interaction, "Solo quien abrio este menu puede cancelarlo.")
@@ -1057,11 +1177,12 @@ class TemplateSelect(discord.ui.Select):
         await interaction.response.send_modal(
             ActivityModal(
                 self.cog,
-                template_id=template_id,
-                default_name=template["activity_name"],
-                default_time=template["default_time"],
-                default_notes=template["description"],
-                default_voice_channel_id=template["voice_channel_id"],
+                template_id=self.template_id,
+                default_name=self.default_name,
+                default_time=self.default_time,
+                default_notes=self.default_notes,
+                default_voice_channel_id=self.default_voice_channel_id,
+                publish_channel_id=self.publish_channel_id,
             )
         )
 
@@ -1405,8 +1526,8 @@ class PingsPanelView(discord.ui.View):
         if not self.cog.can_create_mandatory_ping(interaction):
             await private_response(interaction, "Solo callers oficiales o admins pueden crear Ping Mandatory.")
             return
-        view = MandatoryPingDraftView(self.cog, author_id=interaction.user.id)
-        await private_response(interaction, view.text(), view=view)
+        view = MandatoryPingDraftView(self.cog, author_id=interaction.user.id, guild=interaction.guild)
+        await private_response(interaction, view.text(interaction.guild), view=view)
 
     @discord.ui.button(
         label="Crear Ping Rápido",
@@ -1419,7 +1540,7 @@ class PingsPanelView(discord.ui.View):
         if not is_caller_panel_subject(self.cog.db, interaction):
             await reject_caller_access(self.cog.db, interaction, "crear pings")
             return
-        await interaction.response.send_modal(ActivityModal(self.cog, template_id=None))
+        await self.cog.prompt_activity_creation(interaction, template_id=None)
 
     @discord.ui.button(
         label="Crear Ping desde Plantilla",
@@ -1687,6 +1808,7 @@ class ActivityView(discord.ui.View):
                 self.add_control_button("Mandar aviso", "notice", discord.ButtonStyle.primary, 0, False, "📢")
                 self.add_control_button("Iniciar actividad", "start", discord.ButtonStyle.success, 1, False, "▶️")
                 self.add_control_button("Cancelar actividad", "cancel", discord.ButtonStyle.danger, 1, False, "✖️")
+                self.add_control_button("Eliminar ping", "delete", discord.ButtonStyle.danger, 1, False)
             elif status == ACTIVITY_IN_PROGRESS:
                 self.add_control_button("Participar", "mandatory_join", discord.ButtonStyle.success, 0, False, "✅")
                 self.add_control_button("Salir", "mandatory_leave", discord.ButtonStyle.danger, 0, False, "🚪")
@@ -1694,12 +1816,15 @@ class ActivityView(discord.ui.View):
                 self.add_control_button("Mandar aviso", "notice", discord.ButtonStyle.primary, 0, False, "📢")
                 self.add_control_button("Finalizar actividad", "finish", discord.ButtonStyle.success, 1, False, "⏹️")
                 self.add_control_button("Cancelar actividad", "cancel", discord.ButtonStyle.danger, 1, False, "✖️")
+                self.add_control_button("Eliminar ping", "delete", discord.ButtonStyle.danger, 1, False)
             elif status == ACTIVITY_FINISHED:
                 self.add_control_button("Ver participantes", "mandatory_participants", discord.ButtonStyle.secondary, 0, False, "👥")
                 loot_label = "Editar Botin" if activity["mandatory_loot_amount"] is not None else "Botin"
                 self.add_control_button(loot_label, "mandatory_loot", discord.ButtonStyle.primary, 0, False, "💰")
+                self.add_control_button("Eliminar ping", "delete", discord.ButtonStyle.danger, 1, False)
             elif status == ACTIVITY_CANCELLED:
                 self.add_control_button("Ver participantes", "mandatory_participants", discord.ButtonStyle.secondary, 0, False, "👥")
+                self.add_control_button("Eliminar ping", "delete", discord.ButtonStyle.danger, 1, False)
             return
         if status in {ACTIVITY_OPEN, ACTIVITY_NOTICE}:
             for index, row in enumerate(roles[:15]):
@@ -1734,6 +1859,7 @@ class ActivityView(discord.ui.View):
                 "Editar", "edit", discord.ButtonStyle.secondary, 3, False, "✏️"
             )
             self.add_control_button("Cancelar", "cancel", discord.ButtonStyle.danger, 4, False, "✖️")
+            self.add_control_button("Eliminar", "delete", discord.ButtonStyle.danger, 4, False)
         elif status == ACTIVITY_IN_PROGRESS:
             self.add_control_button(
                 "Solicitar unirme", "request_join", discord.ButtonStyle.primary, 0, False, "🙋"
@@ -1746,13 +1872,16 @@ class ActivityView(discord.ui.View):
                 "Editar", "edit", discord.ButtonStyle.secondary, 1, False, "✏️"
             )
             self.add_control_button("Cancelar", "cancel", discord.ButtonStyle.danger, 1, False, "✖️")
+            self.add_control_button("Eliminar", "delete", discord.ButtonStyle.danger, 1, False)
         elif status == ACTIVITY_FINISHED:
             self.add_control_button("Ver asistencia", "verify", discord.ButtonStyle.secondary, 0, False, "🔍")
             self.add_control_button("Splitear", "payout", discord.ButtonStyle.primary, 0, False, "💰")
             self.add_control_button("Liquidación rápida", "quick_liquidation", discord.ButtonStyle.danger, 0, False, "⚡")
+            self.add_control_button("Eliminar", "delete", discord.ButtonStyle.danger, 1, False)
         elif status == ACTIVITY_PAYOUT_CREATED:
             self.add_control_button("Ver asistencia", "verify", discord.ButtonStyle.secondary, 0, False, "🔍")
             self.add_control_button("Liquidación rápida", "quick_liquidation", discord.ButtonStyle.danger, 0, False, "⚡")
+            self.add_control_button("Eliminar", "delete", discord.ButtonStyle.danger, 1, False)
 
     def add_control_button(
         self,
@@ -1784,6 +1913,58 @@ class ActivityView(discord.ui.View):
         _, _, action, activity_id = custom_id.split(":")
         await self.cog.handle_activity_action(interaction, action, int(activity_id))
 
+
+class PingPreviewView(discord.ui.View):
+    def __init__(self, cog: "Activities", activity_id: int, author_id: int):
+        super().__init__(timeout=900)
+        self.cog = cog
+        self.activity_id = activity_id
+        self.author_id = author_id
+        activity = cog.get_activity(activity_id)
+        guild = cog.bot.get_guild(int(activity["guild_id"])) if activity is not None else None
+        if activity is not None and is_mandatory_activity(activity):
+            for label in ("Participar", "Salir", "Ver participantes"):
+                self.add_item(discord.ui.Button(label=label, style=discord.ButtonStyle.secondary, row=0, disabled=True))
+        else:
+            roles = cog.get_activity_roles(activity_id)
+            for index, row in enumerate(roles[:15]):
+                slots = int(row["slots"])
+                role_name = str(row["name"])
+                counter = f" [0/{slots}]"
+                button = discord.ui.Button(
+                    label=f"{role_name[:80 - len(counter)]}{counter}",
+                    style=discord.ButtonStyle.secondary,
+                    row=index // 5,
+                    disabled=True,
+                )
+                emoji = str(resolve_custom_emojis(row["emoji"], guild) or row["emoji"] or "").strip()
+                if emoji and not is_custom_emoji_placeholder(emoji):
+                    try:
+                        button.emoji = discord.PartialEmoji.from_str(emoji)
+                    except ValueError:
+                        pass
+                self.add_item(button)
+            if not roles:
+                self.add_item(discord.ui.Button(label="Sin composicion", style=discord.ButtonStyle.secondary, row=0, disabled=True))
+        self.add_action_button("Publicar ping", "publish", discord.ButtonStyle.success)
+        self.add_action_button("Editar ping", "edit", discord.ButtonStyle.primary)
+        self.add_action_button("Cancelar creacion", "cancel", discord.ButtonStyle.danger)
+
+    def add_action_button(self, label: str, action: str, style: discord.ButtonStyle) -> None:
+        button = discord.ui.Button(label=label, style=style, row=4)
+        button.callback = self._action_callback(action)
+        self.add_item(button)
+
+    def _action_callback(self, action: str):
+        async def callback(interaction: discord.Interaction) -> None:
+            if action == "publish":
+                await self.cog.publish_activity_draft(interaction, self.activity_id, self.author_id)
+            elif action == "edit":
+                await self.cog.prompt_edit_activity_draft(interaction, self.activity_id, self.author_id)
+            else:
+                await self.cog.cancel_activity_draft(interaction, self.activity_id, self.author_id)
+
+        return callback
 
 class ActivityEditMenuView(discord.ui.View):
     def __init__(self, cog: "Activities", activity_id: int):
@@ -2262,6 +2443,114 @@ class Activities(commands.Cog):
         )
         embed.set_image(url=PINGS_PANEL_IMAGE)
         return embed
+
+    def can_author_choose_ping_channel(self, guild_id: int, user_id: int) -> bool:
+        row = self.db.fetch_one(
+            "SELECT 1 FROM callers WHERE guild_id = ? AND user_id = ?",
+            (guild_id, user_id),
+        )
+        return row is not None and not is_caller_penalized(self.db, guild_id, user_id)
+
+    def can_choose_ping_publication_channel(self, interaction: discord.Interaction) -> bool:
+        return interaction.guild is not None and is_official_caller_subject(self.db, interaction)
+
+    def approved_ping_channel_ids(self, guild_id: int) -> set[int]:
+        return split_csv_ids(self.db.get_setting(guild_id, APPROVED_PING_CHANNELS_SETTING_KEY))
+
+    def approved_ping_channel_options(
+        self,
+        guild: discord.Guild,
+        *,
+        selected_channel_id: int | None = None,
+    ) -> list[discord.SelectOption]:
+        options: list[discord.SelectOption] = []
+        for channel_id in sorted(self.approved_ping_channel_ids(guild.id)):
+            channel = guild.get_channel(channel_id)
+            if channel is None or not callable(getattr(channel, "send", None)):
+                continue
+            options.append(
+                discord.SelectOption(
+                    label=f"#{channel.name}"[:100],
+                    value=str(channel_id),
+                    description=f"Canal aprobado ID {channel_id}"[:100],
+                    default=selected_channel_id == channel_id,
+                )
+            )
+            if len(options) >= 25:
+                break
+        return options
+
+    def ping_publication_channel_text(
+        self,
+        guild: discord.Guild,
+        selected_channel_id: int | None = None,
+    ) -> str:
+        if selected_channel_id is not None:
+            return f"<#{selected_channel_id}>"
+        default_id = self.db.get_setting(guild.id, "channel_pings_id")
+        if default_id and str(default_id).isdigit():
+            return f"<#{default_id}> (predeterminado)"
+        return "canal predeterminado sin configurar"
+
+    def resolve_ping_publication_channel(
+        self,
+        interaction: discord.Interaction,
+        selected_channel_id: int | None,
+    ):
+        if interaction.guild is None:
+            raise ValueError("Esta accion solo esta disponible en un servidor.")
+        channel_id: int | None = None
+        if selected_channel_id is not None and self.can_choose_ping_publication_channel(interaction):
+            if selected_channel_id not in self.approved_ping_channel_ids(interaction.guild.id):
+                raise ValueError("Ese canal ya no esta aprobado para publicar pings.")
+            channel_id = selected_channel_id
+        else:
+            channel_id_raw = self.db.get_setting(interaction.guild.id, "channel_pings_id")
+            if not channel_id_raw:
+                raise ValueError("No hay canal configurado para publicaciones de pings.")
+            channel_id = int(channel_id_raw)
+        channel = interaction.guild.get_channel(channel_id)
+        if channel is None or not callable(getattr(channel, "send", None)):
+            raise ValueError("El canal de pings configurado ya no existe o no permite publicar.")
+        return channel
+
+    async def prompt_activity_creation(
+        self,
+        interaction: discord.Interaction,
+        *,
+        template_id: int | None,
+        default_name: str = "",
+        default_time: str = "",
+        default_notes: str = "",
+        default_voice_channel_id: int | None = None,
+    ) -> None:
+        if (
+            interaction.guild is not None
+            and self.can_choose_ping_publication_channel(interaction)
+            and self.approved_ping_channel_options(interaction.guild)
+        ):
+            view = ActivityCreationChannelView(
+                self,
+                author_id=interaction.user.id,
+                guild=interaction.guild,
+                template_id=template_id,
+                default_name=default_name,
+                default_time=default_time,
+                default_notes=default_notes,
+                default_voice_channel_id=default_voice_channel_id,
+            )
+            await private_response(interaction, view.text(interaction.guild), view=view)
+            return
+        await interaction.response.send_modal(
+            ActivityModal(
+                self,
+                template_id=template_id,
+                default_name=default_name,
+                default_time=default_time,
+                default_notes=default_notes,
+                default_voice_channel_id=default_voice_channel_id,
+            )
+        )
 
     def can_create_mandatory_ping(self, interaction: discord.Interaction) -> bool:
         if interaction.guild is None:
@@ -2849,7 +3138,58 @@ class Activities(commands.Cog):
             f"**Descripcion:** {description}\n\n{preview}",
         )
 
-    async def publish_mandatory_activity_from_modal(
+    def activity_roles_input_text(self, activity_id: int) -> str:
+        return "\n".join(
+            f"{row['emoji'] or ''} | {row['name']} | {row['slots']}".strip()
+            for row in self.get_activity_roles(activity_id)
+        )
+
+    async def send_ping_preview(
+        self,
+        interaction: discord.Interaction,
+        activity_id: int,
+    ) -> None:
+        activity = self.get_activity(activity_id)
+        if activity is None:
+            await private_response(interaction, "No pude generar la vista previa del ping.")
+            return
+        guild = interaction.guild or self.bot.get_guild(int(activity["guild_id"]))
+        channel_text = f"<#{activity['channel_id']}>" if activity["channel_id"] else "sin canal"
+        content = (
+            "**Vista previa privada del ping**\n"
+            f"Se publicara en: {channel_text}\n"
+            "Revisa el mensaje. Si todo esta bien, pulsa **Publicar ping**."
+        )
+        await private_response(
+            interaction,
+            content,
+            embeds=self.build_activity_embeds(activity_id, preview_status=ACTIVITY_OPEN),
+            view=PingPreviewView(self, activity_id, int(activity["caller_id"])),
+        )
+
+    def draft_activity_for_user(
+        self,
+        interaction: discord.Interaction,
+        activity_id: int,
+        author_id: int,
+    ):
+        if interaction.guild is None:
+            return None, "Esta accion solo esta disponible en un servidor."
+        activity = self.get_guild_activity(interaction.guild.id, activity_id)
+        if activity is None:
+            return None, "No encontre este borrador en el servidor."
+        if int(activity["caller_id"]) != author_id or interaction.user.id != author_id:
+            return None, "Solo quien creo este borrador puede usar esta vista previa."
+        if activity["status"] != ACTIVITY_DRAFT:
+            return None, "Este borrador ya fue publicado, eliminado o cancelado."
+        if is_mandatory_activity(activity):
+            if not self.can_create_mandatory_ping(interaction):
+                return None, "Ya no tienes permiso para publicar este Ping Mandatory."
+        elif not is_caller_panel_subject(self.db, interaction):
+            return None, "Ya no tienes permiso para publicar pings."
+        return activity, None
+
+    async def save_mandatory_draft_from_modal(
         self,
         interaction: discord.Interaction,
         modal: MandatoryActivityModal,
@@ -2857,13 +3197,10 @@ class Activities(commands.Cog):
         if not interaction.guild or not self.can_create_mandatory_ping(interaction):
             await private_response(interaction, "Solo callers oficiales o admins pueden crear Ping Mandatory.")
             return
-        channel_id_raw = self.db.get_setting(interaction.guild.id, "channel_pings_id")
-        if not channel_id_raw:
-            await private_response(interaction, "No hay canal configurado para publicaciones de pings.")
-            return
-        channel = interaction.guild.get_channel(int(channel_id_raw))
-        if channel is None:
-            await private_response(interaction, "El canal de pings configurado ya no existe.")
+        try:
+            channel = self.resolve_ping_publication_channel(interaction, modal.publish_channel_id)
+        except ValueError as exc:
+            await private_response(interaction, str(exc))
             return
         voice_channel = resolve_voice_channel(interaction.guild, str(modal.voice_channel.value))
         if voice_channel is None:
@@ -2878,58 +3215,59 @@ class Activities(commands.Cog):
                 return
         description = resolve_template_text(str(modal.description.value), interaction.guild)
         horario = resolve_template_text(str(modal.horario.value), interaction.guild)
-        code = self.db.next_code(interaction.guild.id, "MAND")
-        activity_id = self.db.execute(
-            """
-            INSERT INTO activities (
-                code, guild_id, template_id, name, caller_id, horario,
-                voice_channel_id, notes, status, created_at, activity_type, image_url
+        draft_id = modal.draft_id
+        if draft_id is not None:
+            current, error = self.draft_activity_for_user(interaction, int(draft_id), interaction.user.id)
+            if current is None:
+                await private_response(interaction, error or "No encontre este borrador.")
+                return
+            self.db.execute(
+                """
+                UPDATE activities
+                SET horario = ?, voice_channel_id = ?, notes = ?, channel_id = ?, image_url = ?
+                WHERE guild_id = ? AND id = ?
+                """,
+                (
+                    horario,
+                    voice_channel.id,
+                    description,
+                    channel.id,
+                    image_url or None,
+                    interaction.guild.id,
+                    int(draft_id),
+                ),
             )
-            VALUES (?, ?, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            (
-                code,
-                interaction.guild.id,
-                "Ping Mandatory",
-                interaction.user.id,
-                horario,
-                voice_channel.id,
-                description,
-                ACTIVITY_OPEN,
-                utc_now_iso(),
-                ACTIVITY_TYPE_MANDATORY,
-                image_url or None,
-            ),
-        )
+            activity_id = int(draft_id)
+        else:
+            code = self.db.next_code(interaction.guild.id, "MAND")
+            activity_id = self.db.execute(
+                """
+                INSERT INTO activities (
+                    code, guild_id, template_id, name, caller_id, horario,
+                    voice_channel_id, notes, status, channel_id, created_at,
+                    activity_type, image_url
+                )
+                VALUES (?, ?, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    code,
+                    interaction.guild.id,
+                    "Ping Mandatory",
+                    interaction.user.id,
+                    horario,
+                    voice_channel.id,
+                    description,
+                    ACTIVITY_DRAFT,
+                    channel.id,
+                    utc_now_iso(),
+                    ACTIVITY_TYPE_MANDATORY,
+                    image_url or None,
+                ),
+            )
         self.ensure_mandatory_participant_role(activity_id)
-        message = await channel.send(
-            embeds=self.build_activity_embeds(activity_id),
-            view=ActivityView(self, activity_id),
-        )
-        self.db.execute(
-            "UPDATE activities SET channel_id = ?, message_id = ? WHERE id = ?",
-            (channel.id, message.id, activity_id),
-        )
-        self.bot.add_view(ActivityView(self, activity_id))
-        log_action(
-            self.db,
-            interaction.guild.id,
-            admin_id=interaction.user.id,
-            action="Crear Ping Mandatory",
-            system="Actividades",
-            observation=code,
-        )
-        await send_admin_notification(
-            self.db,
-            guild=interaction.guild,
-            category="activities",
-            content=(
-                f"Ping Mandatory `{code}` creado por <@{interaction.user.id}> "
-                f"para <#{voice_channel.id}>."
-            ),
-        )
-        await private_response(interaction, f"Ping Mandatory creado: `{code}`.")
-    async def publish_activity_from_modal(
+        await self.send_ping_preview(interaction, activity_id)
+
+    async def save_activity_draft_from_modal(
         self,
         interaction: discord.Interaction,
         modal: ActivityModal,
@@ -2937,23 +3275,15 @@ class Activities(commands.Cog):
         if not interaction.guild or not is_caller_panel_subject(self.db, interaction):
             await private_response(interaction, "No tienes permiso para crear pings.")
             return
-        channel_id_raw = self.db.get_setting(interaction.guild.id, "channel_pings_id")
-        if not channel_id_raw:
-            await private_response(interaction, "No hay canal configurado para publicaciones de pings.")
+        try:
+            channel = self.resolve_ping_publication_channel(interaction, modal.publish_channel_id)
+        except ValueError as exc:
+            await private_response(interaction, str(exc))
             return
-        channel = interaction.guild.get_channel(int(channel_id_raw))
-        if channel is None:
-            await private_response(interaction, "El canal de pings configurado ya no existe.")
-            return
-
         try:
             if modal.template_id is None:
                 roles = parse_role_lines(str(modal.roles.value))
-            else:
-                template_roles = self.db.fetch_all(
-                    "SELECT * FROM template_roles WHERE template_id = ? ORDER BY position ASC",
-                    (modal.template_id,),
-                )
+            elif modal.draft_id is not None:
                 roles = [
                     {
                         "key": row["key"],
@@ -2962,7 +3292,24 @@ class Activities(commands.Cog):
                         "emoji": row["emoji"] or "",
                         "position": int(row["position"]),
                     }
-                    for row in template_roles
+                    for row in self.db.fetch_all(
+                        "SELECT * FROM activity_roles WHERE activity_id = ? ORDER BY position ASC",
+                        (int(modal.draft_id),),
+                    )
+                ]
+            else:
+                roles = [
+                    {
+                        "key": row["key"],
+                        "name": row["name"],
+                        "slots": int(row["slots"]),
+                        "emoji": row["emoji"] or "",
+                        "position": int(row["position"]),
+                    }
+                    for row in self.db.fetch_all(
+                        "SELECT * FROM template_roles WHERE template_id = ? ORDER BY position ASC",
+                        (modal.template_id,),
+                    )
                 ]
         except ValueError as exc:
             await private_response(interaction, str(exc))
@@ -2971,76 +3318,238 @@ class Activities(commands.Cog):
         activity_name = resolve_template_text(str(modal.activity_name.value), interaction.guild)
         horario = resolve_template_text(str(modal.horario.value), interaction.guild)
         notes = resolve_template_text(str(modal.notes.value), interaction.guild)
-
         voice_channel = resolve_voice_channel(interaction.guild, str(modal.voice_channel.value))
         if voice_channel is None:
             await private_response(interaction, VOICE_CHANNEL_ERROR)
             return
-        voice_channel_id = voice_channel.id
-        code = self.db.next_code(interaction.guild.id, "ACT")
-        activity_id = self.db.execute(
-            """
-            INSERT INTO activities (
-                code, guild_id, template_id, name, caller_id, horario,
-                voice_channel_id, notes, status, created_at
-            )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            (
-                code,
-                interaction.guild.id,
-                modal.template_id,
-                activity_name,
-                interaction.user.id,
-                horario,
-                voice_channel_id,
-                notes,
-                ACTIVITY_OPEN,
-                utc_now_iso(),
-            ),
-        )
-        for role in roles:
-            self.db.execute(
-                """
-                INSERT INTO activity_roles (activity_id, key, name, slots, emoji, position)
-                VALUES (?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    activity_id,
-                    role["key"],
-                    role["name"],
-                    role["slots"],
-                    role["emoji"],
-                    role["position"],
-                ),
-            )
+        if modal.draft_id is not None:
+            current, error = self.draft_activity_for_user(interaction, int(modal.draft_id), interaction.user.id)
+            if current is None:
+                await private_response(interaction, error or "No encontre este borrador.")
+                return
+            activity_id = int(modal.draft_id)
+            with self.db.transaction() as cursor:
+                cursor.execute(
+                    """
+                    UPDATE activities
+                    SET template_id = ?, name = ?, horario = ?, voice_channel_id = ?,
+                        notes = ?, channel_id = ?
+                    WHERE guild_id = ? AND id = ?
+                    """,
+                    (
+                        modal.template_id,
+                        activity_name,
+                        horario,
+                        voice_channel.id,
+                        notes,
+                        channel.id,
+                        interaction.guild.id,
+                        activity_id,
+                    ),
+                )
+                cursor.execute("DELETE FROM activity_roles WHERE activity_id = ?", (activity_id,))
+                for role in roles:
+                    cursor.execute(
+                        """
+                        INSERT INTO activity_roles (activity_id, key, name, slots, emoji, position)
+                        VALUES (?, ?, ?, ?, ?, ?)
+                        """,
+                        (activity_id, role["key"], role["name"], role["slots"], role["emoji"], role["position"]),
+                    )
+        else:
+            code = self.db.next_code(interaction.guild.id, "ACT")
+            with self.db.transaction() as cursor:
+                cursor.execute(
+                    """
+                    INSERT INTO activities (
+                        code, guild_id, template_id, name, caller_id, horario,
+                        voice_channel_id, notes, status, channel_id, created_at
+                    )
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        code,
+                        interaction.guild.id,
+                        modal.template_id,
+                        activity_name,
+                        interaction.user.id,
+                        horario,
+                        voice_channel.id,
+                        notes,
+                        ACTIVITY_DRAFT,
+                        channel.id,
+                        utc_now_iso(),
+                    ),
+                )
+                activity_id = int(cursor.lastrowid)
+                for role in roles:
+                    cursor.execute(
+                        """
+                        INSERT INTO activity_roles (activity_id, key, name, slots, emoji, position)
+                        VALUES (?, ?, ?, ?, ?, ?)
+                        """,
+                        (activity_id, role["key"], role["name"], role["slots"], role["emoji"], role["position"]),
+                    )
+        await self.send_ping_preview(interaction, activity_id)
 
-        embeds = self.build_activity_embeds(activity_id)
-        view = ActivityView(self, activity_id)
-        message = await channel.send(embeds=embeds, view=view)
-        self.db.execute(
-            "UPDATE activities SET channel_id = ?, message_id = ? WHERE id = ?",
-            (channel.id, message.id, activity_id),
+    async def prompt_edit_activity_draft(
+        self,
+        interaction: discord.Interaction,
+        activity_id: int,
+        author_id: int,
+    ) -> None:
+        activity, error = self.draft_activity_for_user(interaction, activity_id, author_id)
+        if activity is None:
+            await private_response(interaction, error or "No encontre este borrador.")
+            return
+        stored_channel_id = int(activity["channel_id"]) if activity["channel_id"] else None
+        selected_channel_id = (
+            stored_channel_id
+            if stored_channel_id is not None
+            and self.can_author_choose_ping_channel(interaction.guild.id, interaction.user.id)
+            and stored_channel_id in self.approved_ping_channel_ids(interaction.guild.id)
+            else None
         )
+        if is_mandatory_activity(activity):
+            await interaction.response.send_modal(
+                MandatoryActivityModal(
+                    self,
+                    default_voice_channel_id=activity["voice_channel_id"],
+                    default_horario=str(activity["horario"] or ""),
+                    default_description=str(activity["notes"] or ""),
+                    default_image_url=str(activity["image_url"] or ""),
+                publish_channel_id=selected_channel_id,
+                    draft_id=activity_id,
+                )
+            )
+            return
+        await interaction.response.send_modal(
+            ActivityModal(
+                self,
+                template_id=activity["template_id"],
+                default_name=str(activity["name"] or ""),
+                default_time=str(activity["horario"] or ""),
+                default_notes=str(activity["notes"] or ""),
+                default_voice_channel_id=activity["voice_channel_id"],
+                publish_channel_id=selected_channel_id,
+                draft_id=activity_id,
+                default_roles=self.activity_roles_input_text(activity_id),
+            )
+        )
+
+    async def cancel_activity_draft(
+        self,
+        interaction: discord.Interaction,
+        activity_id: int,
+        author_id: int,
+    ) -> None:
+        activity, error = self.draft_activity_for_user(interaction, activity_id, author_id)
+        if activity is None:
+            await private_response(interaction, error or "No encontre este borrador.")
+            return
+        self.db.execute(
+            """
+            UPDATE activities
+            SET status = ?, deleted_by = ?, deleted_at = ?
+            WHERE guild_id = ? AND id = ?
+            """,
+            (ACTIVITY_DELETED, interaction.user.id, utc_now_iso(), interaction.guild.id, activity_id),
+        )
+        await interaction.response.edit_message(content="Creacion de ping cancelada. No se publico nada.", embeds=[], view=None)
+
+    async def publish_activity_draft(
+        self,
+        interaction: discord.Interaction,
+        activity_id: int,
+        author_id: int,
+    ) -> None:
+        activity, error = self.draft_activity_for_user(interaction, activity_id, author_id)
+        if activity is None:
+            await private_response(interaction, error or "No encontre este borrador.")
+            return
+        channel = interaction.guild.get_channel(int(activity["channel_id"])) if activity["channel_id"] else None
+        if channel is None or not callable(getattr(channel, "send", None)):
+            await private_response(interaction, "El canal elegido ya no existe o no permite publicar.")
+            return
+        await interaction.response.defer(ephemeral=True)
+        self.db.execute(
+            "UPDATE activities SET status = ? WHERE guild_id = ? AND id = ?",
+            (ACTIVITY_OPEN, interaction.guild.id, activity_id),
+        )
+        try:
+            message = await channel.send(
+                embeds=self.build_activity_embeds(activity_id),
+                view=ActivityView(self, activity_id),
+            )
+        except discord.HTTPException as exc:
+            self.db.execute(
+                "UPDATE activities SET status = ? WHERE guild_id = ? AND id = ?",
+                (ACTIVITY_DRAFT, interaction.guild.id, activity_id),
+            )
+            await interaction.followup.send(f"No pude publicar el ping: {exc}", ephemeral=True)
+            return
+        self.db.execute(
+            "UPDATE activities SET message_id = ?, channel_id = ? WHERE id = ?",
+            (message.id, channel.id, activity_id),
+        )
+        await self.create_ping_thread(message, activity)
         self.bot.add_view(ActivityView(self, activity_id))
+        action = "Crear Ping Mandatory" if is_mandatory_activity(activity) else "Crear Ping"
         log_action(
             self.db,
             interaction.guild.id,
             admin_id=interaction.user.id,
-            action="Crear Ping",
+            action=action,
             system="Actividades",
-            observation=code,
+            observation=str(activity["code"]),
         )
-        await send_admin_notification(
-            self.db,
-            guild=interaction.guild,
-            category="activities",
-            content=(
-                f"📍 Ping `{code}` creado por <@{interaction.user.id}>: "
-                f"**{activity_name}** en <#{channel.id}>."
-            ),
+        if is_mandatory_activity(activity):
+            await send_admin_notification(
+                self.db,
+                guild=interaction.guild,
+                category="activities",
+                content=(
+                    f"Ping Mandatory `{activity['code']}` creado por <@{interaction.user.id}> "
+                    f"para <#{activity['voice_channel_id']}> en <#{channel.id}>."
+                ),
+            )
+        else:
+            await send_admin_notification(
+                self.db,
+                guild=interaction.guild,
+                category="activities",
+                content=(
+                    f"📍 Ping `{activity['code']}` creado por <@{interaction.user.id}>: "
+                    f"**{activity['name']}** en <#{channel.id}>."
+                ),
+            )
+        await interaction.edit_original_response(
+            content=f"Ping publicado en <#{channel.id}>: `{activity['code']}`.",
+            embeds=[],
+            view=None,
         )
-        await private_response(interaction, f"Ping creado: `{code}`.")
+
+    async def create_ping_thread(self, message: discord.Message, activity) -> None:
+        activity_code = str(activity["code"])
+        try:
+            thread = await message.create_thread(name=f"Ping {activity_code}")
+            await thread.send(PING_THREAD_MESSAGE)
+        except discord.HTTPException:
+            LOGGER.exception("No pude crear el hilo automatico para el ping %s.", activity_code)
+
+    async def publish_mandatory_activity_from_modal(
+        self,
+        interaction: discord.Interaction,
+        modal: MandatoryActivityModal,
+    ) -> None:
+        await self.save_mandatory_draft_from_modal(interaction, modal)
+
+    async def publish_activity_from_modal(
+        self,
+        interaction: discord.Interaction,
+        modal: ActivityModal,
+    ) -> None:
+        await self.save_activity_draft_from_modal(interaction, modal)
 
     def get_editable_template(self, interaction: discord.Interaction, template_id: int):
         if interaction.guild is None:
@@ -3083,7 +3592,7 @@ class Activities(commands.Cog):
         embed.add_field(name="🆔 ID", value=str(template["id"]), inline=True)
         embed.add_field(name="📌 Plantilla", value=str(template["name"]), inline=True)
         embed.add_field(name="⚔️ Actividad", value=str(template["activity_name"]), inline=True)
-        embed.add_field(name="🕒 Hora", value=str(template["default_time"]), inline=True)
+        embed.add_field(name="\U0001F552 Hora Albion", value=str(template["default_time"]), inline=True)
         embed.add_field(name="🔊 Voz", value=voice_text, inline=True)
         embed.add_field(name="👥 Cupo máximo", value=str(total_slots), inline=True)
         embed.add_field(name="🌐 Visibilidad", value=visibility, inline=True)
@@ -3386,11 +3895,11 @@ class Activities(commands.Cog):
             return
         await self.set_template_image_url(interaction, int(template_id), image_url)
 
-    def build_mandatory_activity_embeds(self, activity_id: int) -> list[discord.Embed]:
+    def build_mandatory_activity_embeds(self, activity_id: int, *, preview_status: str | None = None) -> list[discord.Embed]:
         activity = self.get_activity(activity_id)
         participants = self.get_activity_participants(activity_id)
         voice_text = f"<#{activity['voice_channel_id']}>" if activity["voice_channel_id"] else "Sin canal"
-        status = activity_status_label(str(activity["status"]))
+        status = activity_status_label(str(preview_status or activity["status"]))
         status_icon, _, status_name = status.partition(" ")
         status_name = status_name or status
         notes = str(activity["notes"] or "Sin descripcion.").strip()
@@ -3410,7 +3919,7 @@ class Activities(commands.Cog):
         )
         embed.add_field(name="\U0001F464 CALLER", value=f"<@{activity['caller_id']}>", inline=True)
         embed.add_field(name="\U0001F50A CANAL", value=voice_text, inline=True)
-        embed.add_field(name="\U0001F552 HORARIO", value=str(activity["horario"]), inline=True)
+        embed.add_field(name="\U0001F552 Hora Albion", value=str(activity["horario"]), inline=True)
         embed.add_field(name=f"{status_icon} ESTADO", value=status_name, inline=True)
         embed.add_field(name="\U0001F194 ID", value=str(activity["code"]), inline=True)
         embed.add_field(name="\U0001F4B0 BOTIN", value=loot_text, inline=True)
@@ -3422,10 +3931,10 @@ class Activities(commands.Cog):
             embed.set_image(url=image_url)
         return [resolve_custom_emojis_in_embed(embed, guild) or embed]
 
-    def build_activity_embeds(self, activity_id: int) -> list[discord.Embed]:
+    def build_activity_embeds(self, activity_id: int, *, preview_status: str | None = None) -> list[discord.Embed]:
         activity = self.get_activity(activity_id)
         if is_mandatory_activity(activity):
-            return self.build_mandatory_activity_embeds(activity_id)
+            return self.build_mandatory_activity_embeds(activity_id, preview_status=preview_status)
         roles = self.get_activity_roles(activity_id)
         participants = self.get_activity_participants(activity_id)
         by_role: dict[int, list[str]] = defaultdict(list)
@@ -3441,7 +3950,7 @@ class Activities(commands.Cog):
         required_count = sum(max(0, int(role["slots"])) for role in roles)
         activity_name = " ".join(str(activity["name"]).split()).upper()
         notes = " ".join(str(activity["notes"] or "").split())
-        status = activity_status_label(str(activity["status"]))
+        status = activity_status_label(str(preview_status or activity["status"]))
         status_icon, _, status_name = status.partition(" ")
         status_name = status_name or status
         image_url = self.get_template_image_url(activity)
@@ -3477,7 +3986,7 @@ class Activities(commands.Cog):
             color=ACTIVITY_EMBED_COLOR,
         )
         embed.add_field(name="👤 Caller", value=f"<@{activity['caller_id']}>", inline=True)
-        embed.add_field(name="🕒 Hora", value=str(activity["horario"]), inline=True)
+        embed.add_field(name="\U0001F552 Hora Albion", value=str(activity["horario"]), inline=True)
         embed.add_field(name=f"{status_icon} Estado", value=status_name, inline=True)
         embed.add_field(name="🔊 Voz", value=voice_text, inline=True)
         embed.add_field(name="👥 Participantes", value=f"{registered_count}/{required_count}", inline=True)
@@ -4281,6 +4790,92 @@ class Activities(commands.Cog):
     def build_payout_modal(self, activity_id: int) -> PayoutModal:
         return PayoutModal(self, activity_id)
 
+    def can_delete_activity_ping(self, interaction: discord.Interaction, activity) -> bool:
+        if is_admin_subject(self.db, interaction):
+            return True
+        return (
+            interaction.user.id == int(activity["caller_id"])
+            and is_official_caller_subject(self.db, interaction)
+        )
+
+    async def delete_activity_ping(self, interaction: discord.Interaction, activity_id: int) -> None:
+        if interaction.guild is None:
+            await private_response(interaction, "Esta accion solo esta disponible en un servidor.")
+            return
+        activity = self.get_guild_activity(interaction.guild.id, activity_id)
+        if activity is None:
+            await private_response(interaction, "No encontre esta actividad en este servidor.")
+            return
+        if activity["status"] == ACTIVITY_DELETED:
+            await private_response(interaction, "Este ping ya fue eliminado.")
+            return
+        if not self.can_delete_activity_ping(interaction, activity):
+            await private_response(interaction, "Solo el caller oficial creador o un admin puede eliminar este ping.")
+            return
+        await interaction.response.defer(ephemeral=True)
+        deleted_at = utc_now_iso()
+        if activity["status"] == ACTIVITY_IN_PROGRESS:
+            tracked_users = {
+                int(row["user_id"]) for row in self.get_activity_participants(activity_id)
+            }
+            if not is_mandatory_activity(activity):
+                tracked_users.add(int(activity["caller_id"]))
+            for user_id in tracked_users:
+                self.close_voice_session(activity_id, interaction.guild.id, user_id, deleted_at)
+        message_deleted = False
+        if activity["channel_id"] and activity["message_id"]:
+            channel = interaction.guild.get_channel(int(activity["channel_id"]))
+            if channel is not None and hasattr(channel, "fetch_message"):
+                try:
+                    message = await channel.fetch_message(int(activity["message_id"]))
+                    await message.delete()
+                    message_deleted = True
+                except discord.NotFound:
+                    message_deleted = True
+                except discord.Forbidden:
+                    await interaction.followup.send(
+                        "No pude eliminar el mensaje: me falta permiso en ese canal.",
+                        ephemeral=True,
+                    )
+                    return
+                except discord.HTTPException as exc:
+                    await interaction.followup.send(
+                        f"No pude eliminar el mensaje: {exc}",
+                        ephemeral=True,
+                    )
+                    return
+            else:
+                message_deleted = True
+        else:
+            message_deleted = True
+        if not message_deleted:
+            await interaction.followup.send("No pude confirmar la eliminacion del mensaje.", ephemeral=True)
+            return
+        self.db.execute(
+            """
+            UPDATE activities
+            SET status = ?, deleted_by = ?, deleted_at = ?, message_id = NULL,
+                ended_at = COALESCE(ended_at, ?)
+            WHERE guild_id = ? AND id = ?
+            """,
+            (ACTIVITY_DELETED, interaction.user.id, deleted_at, deleted_at, interaction.guild.id, activity_id),
+        )
+        log_action(
+            self.db,
+            interaction.guild.id,
+            admin_id=interaction.user.id,
+            action="Eliminar ping publicado",
+            system="Actividades",
+            affected_user_id=int(activity["caller_id"]),
+            observation=str(activity["code"]),
+        )
+        await send_admin_notification(
+            self.db,
+            guild=interaction.guild,
+            category="activities",
+            content=f"Ping `{activity['code']}` eliminado por <@{interaction.user.id}>.",
+        )
+        await interaction.followup.send("Ping eliminado del canal y marcado como eliminado.", ephemeral=True)
     async def handle_activity_action(
         self,
         interaction: discord.Interaction,
@@ -4293,6 +4888,12 @@ class Activities(commands.Cog):
         activity = self.get_guild_activity(interaction.guild.id, activity_id)
         if not activity:
             await private_response(interaction, "No encontre esta actividad en este servidor.")
+            return
+        if action == "delete":
+            await self.delete_activity_ping(interaction, activity_id)
+            return
+        if activity["status"] == ACTIVITY_DELETED:
+            await private_response(interaction, "Este ping fue eliminado y ya no acepta acciones.")
             return
         if action == "mandatory_join":
             await self.join_mandatory_activity(interaction, activity_id)

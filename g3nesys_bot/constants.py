@@ -36,6 +36,7 @@ ACTIVITY_OPEN = "Abierta"
 ACTIVITY_NOTICE = "En aviso"
 ACTIVITY_IN_PROGRESS = "En curso"
 ACTIVITY_CANCELLED = "Cancelada"
+ACTIVITY_DELETED = "Eliminada"
 ACTIVITY_FINISHED = "Finalizada"
 ACTIVITY_PAYOUT_CREATED = "Reparto generado"
 
@@ -45,6 +46,7 @@ ACTIVITY_STATUSES = {
     ACTIVITY_NOTICE,
     ACTIVITY_IN_PROGRESS,
     ACTIVITY_CANCELLED,
+    ACTIVITY_DELETED,
     ACTIVITY_FINISHED,
     ACTIVITY_PAYOUT_CREATED,
 }
@@ -78,6 +80,7 @@ DEFAULT_GUEST_ROLE_NAME = "INVITADO"
 
 DEFAULT_SETTINGS = {
     "channel_pings_id": "",
+    "approved_ping_channel_ids": "",
     "channel_admin_id": "",
     "channel_cobros_id": "",
     "channel_multas_id": "",
