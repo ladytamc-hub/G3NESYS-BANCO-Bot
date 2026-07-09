@@ -16,6 +16,12 @@ ADMIN_ROLE_NAMES = {
     "admin g3nesys",
     "administrador g3nesys",
 }
+CALLER_PANEL_ROLE_SETTING_KEY = "caller_panel_role_ids"
+CALLER_PANEL_ROLE_NAMES = {
+    "pcall",
+    "p call",
+    "p-call",
+}
 
 
 def _member_from_subject(subject: commands.Context | discord.Interaction) -> discord.Member | None:
@@ -44,6 +50,10 @@ def has_named_admin_role(member: discord.Member) -> bool:
     return any(role.name.strip().casefold() in ADMIN_ROLE_NAMES for role in member.roles)
 
 
+def has_named_caller_panel_role(member: discord.Member) -> bool:
+    return any(role.name.strip().casefold() in CALLER_PANEL_ROLE_NAMES for role in member.roles)
+
+
 def is_admin_subject(db: Database, subject: commands.Context | discord.Interaction) -> bool:
     guild = _guild_from_subject(subject)
     member = _member_from_subject(subject)
@@ -63,18 +73,37 @@ def is_admin_subject(db: Database, subject: commands.Context | discord.Interacti
     return not split_csv_ids(configured_roles) and has_named_admin_role(member)
 
 
-def is_caller_subject(db: Database, subject: commands.Context | discord.Interaction) -> bool:
+def is_official_caller_subject(db: Database, subject: commands.Context | discord.Interaction) -> bool:
+    guild = _guild_from_subject(subject)
+    member = _member_from_subject(subject)
+    if guild is None or member is None:
+        return False
+    row = db.fetch_one(
+        "SELECT 1 FROM callers WHERE guild_id = ? AND user_id = ?",
+        (guild.id, member.id),
+    )
+    return row is not None and not is_caller_penalized(db, guild.id, member.id)
+
+
+def has_caller_panel_role(db: Database, guild: discord.Guild, member: discord.Member) -> bool:
+    configured_roles = db.get_setting(guild.id, CALLER_PANEL_ROLE_SETTING_KEY)
+    return has_any_configured_role(member, configured_roles) or has_named_caller_panel_role(member)
+
+
+def is_caller_panel_subject(db: Database, subject: commands.Context | discord.Interaction) -> bool:
     guild = _guild_from_subject(subject)
     member = _member_from_subject(subject)
     if guild is None or member is None:
         return False
     if is_admin_subject(db, subject):
         return True
-    row = db.fetch_one(
-        "SELECT 1 FROM callers WHERE guild_id = ? AND user_id = ?",
-        (guild.id, member.id),
-    )
-    return row is not None and not is_caller_penalized(db, guild.id, member.id)
+    if is_caller_penalized(db, guild.id, member.id):
+        return False
+    return is_official_caller_subject(db, subject) or has_caller_panel_role(db, guild, member)
+
+
+def is_caller_subject(db: Database, subject: commands.Context | discord.Interaction) -> bool:
+    return is_caller_panel_subject(db, subject)
 
 
 def can_manage_activity(
@@ -87,7 +116,7 @@ def can_manage_activity(
         return False
     if is_admin_subject(db, subject):
         return True
-    return member.id == caller_id and is_caller_subject(db, subject)
+    return member.id == caller_id and is_caller_panel_subject(db, subject)
 
 
 def has_bank_access(db: Database, member: discord.Member) -> bool:
@@ -109,14 +138,17 @@ async def require_admin_context(ctx: commands.Context, db: Database) -> bool:
 
 
 async def require_caller_context(ctx: commands.Context, db: Database) -> bool:
-    if is_caller_subject(db, ctx):
+    if is_caller_panel_subject(db, ctx):
         return True
     if ctx.guild is not None and is_caller_penalized(db, ctx.guild.id, ctx.author.id):
         await ctx.reply(
-            "Tu acceso de caller esta suspendido por reputacion. "
+            "Tu acceso al Panel de Callers esta suspendido por reputacion. "
             "Un administrador debe retirar la penalizacion desde el Panel Administrativo.",
             mention_author=False,
         )
         return False
-    await ctx.reply("Solo callers autorizados o admins pueden hacer esto.", mention_author=False)
+    await ctx.reply(
+        "Solo admins, callers autorizados o usuarios con rol PCALL pueden hacer esto.",
+        mention_author=False,
+    )
     return False

@@ -6,6 +6,7 @@ from ..constants import (
     ACTIVITY_CANCELLED,
     ACTIVITY_FINISHED,
     ACTIVITY_PAYOUT_CREATED,
+    ACTIVITY_TYPE_MANDATORY,
     ATTENDANCE_ABSENT,
     ATTENDANCE_CONFIRMED,
     CALLERS_WELCOME_IMAGE,
@@ -312,6 +313,7 @@ def caller_ranking(db: Database, guild_id: int) -> list[dict]:
             FROM activities ac
             LEFT JOIN activity_roles ar ON ar.activity_id = ac.id
             WHERE ac.guild_id = ?
+              AND COALESCE(ac.activity_type, 'regular') != ?
             GROUP BY ac.id
         )
         SELECT
@@ -340,6 +342,7 @@ def caller_ranking(db: Database, guild_id: int) -> list[dict]:
                 WHERE attended.guild_id = c.guild_id
                   AND aa.usuario_id = c.user_id
                   AND aa.estado = ?
+                  AND COALESCE(attended.activity_type, 'regular') != ?
             ), 0) AS attendances,
             COALESCE((
                 SELECT COUNT(*)
@@ -348,6 +351,7 @@ def caller_ranking(db: Database, guild_id: int) -> list[dict]:
                 WHERE missed.guild_id = c.guild_id
                   AND aa.usuario_id = c.user_id
                   AND aa.estado = ?
+                  AND COALESCE(missed.activity_type, 'regular') != ?
             ), 0) AS absences,
             COALESCE((
                 SELECT SUM(p.distributable)
@@ -371,12 +375,15 @@ def caller_ranking(db: Database, guild_id: int) -> list[dict]:
         """,
         (
             guild_id,
+            ACTIVITY_TYPE_MANDATORY,
             ACTIVITY_FINISHED,
             ACTIVITY_PAYOUT_CREATED,
             ACTIVITY_CANCELLED,
             ACTIVITY_CANCELLED,
             ATTENDANCE_CONFIRMED,
+            ACTIVITY_TYPE_MANDATORY,
             ATTENDANCE_ABSENT,
+            ACTIVITY_TYPE_MANDATORY,
             PAYOUT_APPROVED,
             PAYOUT_DEPOSITED,
             guild_id,

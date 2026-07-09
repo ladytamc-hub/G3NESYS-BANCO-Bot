@@ -110,6 +110,18 @@ class Database:
             self._conn.execute("ALTER TABLE activities ADD COLUMN cancellation_reason TEXT")
         if "check_sent_at" not in activity_columns:
             self._conn.execute("ALTER TABLE activities ADD COLUMN check_sent_at TEXT")
+        if "activity_type" not in activity_columns:
+            self._conn.execute(
+                "ALTER TABLE activities ADD COLUMN activity_type TEXT NOT NULL DEFAULT 'regular'"
+            )
+        if "image_url" not in activity_columns:
+            self._conn.execute("ALTER TABLE activities ADD COLUMN image_url TEXT")
+        if "mandatory_loot_amount" not in activity_columns:
+            self._conn.execute("ALTER TABLE activities ADD COLUMN mandatory_loot_amount INTEGER")
+        if "mandatory_loot_recorded_by" not in activity_columns:
+            self._conn.execute("ALTER TABLE activities ADD COLUMN mandatory_loot_recorded_by INTEGER")
+        if "mandatory_loot_recorded_at" not in activity_columns:
+            self._conn.execute("ALTER TABLE activities ADD COLUMN mandatory_loot_recorded_at TEXT")
 
         attendance_columns = {
             row["name"]
@@ -235,13 +247,20 @@ class Database:
                     cancellation_reputation_exempt INTEGER,
                     cancellation_reason TEXT,
                     check_sent_at TEXT,
+                    activity_type TEXT NOT NULL DEFAULT 'regular',
+                    image_url TEXT,
+                    mandatory_loot_amount INTEGER,
+                    mandatory_loot_recorded_by INTEGER,
+                    mandatory_loot_recorded_at TEXT,
                     UNIQUE(guild_id, code)
                 )
                 """,
                 "id, code, guild_id, template_id, name, caller_id, horario, "
                 "voice_channel_id, notes, status, channel_id, message_id, "
                 "created_at, started_at, ended_at, cancelled_by, "
-                "cancellation_reputation_exempt, cancellation_reason, check_sent_at",
+                "cancellation_reputation_exempt, cancellation_reason, check_sent_at, "
+                "activity_type, image_url, mandatory_loot_amount, "
+                "mandatory_loot_recorded_by, mandatory_loot_recorded_at",
             ),
             "fines": (
                 """
@@ -624,6 +643,11 @@ CREATE TABLE IF NOT EXISTS activities (
     cancellation_reputation_exempt INTEGER,
     cancellation_reason TEXT,
     check_sent_at TEXT,
+    activity_type TEXT NOT NULL DEFAULT 'regular',
+    image_url TEXT,
+    mandatory_loot_amount INTEGER,
+    mandatory_loot_recorded_by INTEGER,
+    mandatory_loot_recorded_at TEXT,
     UNIQUE(guild_id, code)
 );
 

@@ -28,6 +28,9 @@ CALLERS_WELCOME_IMAGE = (
     "hm=81fb1fe926eefbc1453299848aba21dda9730f12c13171536154bbf2dc755568"
 )
 
+ACTIVITY_TYPE_REGULAR = "regular"
+ACTIVITY_TYPE_MANDATORY = "mandatory"
+
 ACTIVITY_DRAFT = "Borrador"
 ACTIVITY_OPEN = "Abierta"
 ACTIVITY_NOTICE = "En aviso"
@@ -93,6 +96,7 @@ DEFAULT_SETTINGS = {
     "payout_approver_role_ids": "",
     "withdrawal_liquidator_role_ids": "",
     "regear_reviewer_role_ids": "",
+    "caller_panel_role_ids": "",
     "member_role_name": DEFAULT_MEMBER_ROLE_NAME,
     "guest_role_name": DEFAULT_GUEST_ROLE_NAME,
     "guild_percentage_default": "10",

@@ -9,6 +9,7 @@ from discord.ext import commands
 from ..constants import (
     ADMIN_PANEL_IMAGE,
     ACTIVITY_FINISHED,
+    ACTIVITY_TYPE_MANDATORY,
     PAYOUT_APPROVED,
     PAYOUT_DEPOSITED,
     PAYOUT_CORRECTION,
@@ -22,6 +23,8 @@ from ..constants import (
     WITHDRAWAL_REJECTED,
 )
 from ..permissions import (
+    CALLER_PANEL_ROLE_NAMES,
+    CALLER_PANEL_ROLE_SETTING_KEY,
     has_any_configured_role,
     is_admin_subject,
     require_admin_context,
@@ -62,7 +65,7 @@ from ..services.quick_liquidations import (
     recent_liquidatable_payouts,
 )
 from ..services.reports import create_admin_report
-from ..utils import format_amount, parse_channel_id, parse_int_amount, split_csv_ids, utc_now_iso
+from ..utils import format_amount, join_csv_ids, parse_channel_id, parse_int_amount, split_csv_ids, utc_now_iso
 
 
 NOTIFICATION_CHANNEL_CATEGORIES = (
@@ -817,6 +820,7 @@ class CallerMemberSelect(discord.ui.UserSelect):
     def __init__(self, cog: "Admin", *, action: str, admin_id: int):
         labels = {
             "add": "agregar como caller",
+            "add_pcall": "agregar como creador PCALL",
             "remove": "eliminar como caller",
             "unpenalize": "quitar de penalizacion",
         }
@@ -846,11 +850,13 @@ class CallerMemberSelect(discord.ui.UserSelect):
         if member is None:
             await private_response(interaction, "No encontre a ese usuario dentro del servidor.")
             return
-        if member.bot and self.action == "add":
-            await private_response(interaction, "Un bot no puede registrarse como caller.")
+        if member.bot and self.action in {"add", "add_pcall"}:
+            await private_response(interaction, "Un bot no puede recibir acceso de caller o PCALL.")
             return
         if self.action == "add":
             await self.cog.add_caller_interaction(interaction, member)
+        elif self.action == "add_pcall":
+            await self.cog.add_pcall_interaction(interaction, member)
         elif self.action == "remove":
             await self.cog.remove_caller_interaction(interaction, member)
         else:
@@ -862,6 +868,36 @@ class CallerSelectionView(discord.ui.View):
         super().__init__(timeout=180)
         self.add_item(CallerMemberSelect(cog, action=action, admin_id=admin_id))
 
+
+class CallerAddOptionsView(discord.ui.View):
+    def __init__(self, cog: "Admin", *, admin_id: int):
+        super().__init__(timeout=180)
+        self.cog = cog
+        self.admin_id = admin_id
+
+    async def require_owner_admin(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id == self.admin_id and is_admin_subject(self.cog.db, interaction):
+            return True
+        await private_response(interaction, "Solo el admin que abrio este menu puede usarlo.")
+        return False
+
+    @discord.ui.button(label="Agregar Caller", style=discord.ButtonStyle.success)
+    async def add_official_caller(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
+        if await self.require_owner_admin(interaction):
+            await private_response(
+                interaction,
+                "Selecciona al nuevo caller oficial:",
+                view=CallerSelectionView(self.cog, action="add", admin_id=interaction.user.id),
+            )
+
+    @discord.ui.button(label="Agregar creador PCALL", style=discord.ButtonStyle.primary)
+    async def add_pcall_creator(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
+        if await self.require_owner_admin(interaction):
+            await private_response(
+                interaction,
+                "Selecciona al creador de contenido que recibira acceso PCALL:",
+                view=CallerSelectionView(self.cog, action="add_pcall", admin_id=interaction.user.id),
+            )
 
 class CallersAdminView(discord.ui.View):
     def __init__(self, cog: "Admin"):
@@ -900,13 +936,13 @@ class CallersAdminView(discord.ui.View):
                 embed=embeds[0],
             )
 
-    @discord.ui.button(label="Agregar caller", emoji="➕", style=discord.ButtonStyle.success)
+    @discord.ui.button(label="Agregar persona", emoji="➕", style=discord.ButtonStyle.success)
     async def add_caller(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
         if await self.require_admin(interaction):
             await private_response(
                 interaction,
-                "Selecciona al nuevo caller:",
-                view=CallerSelectionView(self.cog, action="add", admin_id=interaction.user.id),
+                "Elige el tipo de alta:",
+                view=CallerAddOptionsView(self.cog, admin_id=interaction.user.id),
             )
 
     @discord.ui.button(label="Eliminar caller", emoji="➖", style=discord.ButtonStyle.danger)
@@ -2565,6 +2601,7 @@ class AdminPanelView(discord.ui.View):
                 title="📣 Gestion de Callers G3NESYS",
                 description=(
                     "Consulta el ranking o administra quienes pueden dirigir actividades.\n\n"
+                    "PCALL da acceso al Panel de Callers sin registrar al usuario como caller oficial.\n\n"
                     "**Puntuacion:** +10 por actividad completada, +2 por asistencia, "
                     "-4 por cancelacion con composicion completa y -6 por ausencia. "
                     "Las cancelaciones por cupos incompletos no restan. Al llegar a -14, "
@@ -2712,6 +2749,60 @@ class Admin(commands.Cog):
 
     def member_has_configured_admin_role(self, guild: discord.Guild, member: discord.Member) -> bool:
         return any(role in member.roles for role in self.configured_admin_roles(guild))
+
+    def configured_caller_panel_roles(self, guild: discord.Guild) -> list[discord.Role]:
+        role_ids = split_csv_ids(self.db.get_setting(guild.id, CALLER_PANEL_ROLE_SETTING_KEY))
+        return sorted(
+            [role for role_id in role_ids if (role := guild.get_role(role_id)) is not None],
+            key=lambda role: role.position,
+            reverse=True,
+        )
+
+    @staticmethod
+    def named_caller_panel_roles(guild: discord.Guild) -> list[discord.Role]:
+        return sorted(
+            [
+                role
+                for role in guild.roles
+                if role.name.strip().casefold() in CALLER_PANEL_ROLE_NAMES
+            ],
+            key=lambda role: (role.name.strip().casefold() != "pcall", -role.position),
+        )
+
+    def caller_panel_roles(self, guild: discord.Guild) -> list[discord.Role]:
+        roles_by_id = {
+            role.id: role
+            for role in [*self.configured_caller_panel_roles(guild), *self.named_caller_panel_roles(guild)]
+        }
+        return sorted(roles_by_id.values(), key=lambda role: role.position, reverse=True)
+
+    def register_caller_panel_role(self, guild_id: int, role_id: int) -> None:
+        current = split_csv_ids(self.db.get_setting(guild_id, CALLER_PANEL_ROLE_SETTING_KEY))
+        if role_id not in current:
+            current.add(role_id)
+            self.db.set_setting(guild_id, CALLER_PANEL_ROLE_SETTING_KEY, join_csv_ids(current))
+
+    async def ensure_caller_panel_role(
+        self,
+        guild: discord.Guild,
+        actor: discord.Member | discord.User,
+    ) -> discord.Role | None:
+        roles = self.configured_caller_panel_roles(guild) or self.named_caller_panel_roles(guild)
+        if roles:
+            role = roles[0]
+            self.register_caller_panel_role(guild.id, role.id)
+            return role
+        try:
+            role = await guild.create_role(
+                name="PCALL",
+                reason=f"Creado desde el Panel Administrativo por {actor}",
+            )
+        except discord.Forbidden:
+            return None
+        except discord.HTTPException:
+            return None
+        self.register_caller_panel_role(guild.id, role.id)
+        return role
 
     def has_admin_after_removal(self, guild: discord.Guild, removed_user_id: int) -> bool:
         for member in guild.members:
@@ -3273,6 +3364,78 @@ class Admin(commands.Cog):
         )
         dm_status = "Le envie la bienvenida formal por DM." if delivered else "No pude enviarle DM, pero el acceso quedo activo."
         await private_response(interaction, f"📣 {member.mention} ahora es caller autorizado. {dm_status}")
+
+    async def add_pcall_interaction(
+        self,
+        interaction: discord.Interaction,
+        member: discord.Member,
+    ) -> None:
+        guild = interaction.guild
+        if guild is None:
+            await private_response(interaction, "Este menu solo funciona dentro del servidor.")
+            return
+        if member.bot:
+            await private_response(interaction, "Un bot no puede recibir acceso PCALL.")
+            return
+        if is_caller_penalized(self.db, guild.id, member.id):
+            await private_response(
+                interaction,
+                f"{member.mention} tiene una penalizacion activa. "
+                "Retirala primero desde `Quitar penalizacion`.",
+            )
+            return
+        role = await self.ensure_caller_panel_role(guild, interaction.user)
+        if role is None:
+            await private_response(
+                interaction,
+                "No pude crear o encontrar el rol PCALL. Revisa que el bot pueda gestionar roles.",
+            )
+            return
+        if role in member.roles:
+            await private_response(
+                interaction,
+                f"{member.mention} ya tiene acceso PCALL al Panel de Callers con {role.mention}.",
+            )
+            return
+        try:
+            await member.add_roles(
+                role,
+                reason=f"PCALL asignado desde el Panel Administrativo por {interaction.user}",
+            )
+        except discord.Forbidden:
+            await private_response(
+                interaction,
+                "No pude asignar el rol PCALL. Coloca el rol del bot por encima de PCALL y permite gestionar roles.",
+            )
+            return
+        except discord.HTTPException:
+            await private_response(interaction, "Discord no permitio asignar el rol PCALL. Intenta de nuevo.")
+            return
+        delivered = await send_dm_safe(
+            self.db,
+            guild_id=guild.id,
+            user=member,
+            action="bienvenida_pcall",
+            content=(
+                f"Ahora tienes acceso al Panel de Callers de {guild.name} como creador de contenido PCALL. "
+                "Puedes crear pings, actividades, plantillas y splits desde el panel. "
+                "Este rol no te registra como caller oficial ni te suma al ranking de callers."
+            ),
+        )
+        log_action(
+            self.db,
+            guild.id,
+            admin_id=interaction.user.id,
+            action="Agregar creador PCALL",
+            affected_user_id=member.id,
+            system="Callers",
+            observation=f"Rol {role.name} ({role.id}) asignado para acceso al Panel de Callers.",
+        )
+        dm_status = "Le envie el aviso por DM." if delivered else "No pude enviarle DM, pero el acceso quedo activo."
+        await private_response(
+            interaction,
+            f"{member.mention} ahora tiene acceso PCALL al Panel de Callers con {role.mention}. {dm_status}",
+        )
 
     async def remove_caller_interaction(
         self,
@@ -4534,6 +4697,7 @@ class Admin(commands.Cog):
             FROM activities a
             WHERE a.guild_id = ?
               AND a.status = ?
+              AND COALESCE(a.activity_type, 'regular') != ?
               AND NOT EXISTS (
                   SELECT 1 FROM payouts p
                   WHERE p.guild_id = a.guild_id AND p.activity_id = a.id
@@ -4541,7 +4705,7 @@ class Admin(commands.Cog):
             ORDER BY COALESCE(a.ended_at, a.created_at) DESC, a.id DESC
             LIMIT ?
             """,
-            (guild_id, ACTIVITY_FINISHED, limit),
+            (guild_id, ACTIVITY_FINISHED, ACTIVITY_TYPE_MANDATORY, limit),
         )
 
     def pending_split_activities_text(self, guild_id: int, *, rows=None) -> str:
@@ -4621,8 +4785,9 @@ class Admin(commands.Cog):
             """
             SELECT * FROM activities
             WHERE guild_id = ? AND id = ? AND status = ?
+              AND COALESCE(activity_type, 'regular') != ?
             """,
-            (interaction.guild.id, activity_id, ACTIVITY_FINISHED),
+            (interaction.guild.id, activity_id, ACTIVITY_FINISHED, ACTIVITY_TYPE_MANDATORY),
         )
         if activity is None:
             await private_response(interaction, "Esta actividad ya no esta pendiente de split.")

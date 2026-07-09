@@ -555,8 +555,8 @@ def create_admin_report(db: Database, guild_id: int, guild=None) -> Path:
         title="Actividades y resultados",
         subtitle=subtitle,
         headers=[
-            "Codigo", "Actividad", "Caller ID", "Caller", "Horario", "Estado",
-            "Canal voz ID", "Cupos requeridos", "Participantes", "Confirmados", "Ausentes",
+            "Codigo", "Actividad", "Caller ID", "Caller", "Horario", "Estado", "Tipo",
+            "Canal voz ID", "Cupos requeridos", "Participantes", "Confirmados", "Ausentes", "Botin mandatory",
             "Plantilla ID", "Creada", "Check enviado", "Iniciada", "Finalizada", "Cancelada por ID",
             "Cancelacion justificada", "Motivo cancelacion", "Notas",
         ],
@@ -564,8 +564,10 @@ def create_admin_report(db: Database, guild_id: int, guild=None) -> Path:
             [
                 row["code"], row["name"], _id(row["caller_id"]),
                 _member_name(guild, row["caller_id"]), row["horario"], row["status"],
+                row["activity_type"] or "regular",
                 _id(row["voice_channel_id"]), int(row["required_slots"]),
                 int(row["participants"]), int(row["confirmed"]), int(row["absent"]),
+                int(row["mandatory_loot_amount"] or 0),
                 row["template_id"], row["created_at"], row["check_sent_at"],
                 row["started_at"], row["ended_at"],
                 _id(row["cancelled_by"]),
@@ -574,6 +576,7 @@ def create_admin_report(db: Database, guild_id: int, guild=None) -> Path:
             ]
             for row in activities
         ],
+        currency_headers={"Botin mandatory"},
         date_headers={"Creada", "Check enviado", "Iniciada", "Finalizada"},
     )
 
@@ -1208,21 +1211,24 @@ def create_caller_report(db: Database, guild_id: int, user_id: int, guild=None) 
         title="Actividades dirigidas",
         subtitle=subtitle,
         headers=[
-            "Codigo", "Actividad", "Horario", "Estado", "Cupos requeridos", "Participantes",
-            "Confirmados", "Ausentes", "Creada", "Check enviado", "Iniciada", "Finalizada",
+            "Codigo", "Actividad", "Horario", "Estado", "Tipo", "Cupos requeridos", "Participantes",
+            "Confirmados", "Ausentes", "Botin mandatory", "Creada", "Check enviado", "Iniciada", "Finalizada",
             "Cancelacion justificada", "Motivo cancelacion", "Notas",
         ],
         rows=[
             [
                 row["code"], row["name"], row["horario"], row["status"],
+                row["activity_type"] or "regular",
                 int(row["required_slots"]), int(row["participants"]), int(row["confirmed"]),
-                int(row["absent"]), row["created_at"], row["check_sent_at"],
+                int(row["absent"]), int(row["mandatory_loot_amount"] or 0),
+                row["created_at"], row["check_sent_at"],
                 row["started_at"], row["ended_at"],
                 "Si" if row["cancellation_reputation_exempt"] else "No",
                 row["cancellation_reason"], row["notes"],
             ]
             for row in activities
         ],
+        currency_headers={"Botin mandatory"},
         date_headers={"Creada", "Check enviado", "Iniciada", "Finalizada"},
     )
     _add_detail_sheet(
