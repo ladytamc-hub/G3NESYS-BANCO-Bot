@@ -1911,6 +1911,109 @@ class ActivityView(discord.ui.View):
         await self.cog.handle_activity_action(interaction, action, int(activity_id))
 
 
+class ActivityThreadRoleSelect(discord.ui.Select):
+    def __init__(self, cog: "Activities", activity_id: int):
+        self.cog = cog
+        self.activity_id = activity_id
+        activity = cog.get_activity(activity_id)
+        guild = cog.bot.get_guild(int(activity["guild_id"])) if activity else None
+        options: list[discord.SelectOption] = []
+        for row in cog.get_activity_roles(activity_id)[:25]:
+            current = int(row["participant_count"])
+            slots = int(row["slots"])
+            label = str(row["name"])[:80] or "Rol"
+            option = discord.SelectOption(
+                label=label,
+                value=str(row["id"]),
+                description=f"{current}/{slots} cupos ocupados"[:100],
+            )
+            emoji = str(resolve_custom_emojis(row["emoji"], guild) or row["emoji"] or "").strip()
+            if emoji and not is_custom_emoji_placeholder(emoji):
+                try:
+                    option.emoji = discord.PartialEmoji.from_str(emoji)
+                except ValueError:
+                    pass
+            options.append(option)
+        super().__init__(
+            placeholder="Elige rol o arma",
+            min_values=1,
+            max_values=1,
+            options=options,
+        )
+
+    async def callback(self, interaction: discord.Interaction) -> None:
+        await self.cog.join_role(interaction, self.activity_id, int(self.values[0]))
+
+
+class ActivityThreadRoleSelectView(discord.ui.View):
+    def __init__(self, cog: "Activities", activity_id: int):
+        super().__init__(timeout=180)
+        self.add_item(ActivityThreadRoleSelect(cog, activity_id))
+
+
+class ActivityThreadPanelView(discord.ui.View):
+    def __init__(
+        self,
+        cog: "Activities",
+        activity_id: int,
+        *,
+        force_disabled: bool = False,
+    ):
+        super().__init__(timeout=None)
+        self.cog = cog
+        self.activity_id = activity_id
+        activity = cog.get_activity(activity_id)
+        status = str(activity["status"]) if activity else ACTIVITY_DELETED
+        is_mandatory = is_mandatory_activity(activity)
+        if is_mandatory:
+            join_available = status in {ACTIVITY_OPEN, ACTIVITY_NOTICE, ACTIVITY_IN_PROGRESS}
+            leave_available = join_available
+        else:
+            join_available = status in {ACTIVITY_OPEN, ACTIVITY_NOTICE}
+            leave_available = join_available
+        participants_available = activity is not None and status != ACTIVITY_DELETED
+        self.add_thread_button(
+            "Participar",
+            "participate",
+            discord.ButtonStyle.success,
+            disabled=force_disabled or not join_available,
+        )
+        self.add_thread_button(
+            "Salir",
+            "leave",
+            discord.ButtonStyle.danger,
+            disabled=force_disabled or not leave_available,
+        )
+        self.add_thread_button(
+            "Ver participantes",
+            "participants",
+            discord.ButtonStyle.secondary,
+            disabled=force_disabled or not participants_available,
+        )
+
+    def add_thread_button(
+        self,
+        label: str,
+        action: str,
+        style: discord.ButtonStyle,
+        *,
+        disabled: bool,
+    ) -> None:
+        button = discord.ui.Button(
+            label=label,
+            style=style,
+            custom_id=f"g3n:activity_thread:{action}:{self.activity_id}",
+            disabled=disabled,
+        )
+        button.callback = self.handle
+        self.add_item(button)
+
+    async def handle(self, interaction: discord.Interaction) -> None:
+        custom_id = str(interaction.data["custom_id"])
+        _, _, action, activity_id = custom_id.split(":")
+        await self.cog.handle_activity_thread_action(interaction, action, int(activity_id))
+
+
 class PingPreviewView(discord.ui.View):
     def __init__(self, cog: "Activities", activity_id: int, author_id: int):
         super().__init__(timeout=900)
@@ -2281,6 +2384,16 @@ class Activities(commands.Cog):
             self.bot.add_view(ActivityView(self, int(row["id"])))
             if row["status"] == ACTIVITY_IN_PROGRESS:
                 self.bot.add_view(ConfirmAttendanceView(self, int(row["id"])))
+        thread_panel_rows = self.db.fetch_all(
+            """
+            SELECT id
+            FROM activities
+            WHERE thread_panel_message_id IS NOT NULL AND status != ?
+            """,
+            (ACTIVITY_DELETED,),
+        )
+        for row in thread_panel_rows:
+            self.bot.add_view(ActivityThreadPanelView(self, int(row["id"])))
         pending_requests = self.db.fetch_all(
             "SELECT id FROM activity_join_requests WHERE status = 'Pendiente'"
         )
@@ -3489,8 +3602,10 @@ class Activities(commands.Cog):
             "UPDATE activities SET message_id = ?, channel_id = ? WHERE id = ?",
             (message.id, channel.id, activity_id),
         )
-        await self.create_ping_thread(message, activity)
+        thread_panel_created = await self.create_ping_thread(message, activity)
         self.bot.add_view(ActivityView(self, activity_id))
+        if thread_panel_created:
+            self.bot.add_view(ActivityThreadPanelView(self, activity_id))
         action = "Crear Ping Mandatory" if is_mandatory_activity(activity) else "Crear Ping"
         log_action(
             self.db,
@@ -3526,13 +3641,49 @@ class Activities(commands.Cog):
             view=None,
         )
 
-    async def create_ping_thread(self, message: discord.Message, activity) -> None:
+    def activity_thread_panel_text(self, activity_id: int) -> str:
+        activity = self.get_activity(activity_id)
+        if activity is None:
+            return "Panel del ping."
+        return (
+            f"Panel del ping `{activity['code']}`. "
+            "Usa estos botones para participar, salir o consultar participantes."
+        )
+
+    async def send_activity_thread_panel(self, thread, activity_id: int):
+        message = await thread.send(
+            content=self.activity_thread_panel_text(activity_id),
+            view=ActivityThreadPanelView(self, activity_id),
+        )
+        self.db.execute(
+            """
+            UPDATE activities
+            SET thread_id = ?, thread_panel_message_id = ?
+            WHERE id = ?
+            """,
+            (int(thread.id), int(message.id), activity_id),
+        )
+        return message
+
+    async def create_ping_thread(self, message: discord.Message, activity) -> bool:
+        activity_id = int(activity["id"])
         activity_code = str(activity["code"])
         try:
             thread = await message.create_thread(name=f"Ping {activity_code}")
-            await thread.send(PING_THREAD_MESSAGE)
         except discord.HTTPException:
             LOGGER.exception("No pude crear el hilo automatico para el ping %s.", activity_code)
+            return False
+        self.db.execute(
+            "UPDATE activities SET thread_id = ? WHERE id = ?",
+            (int(thread.id), activity_id),
+        )
+        try:
+            await thread.send(PING_THREAD_MESSAGE)
+            await self.send_activity_thread_panel(thread, activity_id)
+            return True
+        except discord.HTTPException:
+            LOGGER.exception("No pude publicar el panel funcional del hilo para el ping %s.", activity_code)
+            return False
 
     async def publish_mandatory_activity_from_modal(
         self,
@@ -4024,24 +4175,88 @@ class Activities(commands.Cog):
     def build_activity_embed(self, activity_id: int) -> discord.Embed:
         return self.build_activity_embeds(activity_id)[0]
 
+    async def resolve_activity_thread(self, guild: discord.Guild, thread_id: int):
+        thread = None
+        get_thread = getattr(guild, "get_thread", None)
+        if callable(get_thread):
+            thread = get_thread(thread_id)
+        if thread is None:
+            thread = guild.get_channel(thread_id)
+        if thread is None:
+            try:
+                thread = await self.bot.fetch_channel(thread_id)
+            except discord.HTTPException:
+                return None
+        thread_guild = getattr(thread, "guild", None)
+        if thread_guild is not None and thread_guild.id != guild.id:
+            return None
+        return thread
+
+    async def update_activity_thread_panel(
+        self,
+        activity_id: int,
+        activity=None,
+        guild: discord.Guild | None = None,
+    ) -> None:
+        activity = activity or self.get_activity(activity_id)
+        if not activity or not activity["thread_id"]:
+            return
+        guild = guild or self.bot.get_guild(int(activity["guild_id"]))
+        if guild is None:
+            return
+        thread = await self.resolve_activity_thread(guild, int(activity["thread_id"]))
+        if thread is None:
+            return
+        panel_message_id = activity["thread_panel_message_id"]
+        if not panel_message_id:
+            if activity["status"] != ACTIVITY_DELETED and hasattr(thread, "send"):
+                try:
+                    await self.send_activity_thread_panel(thread, activity_id)
+                except discord.HTTPException:
+                    LOGGER.exception(
+                        "No pude recrear el panel funcional del hilo para la actividad %s.",
+                        activity_id,
+                    )
+            return
+        if not hasattr(thread, "fetch_message"):
+            return
+        try:
+            message = await thread.fetch_message(int(panel_message_id))
+            await message.edit(
+                content=self.activity_thread_panel_text(activity_id),
+                view=ActivityThreadPanelView(self, activity_id),
+            )
+        except discord.NotFound:
+            if activity["status"] != ACTIVITY_DELETED and hasattr(thread, "send"):
+                try:
+                    await self.send_activity_thread_panel(thread, activity_id)
+                except discord.HTTPException:
+                    LOGGER.exception(
+                        "No pude recrear el panel funcional perdido del hilo para la actividad %s.",
+                        activity_id,
+                    )
+        except discord.HTTPException:
+            return
+
     async def update_activity_message(self, activity_id: int) -> None:
         activity = self.get_activity(activity_id)
-        if not activity or not activity["channel_id"] or not activity["message_id"]:
+        if not activity:
             return
         guild = self.bot.get_guild(int(activity["guild_id"]))
         if guild is None:
             return
-        channel = guild.get_channel(int(activity["channel_id"]))
-        if channel is None:
-            return
-        try:
-            message = await channel.fetch_message(int(activity["message_id"]))
-            await message.edit(
-                embeds=self.build_activity_embeds(activity_id),
-                view=ActivityView(self, activity_id),
-            )
-        except discord.HTTPException:
-            return
+        if activity["channel_id"] and activity["message_id"]:
+            channel = guild.get_channel(int(activity["channel_id"]))
+            if channel is not None and hasattr(channel, "fetch_message"):
+                try:
+                    message = await channel.fetch_message(int(activity["message_id"]))
+                    await message.edit(
+                        embeds=self.build_activity_embeds(activity_id),
+                        view=ActivityView(self, activity_id),
+                    )
+                except discord.HTTPException:
+                    pass
+        await self.update_activity_thread_panel(activity_id, activity, guild)
 
     async def prompt_activity_edit_menu(
         self,
@@ -4560,6 +4775,74 @@ class Activities(commands.Cog):
                 lines.append(f"{index}. <@{user_id}>")
         return "\n".join(lines)[:1900]
 
+    def activity_participants_text(self, activity_id: int) -> str:
+        activity = self.get_activity(activity_id)
+        if activity is None:
+            return "No encontre esta actividad."
+        if is_mandatory_activity(activity):
+            return self.mandatory_participants_text(activity_id)
+        participants = self.get_activity_participants(activity_id)
+        lines = [f"**Participantes - {activity['code']}**"]
+        if not participants:
+            lines.append("Sin participantes registrados.")
+            return "\n".join(lines)
+        for index, participant in enumerate(participants, start=1):
+            user_id = int(participant["user_id"])
+            role_emoji = str(participant["role_emoji"] or "").strip()
+            role_name = str(participant["role_name"] or "Rol").strip()
+            role_label = f"{role_emoji} {role_name}".strip()
+            lines.append(f"{index}. <@{user_id}> - {role_label}")
+        return "\n".join(lines)[:1900]
+
+    async def participate_from_thread(self, interaction: discord.Interaction, activity_id: int) -> None:
+        activity = self.get_guild_activity(interaction.guild.id, activity_id) if interaction.guild else None
+        if activity is None:
+            await private_response(interaction, "No encontre esta actividad en este servidor.")
+            return
+        if is_mandatory_activity(activity):
+            await self.join_mandatory_activity(interaction, activity_id)
+            return
+        if activity["status"] not in {ACTIVITY_OPEN, ACTIVITY_NOTICE}:
+            await private_response(interaction, "Las inscripciones ya estan cerradas.")
+            return
+        roles = self.get_activity_roles(activity_id)
+        if not roles:
+            await private_response(interaction, "Esta actividad no tiene composicion disponible.")
+            return
+        await private_response(
+            interaction,
+            "Elige el rol o arma para participar en este ping.",
+            view=ActivityThreadRoleSelectView(self, activity_id),
+        )
+
+    async def handle_activity_thread_action(
+        self,
+        interaction: discord.Interaction,
+        action: str,
+        activity_id: int,
+    ) -> None:
+        if interaction.guild is None:
+            await private_response(interaction, "Esta accion solo esta disponible en un servidor.")
+            return
+        activity = self.get_guild_activity(interaction.guild.id, activity_id)
+        if activity is None:
+            await private_response(interaction, "No encontre esta actividad en este servidor.")
+            return
+        if activity["status"] == ACTIVITY_DELETED:
+            await private_response(interaction, "Este ping fue eliminado y ya no acepta acciones.")
+            return
+        if action == "participate":
+            await self.participate_from_thread(interaction, activity_id)
+        elif action == "leave":
+            if is_mandatory_activity(activity):
+                await self.leave_mandatory_activity(interaction, activity_id)
+            else:
+                await self.leave_activity(interaction, activity_id)
+        elif action == "participants":
+            await private_response(interaction, self.activity_participants_text(activity_id))
+        else:
+            await private_response(interaction, "Accion no reconocida.")
+
     async def join_mandatory_activity(self, interaction: discord.Interaction, activity_id: int) -> None:
         await interaction.response.defer(ephemeral=True)
         activity = self.get_activity(activity_id)
@@ -4795,6 +5078,59 @@ class Activities(commands.Cog):
             and is_official_caller_subject(self.db, interaction)
         )
 
+    async def delete_or_disable_activity_thread_panel(self, activity, guild: discord.Guild) -> bool:
+        if not activity["thread_id"] or not activity["thread_panel_message_id"]:
+            return True
+        thread = await self.resolve_activity_thread(guild, int(activity["thread_id"]))
+        if thread is None or not hasattr(thread, "fetch_message"):
+            return True
+        try:
+            message = await thread.fetch_message(int(activity["thread_panel_message_id"]))
+        except discord.NotFound:
+            self.db.execute(
+                "UPDATE activities SET thread_panel_message_id = NULL WHERE id = ?",
+                (int(activity["id"]),),
+            )
+            return True
+        except discord.HTTPException:
+            LOGGER.exception(
+                "No pude encontrar el panel funcional del hilo para la actividad %s.",
+                int(activity["id"]),
+            )
+            return False
+        try:
+            await message.delete()
+            self.db.execute(
+                "UPDATE activities SET thread_panel_message_id = NULL WHERE id = ?",
+                (int(activity["id"]),),
+            )
+            return True
+        except discord.Forbidden:
+            try:
+                await message.edit(
+                    content=self.activity_thread_panel_text(int(activity["id"])),
+                    view=ActivityThreadPanelView(self, int(activity["id"]), force_disabled=True),
+                )
+                return True
+            except discord.HTTPException:
+                LOGGER.exception(
+                    "No pude desactivar el panel funcional del hilo para la actividad %s.",
+                    int(activity["id"]),
+                )
+                return False
+        except discord.NotFound:
+            self.db.execute(
+                "UPDATE activities SET thread_panel_message_id = NULL WHERE id = ?",
+                (int(activity["id"]),),
+            )
+            return True
+        except discord.HTTPException:
+            LOGGER.exception(
+                "No pude eliminar el panel funcional del hilo para la actividad %s.",
+                int(activity["id"]),
+            )
+            return False
+
     async def delete_activity_ping(self, interaction: discord.Interaction, activity_id: int) -> None:
         if interaction.guild is None:
             await private_response(interaction, "Esta accion solo esta disponible en un servidor.")
@@ -4819,6 +5155,12 @@ class Activities(commands.Cog):
                 tracked_users.add(int(activity["caller_id"]))
             for user_id in tracked_users:
                 self.close_voice_session(activity_id, interaction.guild.id, user_id, deleted_at)
+        if not await self.delete_or_disable_activity_thread_panel(activity, interaction.guild):
+            await interaction.followup.send(
+                "No pude eliminar o desactivar el panel publicado dentro del hilo.",
+                ephemeral=True,
+            )
+            return
         message_deleted = False
         if activity["channel_id"] and activity["message_id"]:
             channel = interaction.guild.get_channel(int(activity["channel_id"]))

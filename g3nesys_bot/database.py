@@ -126,6 +126,10 @@ class Database:
             self._conn.execute("ALTER TABLE activities ADD COLUMN deleted_by INTEGER")
         if "deleted_at" not in activity_columns:
             self._conn.execute("ALTER TABLE activities ADD COLUMN deleted_at TEXT")
+        if "thread_id" not in activity_columns:
+            self._conn.execute("ALTER TABLE activities ADD COLUMN thread_id INTEGER")
+        if "thread_panel_message_id" not in activity_columns:
+            self._conn.execute("ALTER TABLE activities ADD COLUMN thread_panel_message_id INTEGER")
 
         attendance_columns = {
             row["name"]
@@ -258,6 +262,8 @@ class Database:
                     mandatory_loot_recorded_at TEXT,
                     deleted_by INTEGER,
                     deleted_at TEXT,
+                    thread_id INTEGER,
+                    thread_panel_message_id INTEGER,
                     UNIQUE(guild_id, code)
                 )
                 """,
@@ -267,7 +273,7 @@ class Database:
                 "cancellation_reputation_exempt, cancellation_reason, check_sent_at, "
                 "activity_type, image_url, mandatory_loot_amount, "
                 "mandatory_loot_recorded_by, mandatory_loot_recorded_at, "
-                "deleted_by, deleted_at",
+                "deleted_by, deleted_at, thread_id, thread_panel_message_id",
             ),
             "fines": (
                 """
@@ -657,6 +663,8 @@ CREATE TABLE IF NOT EXISTS activities (
     mandatory_loot_recorded_at TEXT,
     deleted_by INTEGER,
     deleted_at TEXT,
+    thread_id INTEGER,
+    thread_panel_message_id INTEGER,
     UNIQUE(guild_id, code)
 );
 
