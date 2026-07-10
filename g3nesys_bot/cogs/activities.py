@@ -1174,16 +1174,13 @@ class TemplateSelect(discord.ui.Select):
         if template is None:
             await private_response(interaction, "No encontre esa plantilla disponible para ti.")
             return
-        await interaction.response.send_modal(
-            ActivityModal(
-                self.cog,
-                template_id=self.template_id,
-                default_name=self.default_name,
-                default_time=self.default_time,
-                default_notes=self.default_notes,
-                default_voice_channel_id=self.default_voice_channel_id,
-                publish_channel_id=self.publish_channel_id,
-            )
+        await self.cog.prompt_activity_creation(
+            interaction,
+            template_id=template_id,
+            default_name=str(template["activity_name"] or ""),
+            default_time=str(template["default_time"] or ""),
+            default_notes=str(template["description"] or ""),
+            default_voice_channel_id=template["voice_channel_id"],
         )
 
 
