@@ -114,6 +114,8 @@ class Database:
             self._conn.execute(
                 "ALTER TABLE activities ADD COLUMN activity_type TEXT NOT NULL DEFAULT 'regular'"
             )
+        if "pinged_by_id" not in activity_columns:
+            self._conn.execute("ALTER TABLE activities ADD COLUMN pinged_by_id INTEGER")
         if "image_url" not in activity_columns:
             self._conn.execute("ALTER TABLE activities ADD COLUMN image_url TEXT")
         if "mandatory_loot_amount" not in activity_columns:
@@ -242,6 +244,7 @@ class Database:
                     template_id INTEGER,
                     name TEXT NOT NULL,
                     caller_id INTEGER NOT NULL,
+                    pinged_by_id INTEGER,
                     horario TEXT NOT NULL,
                     voice_channel_id INTEGER,
                     notes TEXT,
@@ -267,7 +270,7 @@ class Database:
                     UNIQUE(guild_id, code)
                 )
                 """,
-                "id, code, guild_id, template_id, name, caller_id, horario, "
+                "id, code, guild_id, template_id, name, caller_id, pinged_by_id, horario, "
                 "voice_channel_id, notes, status, channel_id, message_id, "
                 "created_at, started_at, ended_at, cancelled_by, "
                 "cancellation_reputation_exempt, cancellation_reason, check_sent_at, "
@@ -643,6 +646,7 @@ CREATE TABLE IF NOT EXISTS activities (
     template_id INTEGER,
     name TEXT NOT NULL,
     caller_id INTEGER NOT NULL,
+    pinged_by_id INTEGER,
     horario TEXT NOT NULL,
     voice_channel_id INTEGER,
     notes TEXT,

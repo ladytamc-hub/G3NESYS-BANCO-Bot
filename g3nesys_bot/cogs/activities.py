@@ -76,7 +76,7 @@ ACTIVITY_COMPOSITION_SEPARATOR = "━━━━━━━━━━━━"
 ACTIVITY_EMBED_SPACER = "\u200b"
 ACTIVITY_COMPOSITION_FIELD_LIMIT = 1024
 ACTIVITY_COMPOSITION_FIELDS_PER_EMBED = 25
-ACTIVITY_GENERAL_INFO_FIELD_COUNT = 6
+ACTIVITY_GENERAL_INFO_FIELD_COUNT = 7
 ACTIVITY_GENERAL_TO_COMPOSITION_SPACERS = 1
 ACTIVITY_PRIMARY_COMPOSITION_FIELDS = (
     ACTIVITY_COMPOSITION_FIELDS_PER_EMBED
@@ -1805,6 +1805,7 @@ class ActivityView(discord.ui.View):
                 self.add_control_button("Mandar aviso", "notice", discord.ButtonStyle.primary, 0, False, "📢")
                 self.add_control_button("Iniciar actividad", "start", discord.ButtonStyle.success, 1, False, "▶️")
                 self.add_control_button("Cancelar actividad", "cancel", discord.ButtonStyle.danger, 1, False, "✖️")
+                self.add_control_button("Editar caller", "edit_caller", discord.ButtonStyle.secondary, 1, False)
                 self.add_control_button("Eliminar ping", "delete", discord.ButtonStyle.danger, 1, False)
             elif status == ACTIVITY_IN_PROGRESS:
                 self.add_control_button("Participar", "mandatory_join", discord.ButtonStyle.success, 0, False, "✅")
@@ -1813,11 +1814,13 @@ class ActivityView(discord.ui.View):
                 self.add_control_button("Mandar aviso", "notice", discord.ButtonStyle.primary, 0, False, "📢")
                 self.add_control_button("Finalizar actividad", "finish", discord.ButtonStyle.success, 1, False, "⏹️")
                 self.add_control_button("Cancelar actividad", "cancel", discord.ButtonStyle.danger, 1, False, "✖️")
+                self.add_control_button("Editar caller", "edit_caller", discord.ButtonStyle.secondary, 1, False)
                 self.add_control_button("Eliminar ping", "delete", discord.ButtonStyle.danger, 1, False)
             elif status == ACTIVITY_FINISHED:
                 self.add_control_button("Ver participantes", "mandatory_participants", discord.ButtonStyle.secondary, 0, False, "👥")
                 loot_label = "Editar Botin" if activity["mandatory_loot_amount"] is not None else "Botin"
                 self.add_control_button(loot_label, "mandatory_loot", discord.ButtonStyle.primary, 0, False, "💰")
+                self.add_control_button("Editar caller", "edit_caller", discord.ButtonStyle.secondary, 1, False)
                 self.add_control_button("Eliminar ping", "delete", discord.ButtonStyle.danger, 1, False)
             elif status == ACTIVITY_CANCELLED:
                 self.add_control_button("Ver participantes", "mandatory_participants", discord.ButtonStyle.secondary, 0, False, "👥")
@@ -1856,6 +1859,7 @@ class ActivityView(discord.ui.View):
                 "Editar", "edit", discord.ButtonStyle.secondary, 3, False, "✏️"
             )
             self.add_control_button("Cancelar", "cancel", discord.ButtonStyle.danger, 4, False, "✖️")
+            self.add_control_button("Editar caller", "edit_caller", discord.ButtonStyle.secondary, 4, False)
             self.add_control_button("Eliminar", "delete", discord.ButtonStyle.danger, 4, False)
         elif status == ACTIVITY_IN_PROGRESS:
             self.add_control_button(
@@ -1869,11 +1873,13 @@ class ActivityView(discord.ui.View):
                 "Editar", "edit", discord.ButtonStyle.secondary, 1, False, "✏️"
             )
             self.add_control_button("Cancelar", "cancel", discord.ButtonStyle.danger, 1, False, "✖️")
+            self.add_control_button("Editar caller", "edit_caller", discord.ButtonStyle.secondary, 1, False)
             self.add_control_button("Eliminar", "delete", discord.ButtonStyle.danger, 1, False)
         elif status == ACTIVITY_FINISHED:
             self.add_control_button("Ver asistencia", "verify", discord.ButtonStyle.secondary, 0, False, "🔍")
             self.add_control_button("Splitear", "payout", discord.ButtonStyle.primary, 0, False, "💰")
             self.add_control_button("Liquidación rápida", "quick_liquidation", discord.ButtonStyle.danger, 0, False, "⚡")
+            self.add_control_button("Editar caller", "edit_caller", discord.ButtonStyle.secondary, 1, False)
             self.add_control_button("Eliminar", "delete", discord.ButtonStyle.danger, 1, False)
         elif status == ACTIVITY_PAYOUT_CREATED:
             self.add_control_button("Ver asistencia", "verify", discord.ButtonStyle.secondary, 0, False, "🔍")
@@ -2014,6 +2020,122 @@ class ActivityThreadPanelView(discord.ui.View):
         await self.cog.handle_activity_thread_action(interaction, action, int(activity_id))
 
 
+class CallerAssignmentSelect(discord.ui.Select):
+    def __init__(self, parent_view: "CallerAssignmentView", options: list[discord.SelectOption]):
+        self.parent_view = parent_view
+        super().__init__(
+            placeholder="Seleccionar Caller",
+            min_values=1,
+            max_values=1,
+            options=options,
+        )
+
+    async def callback(self, interaction: discord.Interaction) -> None:
+        await self.parent_view.assign_caller(interaction, int(self.values[0]))
+
+
+class CallerAssignmentView(discord.ui.View):
+    def __init__(
+        self,
+        cog: "Activities",
+        activity_id: int,
+        author_id: int,
+        options: list[discord.SelectOption],
+        notify_previous: bool = False,
+    ):
+        super().__init__(timeout=180)
+        self.cog = cog
+        self.activity_id = activity_id
+        self.author_id = author_id
+        self.notify_previous = notify_previous
+        self.add_item(CallerAssignmentSelect(self, options))
+
+    async def require_admin_draft(self, interaction: discord.Interaction):
+        activity, error = self.cog.draft_activity_for_user(
+            interaction,
+            self.activity_id,
+            self.author_id,
+        )
+        if activity is None:
+            await private_response(interaction, error or "No encontre este borrador.")
+            return None
+        if not is_admin_subject(self.cog.db, interaction):
+            await private_response(interaction, "Solo el admin que creo este ping puede seleccionar caller.")
+            return None
+        return activity
+
+    async def assign_caller(self, interaction: discord.Interaction, caller_id: int) -> None:
+        activity = await self.require_admin_draft(interaction)
+        if activity is None or interaction.guild is None:
+            return
+        member, error = self.cog.resolve_assignable_caller(interaction.guild, caller_id)
+        if member is None:
+            await private_response(interaction, error or "No encontre ese caller.")
+            return
+        previous_caller_id = int(activity["caller_id"])
+        if self.notify_previous and previous_caller_id == caller_id:
+            await private_response(interaction, "Ese usuario ya es el caller asignado de esta actividad.")
+            return
+        self.cog.db.execute(
+            "UPDATE activities SET caller_id = ? WHERE guild_id = ? AND id = ?",
+            (caller_id, interaction.guild.id, self.activity_id),
+        )
+        updated = self.cog.get_activity(self.activity_id)
+        await interaction.response.edit_message(
+            content=self.cog.ping_preview_content(updated),
+            embeds=self.cog.build_activity_embeds(self.activity_id, preview_status=ACTIVITY_OPEN),
+            view=PingPreviewView(self.cog, self.activity_id, self.author_id),
+        )
+
+    @discord.ui.button(label="Cancelar", style=discord.ButtonStyle.secondary, row=1)
+    async def cancel_button(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
+        activity = await self.require_admin_draft(interaction)
+        if activity is None or interaction.guild is None:
+            return
+        self.cog.db.execute(
+            """
+            UPDATE activities
+            SET status = ?, deleted_by = ?, deleted_at = ?
+            WHERE guild_id = ? AND id = ?
+            """,
+            (ACTIVITY_DELETED, interaction.user.id, utc_now_iso(), interaction.guild.id, self.activity_id),
+        )
+        await interaction.response.edit_message(
+            content="Creacion de ping cancelada. No se publico nada.",
+            embeds=[],
+            view=None,
+        )
+
+
+class CallerReassignmentSelect(discord.ui.Select):
+    def __init__(self, parent_view: "CallerReassignmentView", options: list[discord.SelectOption]):
+        self.parent_view = parent_view
+        super().__init__(
+            placeholder="Seleccionar nuevo Caller",
+            min_values=1,
+            max_values=1,
+            options=options,
+        )
+
+    async def callback(self, interaction: discord.Interaction) -> None:
+        await self.parent_view.reassign_caller(interaction, int(self.values[0]))
+
+
+class CallerReassignmentView(discord.ui.View):
+    def __init__(self, cog: "Activities", activity_id: int, options: list[discord.SelectOption]):
+        super().__init__(timeout=180)
+        self.cog = cog
+        self.activity_id = activity_id
+        self.add_item(CallerReassignmentSelect(self, options))
+
+    async def reassign_caller(self, interaction: discord.Interaction, caller_id: int) -> None:
+        await self.cog.change_activity_caller(interaction, self.activity_id, caller_id)
+
+    @discord.ui.button(label="Cancelar", style=discord.ButtonStyle.secondary, row=1)
+    async def cancel_button(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
+        await interaction.response.edit_message(content="Cambio de caller cancelado.", view=None)
+
+
 class PingPreviewView(discord.ui.View):
     def __init__(self, cog: "Activities", activity_id: int, author_id: int):
         super().__init__(timeout=900)
@@ -2048,6 +2170,8 @@ class PingPreviewView(discord.ui.View):
                 self.add_item(discord.ui.Button(label="Sin composicion", style=discord.ButtonStyle.secondary, row=0, disabled=True))
         self.add_action_button("Publicar ping", "publish", discord.ButtonStyle.success)
         self.add_action_button("Editar ping", "edit", discord.ButtonStyle.primary)
+        if activity is not None and guild is not None and cog.is_admin_user(guild, author_id):
+            self.add_action_button("Editar caller", "caller", discord.ButtonStyle.secondary)
         self.add_action_button("Cancelar creacion", "cancel", discord.ButtonStyle.danger)
 
     def add_action_button(self, label: str, action: str, style: discord.ButtonStyle) -> None:
@@ -2061,6 +2185,8 @@ class PingPreviewView(discord.ui.View):
                 await self.cog.publish_activity_draft(interaction, self.activity_id, self.author_id)
             elif action == "edit":
                 await self.cog.prompt_edit_activity_draft(interaction, self.activity_id, self.author_id)
+            elif action == "caller":
+                await self.cog.prompt_edit_draft_caller_assignment(interaction, self.activity_id, self.author_id)
             else:
                 await self.cog.cancel_activity_draft(interaction, self.activity_id, self.author_id)
 
@@ -2118,6 +2244,21 @@ class ActivityEditMenuView(discord.ui.View):
         if not await self.cog.require_activity_notes_editor(interaction, activity):
             return
         await self.cog.prompt_edit_notes_modal(interaction, activity)
+
+    @discord.ui.button(
+        label="Editar caller",
+        style=discord.ButtonStyle.primary,
+    )
+    async def edit_caller(
+        self,
+        interaction: discord.Interaction,
+        _: discord.ui.Button,
+    ) -> None:
+        activity = await self.get_activity(interaction)
+        if activity is None:
+            return
+        await self.cog.prompt_activity_caller_reassignment(interaction, activity, edit_current=True)
+
 
 class ConfirmAttendanceView(discord.ui.View):
     def __init__(self, cog: "Activities", activity_id: int):
@@ -2369,6 +2510,352 @@ class Activities(commands.Cog):
         self.bot = bot
         self.db = bot.db
         self._activity_messages_refreshed = False
+
+    @staticmethod
+    def row_value(row, key: str, default=None):
+        try:
+            value = row[key]
+        except (IndexError, KeyError, TypeError):
+            return default
+        return default if value is None else value
+
+    def activity_pinged_by_id(self, activity) -> int:
+        return int(self.row_value(activity, "pinged_by_id", activity["caller_id"]) or activity["caller_id"])
+
+    def is_admin_user(self, guild: discord.Guild, user_id: int) -> bool:
+        member = guild.get_member(user_id)
+        if member is None:
+            return False
+
+        class Subject:
+            pass
+
+        subject = Subject()
+        subject.guild = guild
+        subject.user = member
+        return is_admin_subject(self.db, subject)
+
+    def resolve_assignable_caller(self, guild: discord.Guild, user_id: int):
+        row = self.db.fetch_one(
+            "SELECT 1 FROM callers WHERE guild_id = ? AND user_id = ?",
+            (guild.id, user_id),
+        )
+        if row is None:
+            return None, "Ese usuario no esta registrado como Caller."
+        if is_caller_penalized(self.db, guild.id, user_id):
+            return None, "Ese caller tiene el acceso suspendido por reputacion."
+        member = guild.get_member(user_id)
+        if member is None:
+            return None, "No encontre a ese caller dentro del servidor."
+        return member, None
+
+    def assignable_caller_options(
+        self,
+        guild: discord.Guild,
+        *,
+        selected_user_id: int | None = None,
+    ) -> list[discord.SelectOption]:
+        rows = self.db.fetch_all(
+            "SELECT user_id FROM callers WHERE guild_id = ?",
+            (guild.id,),
+        )
+        callers = []
+        for row in rows:
+            user_id = int(row["user_id"])
+            if is_caller_penalized(self.db, guild.id, user_id):
+                continue
+            member = guild.get_member(user_id)
+            if member is None:
+                continue
+            callers.append((member.display_name.casefold(), member.display_name, member))
+        callers.sort(key=lambda item: item[0])
+        if selected_user_id is not None:
+            for index, (_, _, member) in enumerate(callers):
+                if member.id == selected_user_id:
+                    callers.insert(0, callers.pop(index))
+                    break
+        options: list[discord.SelectOption] = []
+        seen: set[int] = set()
+        for _, label, member in callers:
+            if member.id in seen:
+                continue
+            seen.add(member.id)
+            options.append(
+                discord.SelectOption(
+                    label=label[:100] or str(member.id),
+                    value=str(member.id),
+                    description=f"Caller autorizado ID {member.id}"[:100],
+                    default=selected_user_id == member.id,
+                )
+            )
+            if len(options) >= 25:
+                break
+        return options
+
+    def caller_assignment_field(self, activity):
+        pinged_by_id = self.activity_pinged_by_id(activity)
+        caller_id = int(activity["caller_id"])
+        if pinged_by_id == caller_id:
+            return None
+        return (
+            "ASIGNACION ADMIN",
+            f"**Pingueado por:** <@{pinged_by_id}>\n**Caller asignado:** <@{caller_id}>",
+            False,
+        )
+
+    def set_activity_avatar_thumbnail(self, embed: discord.Embed, guild: discord.Guild | None, activity) -> None:
+        user_id = self.activity_pinged_by_id(activity)
+        user = guild.get_member(user_id) if guild is not None else None
+        if user is None:
+            user = self.bot.get_user(user_id)
+        if user is not None:
+            embed.set_thumbnail(url=user.display_avatar.url)
+
+    def ping_preview_content(self, activity) -> str:
+        channel_text = f"<#{activity['channel_id']}>" if activity and activity["channel_id"] else "sin canal"
+        caller_text = f"<@{activity['caller_id']}>" if activity else "sin caller"
+        pinged_by_text = f"<@{self.activity_pinged_by_id(activity)}>" if activity else "sin usuario"
+        lines = [
+            "**Vista previa privada del ping**",
+            f"Se publicara en: {channel_text}",
+            f"Caller asignado: **{caller_text}**",
+        ]
+        if activity and self.activity_pinged_by_id(activity) != int(activity["caller_id"]):
+            lines.append(f"Pingueado por: **{pinged_by_text}**")
+        lines.append("Revisa el mensaje. Si todo esta bien, pulsa **Publicar ping**.")
+        return "\n".join(lines)
+
+    def activity_dm_summary(self, activity) -> str:
+        activity_type = "Ping Mandatory" if is_mandatory_activity(activity) else "Ping Normal"
+        voice_text = f"<#{activity['voice_channel_id']}>" if activity["voice_channel_id"] else "Sin canal"
+        channel_text = f"<#{activity['channel_id']}>" if activity["channel_id"] else "Sin canal de publicacion"
+        status = activity_status_label(str(activity["status"]))
+        lines = [
+            f"Tipo: **{activity_type}**",
+            f"ID: `{activity['code']}`",
+            f"Actividad: **{activity['name']}**",
+            f"Caller asignado: <@{activity['caller_id']}>",
+            f"Pingueado por: <@{self.activity_pinged_by_id(activity)}>",
+            f"Horario: `{activity['horario']}`",
+            f"Voz: {voice_text}",
+            f"Publicacion: {channel_text}",
+            f"Estado: {status}",
+        ]
+        notes = str(activity["notes"] or "").strip()
+        if notes:
+            lines.extend(["", f"Observaciones:\n{notes}"])
+        if is_mandatory_activity(activity):
+            image_url = str(activity["image_url"] or "").strip()
+            if image_url:
+                lines.append(f"Imagen: {image_url}")
+        else:
+            roles = self.get_activity_roles(int(activity["id"]))
+            if roles:
+                lines.append("")
+                lines.append("Composicion:")
+                for row in roles:
+                    role_label = f"{row['emoji'] or ''} {row['name']}".strip()
+                    lines.append(f"- {role_label}: {row['slots']}")
+            image_url = self.get_template_image_url(activity)
+            if image_url:
+                lines.append(f"Imagen de composicion: {image_url}")
+        text = "\n".join(lines)
+        return text[:1850]
+
+    async def notify_caller_assigned(
+        self,
+        guild: discord.Guild,
+        activity,
+        *,
+        actor_id: int,
+        previous_caller_id: int | None = None,
+    ) -> None:
+        if activity is None:
+            return
+        new_caller_id = int(activity["caller_id"])
+        if previous_caller_id is not None and previous_caller_id != new_caller_id:
+            previous = guild.get_member(previous_caller_id)
+            if previous is not None:
+                await send_dm_safe(
+                    self.db,
+                    guild_id=guild.id,
+                    user=previous,
+                    action="caller_asignado_removido",
+                    content=(
+                        f"Ya no eres el caller asignado del ping `{activity['code']}`.\n"
+                        f"Cambio realizado por <@{actor_id}>.\n\n"
+                        f"{self.activity_dm_summary(activity)}"
+                    ),
+                )
+        new_caller = guild.get_member(new_caller_id)
+        if new_caller is not None:
+            await send_dm_safe(
+                self.db,
+                guild_id=guild.id,
+                user=new_caller,
+                action="caller_asignado_ping",
+                content=(
+                    f"Se te asigno como caller oficial del ping `{activity['code']}`.\n"
+                    f"Asignado por <@{actor_id}>.\n\n"
+                    f"{self.activity_dm_summary(activity)}"
+                ),
+            )
+
+    async def prompt_caller_assignment(
+        self,
+        interaction: discord.Interaction,
+        activity_id: int,
+        *,
+        notify_previous: bool = False,
+    ) -> bool:
+        if interaction.guild is None:
+            await private_response(interaction, "Esta accion solo esta disponible en un servidor.")
+            return False
+        activity = self.get_activity(activity_id)
+        selected_user_id = int(activity["caller_id"]) if activity is not None else None
+        options = self.assignable_caller_options(interaction.guild, selected_user_id=selected_user_id)
+        if not options:
+            await private_response(interaction, "No hay callers autorizados disponibles para asignar este ping.")
+            return False
+        await private_response(
+            interaction,
+            "**Seleccionar Caller**\nElige quien dirigira oficialmente esta actividad.",
+            view=CallerAssignmentView(
+                self,
+                activity_id,
+                interaction.user.id,
+                options,
+                notify_previous=notify_previous,
+            ),
+        )
+        return True
+
+    async def prompt_edit_draft_caller_assignment(
+        self,
+        interaction: discord.Interaction,
+        activity_id: int,
+        author_id: int,
+    ) -> None:
+        activity, error = self.draft_activity_for_user(interaction, activity_id, author_id)
+        if activity is None:
+            await private_response(interaction, error or "No encontre este borrador.")
+            return
+        if interaction.guild is None or not is_admin_subject(self.db, interaction):
+            await private_response(interaction, "Solo admins pueden editar el caller designado.")
+            return
+        options = self.assignable_caller_options(
+            interaction.guild,
+            selected_user_id=int(activity["caller_id"]),
+        )
+        if not options:
+            await private_response(interaction, "No hay callers autorizados disponibles para asignar este ping.")
+            return
+        await interaction.response.edit_message(
+            content="**Seleccionar Caller**\nElige el nuevo caller oficial de esta actividad.",
+            embeds=[],
+            view=CallerAssignmentView(self, activity_id, author_id, options, notify_previous=True),
+        )
+
+    async def prompt_activity_caller_reassignment(
+        self,
+        interaction: discord.Interaction,
+        activity,
+        *,
+        edit_current: bool = False,
+    ) -> None:
+        if interaction.guild is None:
+            await private_response(interaction, "Esta accion solo esta disponible en un servidor.")
+            return
+        if not is_admin_subject(self.db, interaction):
+            await private_response(interaction, "Solo admins pueden editar el caller designado.")
+            return
+        if activity["status"] == ACTIVITY_PAYOUT_CREATED or self.db.fetch_one(
+            "SELECT 1 FROM payouts WHERE guild_id = ? AND activity_id = ?",
+            (interaction.guild.id, int(activity["id"])),
+        ) is not None:
+            await private_response(interaction, "No se puede cambiar el caller cuando el ping ya tiene Split asociado.")
+            return
+        options = self.assignable_caller_options(
+            interaction.guild,
+            selected_user_id=int(activity["caller_id"]),
+        )
+        if not options:
+            await private_response(interaction, "No hay callers autorizados disponibles para asignar este ping.")
+            return
+        content = "**Seleccionar Caller**\nElige el nuevo caller oficial de esta actividad."
+        view = CallerReassignmentView(self, int(activity["id"]), options)
+        if edit_current and not interaction.response.is_done():
+            await interaction.response.edit_message(content=content, view=view)
+            return
+        await private_response(interaction, content, view=view)
+
+    async def change_activity_caller(
+        self,
+        interaction: discord.Interaction,
+        activity_id: int,
+        caller_id: int,
+    ) -> None:
+        if interaction.guild is None:
+            await private_response(interaction, "Esta accion solo esta disponible en un servidor.")
+            return
+        if not is_admin_subject(self.db, interaction):
+            await private_response(interaction, "Solo admins pueden editar el caller designado.")
+            return
+        activity = self.get_guild_activity(interaction.guild.id, activity_id)
+        if activity is None:
+            await private_response(interaction, "No encontre esta actividad en este servidor.")
+            return
+        if activity["status"] == ACTIVITY_DELETED:
+            await private_response(interaction, "No se puede cambiar el caller de un ping eliminado.")
+            return
+        if activity["status"] == ACTIVITY_PAYOUT_CREATED or self.db.fetch_one(
+            "SELECT 1 FROM payouts WHERE guild_id = ? AND activity_id = ?",
+            (interaction.guild.id, activity_id),
+        ) is not None:
+            await private_response(interaction, "No se puede cambiar el caller cuando el ping ya tiene Split asociado.")
+            return
+        member, error = self.resolve_assignable_caller(interaction.guild, caller_id)
+        if member is None:
+            await private_response(interaction, error or "No encontre ese caller.")
+            return
+        previous_caller_id = int(activity["caller_id"])
+        if previous_caller_id == caller_id:
+            await private_response(interaction, "Ese usuario ya es el caller asignado de esta actividad.")
+            return
+        self.db.execute(
+            "UPDATE activities SET caller_id = ? WHERE guild_id = ? AND id = ?",
+            (caller_id, interaction.guild.id, activity_id),
+        )
+        updated = self.get_activity(activity_id)
+        await interaction.response.edit_message(
+            content=f"Caller designado actualizado a {member.mention}. Se notificara al nuevo caller y al anterior.",
+            view=None,
+        )
+        await self.update_activity_message(activity_id)
+        await self.notify_caller_assigned(
+            interaction.guild,
+            updated,
+            actor_id=interaction.user.id,
+            previous_caller_id=previous_caller_id,
+        )
+        log_action(
+            self.db,
+            interaction.guild.id,
+            admin_id=interaction.user.id,
+            action="Editar caller designado",
+            system="Actividades",
+            affected_user_id=caller_id,
+            observation=f"{activity['code']} caller_anterior={previous_caller_id}",
+        )
+        await send_admin_notification(
+            self.db,
+            guild=interaction.guild,
+            category="activities",
+            content=(
+                f"Caller designado del ping `{activity['code']}` cambiado por <@{interaction.user.id}>: "
+                f"<@{previous_caller_id}> -> <@{caller_id}>."
+            ),
+        )
 
     async def cog_load(self) -> None:
         self.bot.add_view(PingsPanelView(self))
@@ -3263,18 +3750,11 @@ class Activities(commands.Cog):
         if activity is None:
             await private_response(interaction, "No pude generar la vista previa del ping.")
             return
-        guild = interaction.guild or self.bot.get_guild(int(activity["guild_id"]))
-        channel_text = f"<#{activity['channel_id']}>" if activity["channel_id"] else "sin canal"
-        content = (
-            "**Vista previa privada del ping**\n"
-            f"Se publicara en: {channel_text}\n"
-            "Revisa el mensaje. Si todo esta bien, pulsa **Publicar ping**."
-        )
         await private_response(
             interaction,
-            content,
+            self.ping_preview_content(activity),
             embeds=self.build_activity_embeds(activity_id, preview_status=ACTIVITY_OPEN),
-            view=PingPreviewView(self, activity_id, int(activity["caller_id"])),
+            view=PingPreviewView(self, activity_id, self.activity_pinged_by_id(activity)),
         )
 
     def draft_activity_for_user(
@@ -3288,7 +3768,7 @@ class Activities(commands.Cog):
         activity = self.get_guild_activity(interaction.guild.id, activity_id)
         if activity is None:
             return None, "No encontre este borrador en el servidor."
-        if int(activity["caller_id"]) != author_id or interaction.user.id != author_id:
+        if self.activity_pinged_by_id(activity) != author_id or interaction.user.id != author_id:
             return None, "Solo quien creo este borrador puede usar esta vista previa."
         if activity["status"] != ACTIVITY_DRAFT:
             return None, "Este borrador ya fue publicado, eliminado o cancelado."
@@ -3353,16 +3833,17 @@ class Activities(commands.Cog):
             activity_id = self.db.execute(
                 """
                 INSERT INTO activities (
-                    code, guild_id, template_id, name, caller_id, horario,
+                    code, guild_id, template_id, name, caller_id, pinged_by_id, horario,
                     voice_channel_id, notes, status, channel_id, created_at,
                     activity_type, image_url
                 )
-                VALUES (?, ?, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     code,
                     interaction.guild.id,
                     "Ping Mandatory",
+                    interaction.user.id,
                     interaction.user.id,
                     horario,
                     voice_channel.id,
@@ -3375,6 +3856,9 @@ class Activities(commands.Cog):
                 ),
             )
         self.ensure_mandatory_participant_role(activity_id)
+        if draft_id is None and is_admin_subject(self.db, interaction):
+            await self.prompt_caller_assignment(interaction, activity_id)
+            return
         await self.send_ping_preview(interaction, activity_id)
 
     async def save_activity_draft_from_modal(
@@ -3472,16 +3956,17 @@ class Activities(commands.Cog):
                 cursor.execute(
                     """
                     INSERT INTO activities (
-                        code, guild_id, template_id, name, caller_id, horario,
+                        code, guild_id, template_id, name, caller_id, pinged_by_id, horario,
                         voice_channel_id, notes, status, channel_id, created_at
                     )
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         code,
                         interaction.guild.id,
                         modal.template_id,
                         activity_name,
+                        interaction.user.id,
                         interaction.user.id,
                         horario,
                         voice_channel.id,
@@ -3500,6 +3985,9 @@ class Activities(commands.Cog):
                         """,
                         (activity_id, role["key"], role["name"], role["slots"], role["emoji"], role["position"]),
                     )
+        if modal.draft_id is None and is_admin_subject(self.db, interaction):
+            await self.prompt_caller_assignment(interaction, activity_id)
+            return
         await self.send_ping_preview(interaction, activity_id)
 
     async def prompt_edit_activity_draft(
@@ -3602,7 +4090,8 @@ class Activities(commands.Cog):
             "UPDATE activities SET message_id = ?, channel_id = ? WHERE id = ?",
             (message.id, channel.id, activity_id),
         )
-        thread_panel_created = await self.create_ping_thread(message, activity)
+        published_activity = self.get_activity(activity_id)
+        thread_panel_created = await self.create_ping_thread(message, published_activity or activity)
         self.bot.add_view(ActivityView(self, activity_id))
         if thread_panel_created:
             self.bot.add_view(ActivityThreadPanelView(self, activity_id))
@@ -3640,6 +4129,12 @@ class Activities(commands.Cog):
             embeds=[],
             view=None,
         )
+        if published_activity is not None and self.activity_pinged_by_id(published_activity) != int(published_activity["caller_id"]):
+            await self.notify_caller_assigned(
+                interaction.guild,
+                published_activity,
+                actor_id=interaction.user.id,
+            )
 
     def activity_thread_panel_text(self, activity_id: int) -> str:
         activity = self.get_activity(activity_id)
@@ -4065,6 +4560,9 @@ class Activities(commands.Cog):
             description=activity_note_description(notes),
             color=discord.Color.red(),
         )
+        assignment_field = self.caller_assignment_field(activity)
+        if assignment_field is not None:
+            embed.add_field(*assignment_field)
         embed.add_field(name="\U0001F464 CALLER", value=f"<@{activity['caller_id']}>", inline=True)
         embed.add_field(name="\U0001F50A CANAL", value=voice_text, inline=True)
         embed.add_field(name="\U0001F552 Hora Albion", value=str(activity["horario"]), inline=True)
@@ -4074,6 +4572,7 @@ class Activities(commands.Cog):
         embed.add_field(name=f"\U0001F465 PARTICIPANTES: {len(participants)}", value=participants_text, inline=False)
         embed.set_footer(text=MANDATORY_FOOTER_TEXT)
         guild = self.bot.get_guild(int(activity["guild_id"]))
+        self.set_activity_avatar_thumbnail(embed, guild, activity)
         image_url = str(activity["image_url"] or "").strip()
         if image_url:
             embed.set_image(url=image_url)
@@ -4133,6 +4632,9 @@ class Activities(commands.Cog):
             description=activity_note_description(notes),
             color=ACTIVITY_EMBED_COLOR,
         )
+        assignment_field = self.caller_assignment_field(activity)
+        if assignment_field is not None:
+            embed.add_field(*assignment_field)
         embed.add_field(name="👤 Caller", value=f"<@{activity['caller_id']}>", inline=True)
         embed.add_field(name="\U0001F552 Hora Albion", value=str(activity["horario"]), inline=True)
         embed.add_field(name=f"{status_icon} Estado", value=status_name, inline=True)
@@ -4162,11 +4664,7 @@ class Activities(commands.Cog):
             embed.set_footer(text=ACTIVITY_FOOTER_TEXT)
 
         guild = self.bot.get_guild(int(activity["guild_id"]))
-        caller = guild.get_member(int(activity["caller_id"])) if guild is not None else None
-        if caller is None:
-            caller = self.bot.get_user(int(activity["caller_id"]))
-        if caller is not None:
-            embeds[0].set_thumbnail(url=caller.display_avatar.url)
+        self.set_activity_avatar_thumbnail(embeds[0], guild, activity)
         if image_url:
             embeds[-1].set_image(url=image_url)
 
@@ -5242,6 +5740,9 @@ class Activities(commands.Cog):
             return
         if action == "mandatory_participants":
             await private_response(interaction, self.mandatory_participants_text(activity_id))
+            return
+        if action == "edit_caller":
+            await self.prompt_activity_caller_reassignment(interaction, activity)
             return
         if action == "leave":
             await self.leave_activity(interaction, activity_id)
