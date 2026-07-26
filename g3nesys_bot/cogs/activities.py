@@ -907,7 +907,7 @@ class MandatoryActivityModal(discord.ui.Modal, title="Ping Mandatory"):
 class MandatoryVoiceChannelSelect(discord.ui.ChannelSelect):
     def __init__(self, parent_view: "MandatoryPingDraftView"):
         super().__init__(
-            placeholder="Selecciona el canal de voz del Mandatory",
+            placeholder="Selecciona el canal de voz ping CTA",
             channel_types=[discord.ChannelType.voice, discord.ChannelType.stage_voice],
             min_values=1,
             max_values=1,
