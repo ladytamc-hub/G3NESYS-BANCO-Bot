@@ -1513,7 +1513,7 @@ class PingsPanelView(discord.ui.View):
                 self.add_item(item)
 
     @discord.ui.button(
-        label="Ping Mandatory",
+        label="Ping CTA (sin compo)",
         emoji="⚔️",
         style=discord.ButtonStyle.danger,
         custom_id="g3n:pings:create_mandatory",
@@ -4562,7 +4562,8 @@ class Activities(commands.Cog):
         )
         assignment_field = self.caller_assignment_field(activity)
         if assignment_field is not None:
-            embed.add_field(*assignment_field)
+            name, value, inline = assignment_field
+            embed.add_field(name=name, value=value, inline=inline)
         embed.add_field(name="\U0001F464 CALLER", value=f"<@{activity['caller_id']}>", inline=True)
         embed.add_field(name="\U0001F50A CANAL", value=voice_text, inline=True)
         embed.add_field(name="\U0001F552 Hora Albion", value=str(activity["horario"]), inline=True)
@@ -4634,7 +4635,8 @@ class Activities(commands.Cog):
         )
         assignment_field = self.caller_assignment_field(activity)
         if assignment_field is not None:
-            embed.add_field(*assignment_field)
+            name, value, inline = assignment_field
+            embed.add_field(name=name, value=value, inline=inline)
         embed.add_field(name="👤 Caller", value=f"<@{activity['caller_id']}>", inline=True)
         embed.add_field(name="\U0001F552 Hora Albion", value=str(activity["horario"]), inline=True)
         embed.add_field(name=f"{status_icon} Estado", value=status_name, inline=True)
