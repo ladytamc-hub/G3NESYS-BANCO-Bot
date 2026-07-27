@@ -65,7 +65,7 @@ from ..weapon_aliases import resolve_weapon_alias
 
 
 LOGGER = logging.getLogger("g3nesys.activities")
-MAX_ACTIVITY_ROLES = 15
+MAX_ACTIVITY_ROLES = 45
 ACTIVITY_MANAGEMENT_DENIED_MESSAGE = (
     "No puedes administrar esta actividad porque no fuiste quien la creó."
 )
@@ -84,8 +84,8 @@ ACTIVITY_PRIMARY_COMPOSITION_FIELDS = (
     - ACTIVITY_GENERAL_TO_COMPOSITION_SPACERS
 )
 ACTIVITY_FOOTER_TEXT = (
-    "✅ Haz check cuando el caller lo indique • "
-    "🎤 Permanece en el canal de voz • "
+    "✅ Toma tu rol • "
+    "🎤 Permanece en el canal de voz hasta el call out • "
     "⚔️ Sigue las indicaciones del caller"
 )
 MANDATORY_FOOTER_TEXT = "Convocatoria oficial - Asistencia calculada por presencia en voz"
