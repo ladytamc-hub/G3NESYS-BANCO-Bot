@@ -1513,7 +1513,7 @@ class PingsPanelView(discord.ui.View):
                 self.add_item(item)
 
     @discord.ui.button(
-        label="Ping CTA (sin compo)",
+        label="Ping CTA (Sin Split)",
         emoji="⚔️",
         style=discord.ButtonStyle.danger,
         custom_id="g3n:pings:create_mandatory",
