@@ -1540,7 +1540,7 @@ class PingsPanelView(discord.ui.View):
         await self.cog.prompt_activity_creation(interaction, template_id=None)
 
     @discord.ui.button(
-        label="Crear Ping desde Plantilla",
+        label="Crear Ping (Act.Split)",
         emoji="📍",
         style=discord.ButtonStyle.secondary,
         custom_id="g3n:pings:select_template",
