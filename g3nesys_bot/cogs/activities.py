@@ -858,7 +858,7 @@ class ActivityModal(discord.ui.Modal):
         await self.cog.save_activity_draft_from_modal(interaction, self)
 
 
-class MandatoryActivityModal(discord.ui.Modal, title="Ping CTA Sin Compo"):
+class MandatoryActivityModal(discord.ui.Modal, title="Ping CTA Sin Split"):
     horario = discord.ui.TextInput(label="Horario de la actividad", max_length=40)
     voice_channel = discord.ui.TextInput(
         label="ID o mencion del canal de voz",
