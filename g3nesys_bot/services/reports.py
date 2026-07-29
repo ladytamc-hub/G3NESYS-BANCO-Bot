@@ -5,11 +5,6 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Iterable, Sequence
 
-from openpyxl import Workbook
-from openpyxl.chart import BarChart, Reference
-from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
-from openpyxl.utils import get_column_letter
-from openpyxl.worksheet.table import Table, TableStyleInfo
 
 from ..constants import DEFAULT_SETTINGS
 from ..database import Database
@@ -27,6 +22,34 @@ LIGHT_BORDER = "E7D5DF"
 CURRENCY_FORMAT = '#,##0 "plata";[Red](#,##0 "plata");-'
 PERCENT_FORMAT = '0.0"%"'
 DATE_FORMAT = "yyyy-mm-dd hh:mm"
+
+def _ensure_openpyxl() -> None:
+    global Workbook, BarChart, Reference, Alignment, Border, Font, PatternFill, Side
+    global get_column_letter, Table, TableStyleInfo
+
+    from openpyxl import Workbook as _Workbook
+    from openpyxl.chart import BarChart as _BarChart, Reference as _Reference
+    from openpyxl.styles import (
+        Alignment as _Alignment,
+        Border as _Border,
+        Font as _Font,
+        PatternFill as _PatternFill,
+        Side as _Side,
+    )
+    from openpyxl.utils import get_column_letter as _get_column_letter
+    from openpyxl.worksheet.table import Table as _Table, TableStyleInfo as _TableStyleInfo
+
+    Workbook = _Workbook
+    BarChart = _BarChart
+    Reference = _Reference
+    Alignment = _Alignment
+    Border = _Border
+    Font = _Font
+    PatternFill = _PatternFill
+    Side = _Side
+    get_column_letter = _get_column_letter
+    Table = _Table
+    TableStyleInfo = _TableStyleInfo
 
 
 def _generated_at() -> datetime:
@@ -152,6 +175,7 @@ def _add_detail_sheet(
 
 
 def _new_workbook(title: str, subtitle: str) -> tuple[Workbook, object]:
+    _ensure_openpyxl()
     workbook = Workbook()
     sheet = workbook.active
     sheet.title = "Resumen"

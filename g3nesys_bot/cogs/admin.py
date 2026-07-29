@@ -2870,7 +2870,7 @@ class AdminPanelView(discord.ui.View):
                 view=DepositOptionsView(self.cog, admin_id=interaction.user.id),
             )
 
-    @discord.ui.button(label="Dep?sito masivo", emoji="\U0001F4B0", style=discord.ButtonStyle.success, custom_id="g3n:admin:bulk_deposit", row=1)
+    @discord.ui.button(label="Deposito masivo", emoji="\U0001F4B0", style=discord.ButtonStyle.success, custom_id="g3n:admin:bulk_deposit", row=1)
     async def bulk_deposit(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
         if await self.require_admin(interaction):
             view = BulkDepositSelectionView(self.cog, interaction.user.id)

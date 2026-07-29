@@ -236,6 +236,10 @@ class BankPanelView(discord.ui.View):
         await self.cog.show_deposits_interaction(interaction)
 
 
+    @discord.ui.button(label="Crear ticket", emoji="\U0001F3AB", style=discord.ButtonStyle.primary, custom_id="g3n:bank:create_ticket", row=2)
+    async def create_ticket(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
+        await self.cog.open_ticket_modal(interaction)
+
 class ApproveWithdrawalReviewModal(discord.ui.Modal, title="Aprobar cobro"):
     admin_message = discord.ui.TextInput(
         label="Indicaciones para el usuario (opcional)",
