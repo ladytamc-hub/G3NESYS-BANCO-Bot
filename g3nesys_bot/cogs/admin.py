@@ -366,31 +366,16 @@ class DepositOptionsView(discord.ui.View):
         await private_response(interaction, "Solo el admin que abrio este menu puede usarlo.")
         return False
 
-    @discord.ui.button(label="Deposito manual", emoji="ðŸª™", style=discord.ButtonStyle.success)
+    @discord.ui.button(label="Deposito individual", emoji="\U0001FA99", style=discord.ButtonStyle.success)
     async def manual_deposit(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
         if await self.require_owner_admin(interaction):
             await interaction.response.send_modal(DepositModal(self.cog))
 
-    @discord.ui.button(label="Liquidacion rapida", emoji="âš¡", style=discord.ButtonStyle.primary)
-    async def quick_liquidation(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
-        if not await self.require_owner_admin(interaction):
-            return
-        rows = recent_liquidatable_payouts(self.cog.db, interaction.guild.id)
-        if not rows:
-            await private_response(
-                interaction,
-                "No existen splits recientes con miembros pendientes de liquidar.",
-            )
-            return
-        await private_response(
-            interaction,
-            "Selecciona el split reciente que deseas liquidar:",
-            view=QuickLiquidationSplitSelectionView(
-                self.cog,
-                admin_id=self.admin_id,
-                payouts=rows,
-            ),
-        )
+    @discord.ui.button(label="Deposito masivo", emoji="\U0001F4B0", style=discord.ButtonStyle.primary)
+    async def bulk_deposit(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
+        if await self.require_owner_admin(interaction):
+            view = BulkDepositSelectionView(self.cog, interaction.user.id)
+            await private_response(interaction, view.text(interaction.guild), view=view)
 
 
 class BulkDepositAmountModal(discord.ui.Modal, title="Deposito masivo"):
@@ -2869,12 +2854,6 @@ class AdminPanelView(discord.ui.View):
                 "Selecciona el tipo de operacion:",
                 view=DepositOptionsView(self.cog, admin_id=interaction.user.id),
             )
-
-    @discord.ui.button(label="Deposito masivo", emoji="\U0001F4B0", style=discord.ButtonStyle.success, custom_id="g3n:admin:bulk_deposit", row=1)
-    async def bulk_deposit(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
-        if await self.require_admin(interaction):
-            view = BulkDepositSelectionView(self.cog, interaction.user.id)
-            await private_response(interaction, view.text(interaction.guild), view=view)
 
     @discord.ui.button(label="Solicitudes de Cobro", emoji="ðŸ’³", style=discord.ButtonStyle.secondary, custom_id="g3n:admin:withdrawals", row=1)
     async def withdrawals(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
