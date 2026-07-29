@@ -872,14 +872,14 @@ class WithdrawalAdminView(discord.ui.View):
         super().__init__(timeout=600)
         self.cog = cog
 
-    @discord.ui.button(label="Aprobar cobro", emoji="âœ…", style=discord.ButtonStyle.success)
+    @discord.ui.button(label="Aprobar cobro", emoji="\U00002705", style=discord.ButtonStyle.success)
     async def approve(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
         if not is_admin_subject(self.cog.db, interaction):
             await private_response(interaction, "Solo admins autorizados pueden aprobar cobros.")
             return
         await interaction.response.send_modal(ApproveWithdrawalModal(self.cog))
 
-    @discord.ui.button(label="Liquidar cobro", emoji="ðŸ’µ", style=discord.ButtonStyle.primary)
+    @discord.ui.button(label="Liquidar cobro", emoji="\U0001F4B5", style=discord.ButtonStyle.primary)
     async def liquidate(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
         if not is_admin_subject(self.cog.db, interaction):
             await private_response(interaction, "Solo admins autorizados pueden liquidar cobros.")
