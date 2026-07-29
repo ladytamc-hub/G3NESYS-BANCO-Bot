@@ -4804,6 +4804,11 @@ class Admin(commands.Cog):
             return True
         return withdrawal is not None and withdrawal["assigned_officer_id"] and int(withdrawal["assigned_officer_id"]) == user_id
 
+    async def refresh_withdrawal_admin_message(self, guild: discord.Guild, code: str, admin_id: int | None = None) -> str:
+        bank_cog = self.bot.get_cog("Bank")
+        if bank_cog is None or not hasattr(bank_cog, "refresh_withdrawal_admin_message"):
+            return ""
+        return await bank_cog.refresh_withdrawal_admin_message(guild, code, actor_id=admin_id)
     async def approve_withdrawal(
         self,
         guild: discord.Guild,
@@ -4825,7 +4830,7 @@ class Admin(commands.Cog):
             """
             UPDATE withdrawals
             SET status = ?, approved_by = ?, approved_at = ?,
-                approval_admin_message = ?
+                approval_admin_message = ?, updated_at = ?
             WHERE guild_id = ? AND id = ?
             """,
             (
@@ -4833,6 +4838,7 @@ class Admin(commands.Cog):
                 admin_id,
                 utc_now_iso(),
                 admin_message or None,
+                utc_now_iso(),
                 guild.id,
                 int(withdrawal["id"]),
             ),
@@ -4874,6 +4880,7 @@ class Admin(commands.Cog):
                 f"{admin_message_block(admin_message)}"
             ),
         )
+        await self.refresh_withdrawal_admin_message(guild, code, admin_id)
 
     async def liquidate_withdrawal(
         self,
@@ -5008,6 +5015,7 @@ class Admin(commands.Cog):
             ),
         )
         warning = " Advertencia: no pude enviar DM al usuario." if not dm_sent else ""
+        warning += await self.refresh_withdrawal_admin_message(guild, code, admin_id)
         return f"Cobro `{code}` registrado por {format_amount(amount)}. Movimiento #{movement_id}.{warning}"
 
     async def pay_withdrawal_full(self, guild: discord.Guild, code: str, admin_id: int) -> str:
@@ -5053,7 +5061,8 @@ class Admin(commands.Cog):
             )
             if not sent:
                 log_action(self.db, guild.id, admin_id=admin_id, action="Fallo DM cobro no pagado", system="Banco", affected_user_id=user.id, amount=pending, observation=code)
-        return f"Cobro `{code}` cerrado como `{WITHDRAWAL_UNPAID}`. Pendiente conservado en balance: {format_amount(pending)}."
+        warning = await self.refresh_withdrawal_admin_message(guild, code, admin_id)
+        return f"Cobro `{code}` cerrado como `{WITHDRAWAL_UNPAID}`. Pendiente conservado en balance: {format_amount(pending)}.{warning}"
 
     async def delegate_withdrawal(self, guild: discord.Guild, code: str, admin_id: int, officer_id: int, place: str, schedule: str, note: str = "") -> str:
         code = code.strip().upper()
@@ -5162,7 +5171,8 @@ class Admin(commands.Cog):
         bank_cog = self.bot.get_cog("Bank")
         if bank_cog is not None:
             await bank_cog.send_delegated_withdrawal_dm(guild, code, officer, note)
-        return f"Cobro `{code}` delegado a {officer.mention}."
+        warning = await self.refresh_withdrawal_admin_message(guild, code, admin_id)
+        return f"Cobro `{code}` delegado a {officer.mention}.{warning}"
 
     async def return_delegated_withdrawal(self, guild: discord.Guild, code: str, officer_id: int, reason: str) -> str:
         withdrawal = self.db.fetch_one("SELECT * FROM withdrawals WHERE guild_id = ? AND code = ?", (guild.id, code.strip().upper()))
@@ -5182,7 +5192,8 @@ class Admin(commands.Cog):
         self.log_withdrawal_action(int(withdrawal["id"]), action_type="retorno_oficial", author_id=officer_id, amount=self.withdrawal_pending_amount(withdrawal), old_status=str(withdrawal["status"]), new_status=WITHDRAWAL_REASSIGNMENT, note=reason)
         log_action(self.db, guild.id, admin_id=officer_id, action="Oficial retorno cobro", system="Banco", affected_user_id=int(withdrawal["user_id"]), amount=self.withdrawal_pending_amount(withdrawal), observation=f"{code}; {reason}")
         await send_admin_notification(self.db, guild=guild, category="withdrawals", content=f"?? Cobro `{code}` retornado por <@{officer_id}>. Motivo: {reason}. Estado: {WITHDRAWAL_REASSIGNMENT}.")
-        return f"Cobro `{code}` retornado a administracion."
+        warning = await self.refresh_withdrawal_admin_message(guild, code, officer_id)
+        return f"Cobro `{code}` retornado a administracion.{warning}"
 
     async def approve_payout(self, guild: discord.Guild, code: str, admin_id: int) -> str:
         payout = self.db.fetch_one(

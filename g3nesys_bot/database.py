@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import sqlite3
 import threading
@@ -185,6 +185,8 @@ class Database:
             "return_reason": "TEXT",
             "closed_at": "TEXT",
             "updated_at": "TEXT",
+            "notification_channel_id": "INTEGER",
+            "notification_message_id": "INTEGER",
         }
         for column, column_type in extra_withdrawal_columns.items():
             if column not in withdrawal_columns:
@@ -867,6 +869,8 @@ CREATE TABLE IF NOT EXISTS withdrawals (
     return_reason TEXT,
     closed_at TEXT,
     updated_at TEXT,
+    notification_channel_id INTEGER,
+    notification_message_id INTEGER,
     UNIQUE(guild_id, code)
 );
 

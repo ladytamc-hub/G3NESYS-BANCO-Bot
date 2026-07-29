@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import discord
 from discord.ext import commands
@@ -495,12 +495,20 @@ class WithdrawalReviewView(discord.ui.View):
         self.cog = cog
         self.guild_id = guild_id
         self.code = code
-        self._add_button("Aprobar cobro", "approve", "\U00002705", discord.ButtonStyle.success, row=0)
-        self._add_button("Pagado", "paid", "\U00002705", discord.ButtonStyle.success, row=0)
-        self._add_button("Pago parcial", "liquidate", "\U0001F4B5", discord.ButtonStyle.primary, row=0)
-        self._add_button("No pagado", "unpaid", "\U000021A9", discord.ButtonStyle.danger, row=1)
-        self._add_button("Delegar pago", "delegate", "\U0001F464", discord.ButtonStyle.secondary, row=1)
-
+        withdrawal = cog.db.fetch_one(
+            "SELECT status FROM withdrawals WHERE guild_id = ? AND code = ?",
+            (guild_id, code),
+        )
+        status = withdrawal["status"] if withdrawal is not None else WITHDRAWAL_PENDING
+        if status == WITHDRAWAL_PENDING:
+            self._add_button("Aprobar cobro", "approve", "✅", discord.ButtonStyle.success, row=0)
+            self._add_button("Delegar pago", "delegate", "👤", discord.ButtonStyle.secondary, row=0)
+        elif status in {WITHDRAWAL_APPROVED, WITHDRAWAL_PARTIAL, WITHDRAWAL_DELEGATED, WITHDRAWAL_REASSIGNMENT}:
+            self._add_button("Pagado", "paid", "✅", discord.ButtonStyle.success, row=0)
+            self._add_button("Pago parcial", "liquidate", "💵", discord.ButtonStyle.primary, row=0)
+            self._add_button("No pagado", "unpaid", "↩", discord.ButtonStyle.danger, row=1)
+            if status in {WITHDRAWAL_APPROVED, WITHDRAWAL_REASSIGNMENT}:
+                self._add_button("Delegar pago", "delegate", "👤", discord.ButtonStyle.secondary, row=1)
     def _add_button(self, label: str, action: str, emoji: str, style: discord.ButtonStyle, *, row: int) -> None:
         button = discord.ui.Button(
             label=label,
@@ -817,6 +825,93 @@ class Bank(commands.Cog):
                 TicketAdminActionView(self, int(row["guild_id"]), str(row["code"]))
             )
 
+    def withdrawal_admin_embed(self, guild: discord.Guild, withdrawal) -> discord.Embed:
+        paid = int(withdrawal["amount_liquidated"] or 0)
+        requested = int(withdrawal["amount_requested"] or 0)
+        pending = max(0, requested - paid)
+        embed = discord.Embed(
+            title=f"💳 Solicitud de cobro {withdrawal['code']}",
+            description=f"Estado: {withdrawal['status']}",
+            color=discord.Color.gold(),
+        )
+        embed.add_field(name="Usuario", value=f"<@{withdrawal['user_id']}>", inline=True)
+        embed.add_field(name="Solicitado", value=format_amount(requested), inline=True)
+        embed.add_field(name="Pagado", value=format_amount(paid), inline=True)
+        embed.add_field(name="Pendiente", value=format_amount(pending), inline=True)
+        embed.add_field(
+            name="Oficial asignado",
+            value=f"<@{withdrawal['assigned_officer_id']}>" if withdrawal["assigned_officer_id"] else "Sin asignar",
+            inline=True,
+        )
+        embed.add_field(name="Lugar", value=withdrawal["payment_place"] or "Sin lugar", inline=True)
+        embed.add_field(name="Horario", value=withdrawal["payment_schedule"] or "Sin horario", inline=True)
+        embed.add_field(name="Fecha de pago", value=withdrawal["liquidated_at"] or "Sin pago registrado", inline=True)
+        embed.add_field(
+            name="Registrado por",
+            value=f"<@{withdrawal['liquidated_by']}>" if withdrawal["liquidated_by"] else "Sin registro de pago",
+            inline=True,
+        )
+        embed.add_field(name="Ultima actualizacion", value=withdrawal["updated_at"] or withdrawal["created_at"], inline=True)
+        if withdrawal["approved_by"]:
+            embed.add_field(name="Aprobado por", value=f"<@{withdrawal['approved_by']}>", inline=True)
+        if withdrawal["approved_at"]:
+            embed.add_field(name="Fecha de aprobacion", value=withdrawal["approved_at"], inline=True)
+        embed.add_field(name="Nota", value=withdrawal["reason"] or "Sin nota", inline=False)
+        if withdrawal["approval_admin_message"]:
+            embed.add_field(name="Indicaciones de aprobacion", value=str(withdrawal["approval_admin_message"])[:1024], inline=False)
+        if withdrawal["liquidation_admin_message"]:
+            embed.add_field(name="Indicaciones de pago", value=str(withdrawal["liquidation_admin_message"])[:1024], inline=False)
+        if withdrawal["return_reason"]:
+            embed.add_field(name="Nota de cierre/retorno", value=str(withdrawal["return_reason"])[:1024], inline=False)
+        return embed
+
+    def withdrawal_admin_view(self, withdrawal) -> discord.ui.View | None:
+        terminal_statuses = {WITHDRAWAL_PAID, WITHDRAWAL_UNPAID, WITHDRAWAL_REJECTED, WITHDRAWAL_CANCELLED}
+        if withdrawal["status"] in terminal_statuses:
+            return None
+        return WithdrawalReviewView(self, int(withdrawal["guild_id"]), str(withdrawal["code"]))
+
+    async def refresh_withdrawal_admin_message(self, guild: discord.Guild, code: str, *, actor_id: int | None = None) -> str:
+        withdrawal = self.db.fetch_one(
+            "SELECT * FROM withdrawals WHERE guild_id = ? AND code = ?",
+            (guild.id, code.strip().upper()),
+        )
+        if withdrawal is None:
+            return ""
+        channel_id = withdrawal["notification_channel_id"] if "notification_channel_id" in withdrawal.keys() else None
+        message_id = withdrawal["notification_message_id"] if "notification_message_id" in withdrawal.keys() else None
+        if not channel_id or not message_id:
+            log_action(
+                self.db,
+                guild.id,
+                admin_id=actor_id,
+                action="Fallo actualizar embed cobro",
+                system="Banco",
+                affected_user_id=int(withdrawal["user_id"]),
+                observation=f"{code}; sin channel_id/message_id guardado",
+            )
+            return " Advertencia: no encontre el mensaje original para actualizar el embed."
+        channel = guild.get_channel(int(channel_id)) or self.bot.get_channel(int(channel_id))
+        try:
+            if channel is None:
+                channel = await self.bot.fetch_channel(int(channel_id))
+            message = await channel.fetch_message(int(message_id))
+            await message.edit(
+                embed=self.withdrawal_admin_embed(guild, withdrawal),
+                view=self.withdrawal_admin_view(withdrawal),
+            )
+            return ""
+        except (discord.Forbidden, discord.NotFound, discord.HTTPException, AttributeError) as exc:
+            log_action(
+                self.db,
+                guild.id,
+                admin_id=actor_id,
+                action="Fallo actualizar embed cobro",
+                system="Banco",
+                affected_user_id=int(withdrawal["user_id"]),
+                observation=f"{code}; channel={channel_id}; message={message_id}; error={exc}",
+            )
+            return " Advertencia: la operacion se registro, pero no pude actualizar el mensaje original del cobro."
     async def open_ticket_modal(self, interaction: discord.Interaction) -> None:
         if not isinstance(interaction.user, discord.Member) or not has_bank_access(self.db, interaction.user):
             await private_response(interaction, "Necesitas rol MIEMBRO G3NESYS o INVITADO.")
@@ -1502,32 +1597,35 @@ class Bank(commands.Cog):
         )
         if row is None:
             return
-        paid = int(row["amount_liquidated"] or 0)
-        requested = int(row["amount_requested"] or 0)
-        pending = max(0, requested - paid)
-        embed = discord.Embed(
-            title=f"?? Solicitud de cobro {code}",
-            description=f"Estado: {row['status']}",
-            color=discord.Color.gold(),
-        )
-        embed.add_field(name="Usuario", value=f"<@{row['user_id']}>", inline=True)
-        embed.add_field(name="Solicitado", value=format_amount(requested), inline=True)
-        embed.add_field(name="Pagado", value=format_amount(paid), inline=True)
-        embed.add_field(name="Pendiente", value=format_amount(pending), inline=True)
-        embed.add_field(name="Oficial asignado", value=f"<@{row['assigned_officer_id']}>" if row["assigned_officer_id"] else "Sin asignar", inline=True)
-        embed.add_field(name="Lugar", value=row["payment_place"] or "Sin lugar", inline=True)
-        embed.add_field(name="Horario", value=row["payment_schedule"] or "Sin horario", inline=True)
-        embed.add_field(name="Nota", value=row["reason"] or "Sin nota", inline=False)
-        view = WithdrawalReviewView(self, guild.id, code)
-        self.bot.add_view(view)
-        await send_admin_notification(
+        view = self.withdrawal_admin_view(row)
+        if view is not None:
+            self.bot.add_view(view)
+        message = await send_admin_notification(
             self.db,
             guild=guild,
             category="withdrawals",
-            embed=embed,
+            embed=self.withdrawal_admin_embed(guild, row),
             view=view,
         )
-
+        if message is not None:
+            self.db.execute(
+                """
+                UPDATE withdrawals
+                SET notification_channel_id = ?, notification_message_id = ?, updated_at = COALESCE(updated_at, ?)
+                WHERE guild_id = ? AND code = ?
+                """,
+                (message.channel.id, message.id, utc_now_iso(), guild.id, code),
+            )
+        else:
+            log_action(
+                self.db,
+                guild.id,
+                admin_id=None,
+                action="Fallo publicar embed cobro",
+                system="Banco",
+                affected_user_id=int(row["user_id"]),
+                observation=code,
+            )
     def balance_text(self, guild_id: int, member: discord.Member) -> str:
         account = get_account(self.db, guild_id, member.id)
         fine_count, fine_total = pending_fines_total(self.db, guild_id, member.id)
