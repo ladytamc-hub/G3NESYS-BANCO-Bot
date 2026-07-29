@@ -65,6 +65,31 @@ from ..weapon_aliases import resolve_weapon_alias
 
 
 LOGGER = logging.getLogger("g3nesys.activities")
+
+
+def _message_components_payload(message) -> list[dict]:
+    return [component.to_dict() for component in getattr(message, "components", [])]
+
+
+def _view_components_payload(view: discord.ui.View | None) -> list[dict]:
+    return view.to_components() if view is not None else []
+
+
+def _embeds_payload(embeds) -> list[dict]:
+    return [embed.to_dict() for embed in embeds]
+
+
+def _message_matches_payload(message, *, content=None, embed=None, embeds=None, view=None) -> bool:
+    if content is not None and str(getattr(message, "content", "")) != str(content):
+        return False
+    expected_embeds = [embed.to_dict()] if embed is not None else (_embeds_payload(embeds) if embeds is not None else None)
+    if expected_embeds is not None:
+        current_embeds = [item.to_dict() for item in getattr(message, "embeds", [])]
+        if current_embeds != expected_embeds:
+            return False
+    if view is not None and _message_components_payload(message) != _view_components_payload(view):
+        return False
+    return True
 MAX_ACTIVITY_ROLES = 45
 ACTIVITY_MANAGEMENT_DENIED_MESSAGE = (
     "No puedes administrar esta actividad porque no fuiste quien la creó."
@@ -3103,6 +3128,7 @@ class Activities(commands.Cog):
         )
         for row in active_rows:
             await self.update_activity_message(int(row["id"]))
+            await asyncio.sleep(0.25)
         for guild in self.bot.guilds:
             self.recover_voice_tracking(guild)
             await evaluate_caller_penalties(self.db, guild)
@@ -3124,7 +3150,10 @@ class Activities(commands.Cog):
             return
         try:
             message = await channel.fetch_message(int(row["message_id"]))
-            await message.edit(embed=self.build_pings_panel_embed(), view=PingsPanelView(self))
+            embed = self.build_pings_panel_embed()
+            view = PingsPanelView(self)
+            if not _message_matches_payload(message, embed=embed, view=view):
+                await message.edit(embed=embed, view=view)
         except discord.HTTPException:
             return
 
@@ -4932,10 +4961,10 @@ class Activities(commands.Cog):
             return
         try:
             message = await thread.fetch_message(int(panel_message_id))
-            await message.edit(
-                content=self.activity_thread_panel_text(activity_id),
-                view=ActivityThreadPanelView(self, activity_id),
-            )
+            content = self.activity_thread_panel_text(activity_id)
+            view = ActivityThreadPanelView(self, activity_id)
+            if not _message_matches_payload(message, content=content, view=view):
+                await message.edit(content=content, view=view)
         except discord.NotFound:
             if activity["status"] != ACTIVITY_DELETED and hasattr(thread, "send"):
                 try:
@@ -4960,10 +4989,10 @@ class Activities(commands.Cog):
             if channel is not None and hasattr(channel, "fetch_message"):
                 try:
                     message = await channel.fetch_message(int(activity["message_id"]))
-                    await message.edit(
-                        embeds=self.build_activity_embeds(activity_id),
-                        view=ActivityView(self, activity_id),
-                    )
+                    embeds = self.build_activity_embeds(activity_id)
+                    view = ActivityView(self, activity_id)
+                    if not _message_matches_payload(message, embeds=embeds, view=view):
+                        await message.edit(embeds=embeds, view=view)
                 except discord.HTTPException:
                     pass
         await self.update_activity_thread_panel(activity_id, activity, guild)

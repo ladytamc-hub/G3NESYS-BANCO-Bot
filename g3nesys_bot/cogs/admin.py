@@ -74,12 +74,12 @@ from ..utils import format_amount, join_csv_ids, parse_channel_id, parse_int_amo
 
 
 NOTIFICATION_CHANNEL_CATEGORIES = (
-    ("splits", "Splits pendientes por aprobar", "ðŸ“‹"),
-    ("withdrawals", "Solicitudes de cobro", "ðŸ’³"),
-    ("registration", "Registro", "ðŸ“"),
-    ("activities", "Actividades con validaciÃ³n admin", "âš”ï¸"),
-    ("fines", "Multas o sanciones", "ðŸš¨"),
-    ("general_admin", "Otras notificaciones admin", "ðŸ””"),
+    ("splits", "Splits pendientes por aprobar", "📋"),
+    ("withdrawals", "Solicitudes de cobro", "💳"),
+    ("registration", "Registro", "📝"),
+    ("activities", "Actividades con validación admin", "⚔️"),
+    ("fines", "Multas o sanciones", "🚨"),
+    ("general_admin", "Otras notificaciones admin", "🔔"),
 )
 PING_PUBLICATIONS_LABEL = "Canal de publicaciones de pings"
 PING_PUBLICATIONS_SETTING_KEY = "channel_pings_id"
@@ -104,10 +104,10 @@ ADMIN_ROLE_NAMES = {
 
 
 REGEAR_STATUS_LABELS = {
-    "pending": ("â³", "Pendiente de revisiÃ³n"),
-    "paid": ("âœ…", "Pagado"),
-    "pending_payment": ("ðŸ•’", "Pendiente de pago"),
-    "rejected": ("âŒ", "Rechazado"),
+    "pending": ("⏳", "Pendiente de revisión"),
+    "paid": ("✅", "Pagado"),
+    "pending_payment": ("🕒", "Pendiente de pago"),
+    "rejected": ("❌", "Rechazado"),
 }
 REGEAR_RANKING_FILTERS = (
     ("general", "General", None),
@@ -223,7 +223,7 @@ class ConfirmAdminActionView(discord.ui.View):
         self.action = action
         self.payload = payload
 
-    @discord.ui.button(label="Confirmar", emoji="âœ…", style=discord.ButtonStyle.danger)
+    @discord.ui.button(label="Confirmar", emoji="✅", style=discord.ButtonStyle.danger)
     async def confirm(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
         if interaction.user.id != self.admin_id:
             await interaction.response.send_message("Solo quien inicio la operacion puede confirmar.", ephemeral=True)
@@ -244,7 +244,7 @@ class ConfirmAdminActionView(discord.ui.View):
             message = str(exc)
         await interaction.response.edit_message(content=message, embed=None, view=None)
 
-    @discord.ui.button(label="Cancelar", emoji="âŒ", style=discord.ButtonStyle.secondary)
+    @discord.ui.button(label="Cancelar", emoji="❌", style=discord.ButtonStyle.secondary)
     async def cancel(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
         if interaction.user.id != self.admin_id:
             await interaction.response.send_message("Solo quien inicio la operacion puede cancelar.", ephemeral=True)
@@ -344,7 +344,7 @@ class AdminSelectionView(discord.ui.View):
         self.admin_id = admin_id
         self.add_item(AdminUserSelect(cog, action=action, admin_id=admin_id))
 
-    @discord.ui.button(label="Ingresar ID manualmente", emoji="âŒ¨ï¸", style=discord.ButtonStyle.secondary)
+    @discord.ui.button(label="Ingresar ID manualmente", emoji="⌨️", style=discord.ButtonStyle.secondary)
     async def manual_id(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
         if interaction.user.id != self.admin_id or not is_admin_subject(self.cog.db, interaction):
             await private_response(interaction, "Solo el admin que abrio este menu puede usarlo.")
@@ -574,13 +574,13 @@ class QuickLiquidationSplitSelect(discord.ui.Select):
         for payout in payouts:
             options.append(
                 discord.SelectOption(
-                    label=f"{payout['code']} Â· {payout['activity_name']}"[:100],
+                    label=f"{payout['code']} · {payout['activity_name']}"[:100],
                     value=str(payout["id"]),
                     description=(
-                        f"{payout['pending_members']} miembros Â· "
+                        f"{payout['pending_members']} miembros · "
                         f"{format_amount(payout['pending_total'])} pendientes"
                     )[:100],
-                    emoji="âš¡",
+                    emoji="⚡",
                 )
             )
         super().__init__(
@@ -607,8 +607,8 @@ class QuickLiquidationSplitSelect(discord.ui.Select):
             return
         await interaction.response.edit_message(
             content=(
-                f"Split `{payout['code']}` Â· **{payout['activity_name']}**\n"
-                f"Pendientes: {len(participants)} miembros Â· "
+                f"Split `{payout['code']}` · **{payout['activity_name']}**\n"
+                f"Pendientes: {len(participants)} miembros · "
                 f"{format_amount(sum(int(row['amount']) for row in participants))}\n\n"
                 "Elige si deseas liquidar la actividad completa o a un solo miembro."
             ),
@@ -639,7 +639,7 @@ class QuickLiquidationModeView(discord.ui.View):
         await private_response(interaction, "Solo el admin que abrio este menu puede usarlo.")
         return False
 
-    @discord.ui.button(label="Actividad completa", emoji="ðŸ‘¥", style=discord.ButtonStyle.danger)
+    @discord.ui.button(label="Actividad completa", emoji="👥", style=discord.ButtonStyle.danger)
     async def complete(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
         if not await self.require_owner_admin(interaction):
             return
@@ -667,7 +667,7 @@ class QuickLiquidationModeView(discord.ui.View):
             ),
         )
 
-    @discord.ui.button(label="Un solo miembro", emoji="ðŸ‘¤", style=discord.ButtonStyle.primary)
+    @discord.ui.button(label="Un solo miembro", emoji="👤", style=discord.ButtonStyle.primary)
     async def individual(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
         if not await self.require_owner_admin(interaction):
             return
@@ -699,8 +699,8 @@ class QuickLiquidationMemberSelect(discord.ui.Select):
                 discord.SelectOption(
                     label=name[:100],
                     value=str(user_id),
-                    description=f"ID {user_id} Â· {format_amount(participant['amount'])}"[:100],
-                    emoji="ðŸ‘¤",
+                    description=f"ID {user_id} · {format_amount(participant['amount'])}"[:100],
+                    emoji="👤",
                 )
             )
         super().__init__(
@@ -776,7 +776,7 @@ class QuickLiquidationMemberSelectionView(discord.ui.View):
             )
         )
 
-    @discord.ui.button(label="Ingresar ID manualmente", emoji="âŒ¨ï¸", style=discord.ButtonStyle.secondary)
+    @discord.ui.button(label="Ingresar ID manualmente", emoji="⌨️", style=discord.ButtonStyle.secondary)
     async def manual_id(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
         if interaction.user.id != self.admin_id or not is_admin_subject(self.cog.db, interaction):
             await private_response(interaction, "Solo el admin que abrio este menu puede usarlo.")
@@ -914,7 +914,7 @@ class CreateFineModal(discord.ui.Modal, title="Crear multa"):
         await private_response(
             interaction,
             (
-                "Â¿Confirmas esta operacion?\n"
+                "¿Confirmas esta operacion?\n"
                 f"Crear multa a {member.mention} por {format_amount(amount)}.\n"
                 f"Motivo: {self.reason.value}"
             ),
@@ -954,7 +954,7 @@ class CancelFineModal(discord.ui.Modal, title="Cancelar multa"):
         await private_response(
             interaction,
             (
-                "Â¿Confirmas esta operacion?\n"
+                "¿Confirmas esta operacion?\n"
                 f"Cancelar multa `{fine_code}` de <@{fine['user_id']}>.\n"
                 f"Motivo: {self.reason.value}"
             ),
@@ -981,17 +981,17 @@ class FineAdminView(discord.ui.View):
         await private_response(interaction, "Solo admins autorizados pueden usar multas.")
         return False
 
-    @discord.ui.button(label="Crear multa", emoji="ðŸš¨", style=discord.ButtonStyle.danger)
+    @discord.ui.button(label="Crear multa", emoji="🚨", style=discord.ButtonStyle.danger)
     async def create_fine_button(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
         if await self.require_admin(interaction):
             await interaction.response.send_modal(CreateFineModal(self.cog))
 
-    @discord.ui.button(label="Cancelar multa", emoji="ðŸŸ¢", style=discord.ButtonStyle.success)
+    @discord.ui.button(label="Cancelar multa", emoji="🟢", style=discord.ButtonStyle.success)
     async def cancel_fine_button(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
         if await self.require_admin(interaction):
             await interaction.response.send_modal(CancelFineModal(self.cog))
 
-    @discord.ui.button(label="Pendientes", emoji="ðŸ“‹", style=discord.ButtonStyle.secondary)
+    @discord.ui.button(label="Pendientes", emoji="📋", style=discord.ButtonStyle.secondary)
     async def pending_fines_button(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
         if await self.require_admin(interaction):
             await private_response(interaction, self.cog.pending_fines_text(interaction.guild.id))
@@ -1091,7 +1091,7 @@ class CallersAdminView(discord.ui.View):
         await private_response(interaction, "Solo admins autorizados pueden gestionar callers.")
         return False
 
-    @discord.ui.button(label="Lista de callers", emoji="ðŸ†", style=discord.ButtonStyle.primary)
+    @discord.ui.button(label="Lista de callers", emoji="🏆", style=discord.ButtonStyle.primary)
     async def list_callers(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
         if not await self.require_admin(interaction):
             return
@@ -1117,7 +1117,7 @@ class CallersAdminView(discord.ui.View):
                 embed=embeds[0],
             )
 
-    @discord.ui.button(label="Agregar persona", emoji="âž•", style=discord.ButtonStyle.success)
+    @discord.ui.button(label="Agregar persona", emoji="➕", style=discord.ButtonStyle.success)
     async def add_caller(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
         if await self.require_admin(interaction):
             await private_response(
@@ -1126,7 +1126,7 @@ class CallersAdminView(discord.ui.View):
                 view=CallerAddOptionsView(self.cog, admin_id=interaction.user.id),
             )
 
-    @discord.ui.button(label="Eliminar caller", emoji="âž–", style=discord.ButtonStyle.danger)
+    @discord.ui.button(label="Eliminar caller", emoji="➖", style=discord.ButtonStyle.danger)
     async def remove_caller(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
         if await self.require_admin(interaction):
             await private_response(
@@ -1135,7 +1135,7 @@ class CallersAdminView(discord.ui.View):
                 view=CallerSelectionView(self.cog, action="remove", admin_id=interaction.user.id),
             )
 
-    @discord.ui.button(label="Penalizados", emoji="âš ï¸", style=discord.ButtonStyle.secondary)
+    @discord.ui.button(label="Penalizados", emoji="⚠️", style=discord.ButtonStyle.secondary)
     async def penalties(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
         if await self.require_admin(interaction):
             await dm_or_private(
@@ -1145,7 +1145,7 @@ class CallersAdminView(discord.ui.View):
                 "penalizaciones_callers",
             )
 
-    @discord.ui.button(label="Quitar penalizacion", emoji="ðŸŸ¢", style=discord.ButtonStyle.success)
+    @discord.ui.button(label="Quitar penalizacion", emoji="🟢", style=discord.ButtonStyle.success)
     async def remove_penalty(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
         if await self.require_admin(interaction):
             await private_response(
@@ -1214,7 +1214,7 @@ class RecruitersAdminView(discord.ui.View):
         await private_response(interaction, "Solo admins autorizados pueden gestionar reclutadores.")
         return False
 
-    @discord.ui.button(label="Ver reclutadores actuales", emoji="ðŸ‘¥", style=discord.ButtonStyle.primary)
+    @discord.ui.button(label="Ver reclutadores actuales", emoji="👥", style=discord.ButtonStyle.primary)
     async def list_recruiters(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
         if await self.require_admin(interaction):
             await dm_or_private(
@@ -1224,7 +1224,7 @@ class RecruitersAdminView(discord.ui.View):
                 "lista_reclutadores",
             )
 
-    @discord.ui.button(label="Agregar reclutador", emoji="âž•", style=discord.ButtonStyle.success)
+    @discord.ui.button(label="Agregar reclutador", emoji="➕", style=discord.ButtonStyle.success)
     async def add_recruiter(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
         if await self.require_admin(interaction):
             await private_response(
@@ -1237,7 +1237,7 @@ class RecruitersAdminView(discord.ui.View):
                 ),
             )
 
-    @discord.ui.button(label="Eliminar reclutador", emoji="âž–", style=discord.ButtonStyle.danger)
+    @discord.ui.button(label="Eliminar reclutador", emoji="➖", style=discord.ButtonStyle.danger)
     async def remove_recruiter(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
         if await self.require_admin(interaction):
             await private_response(
@@ -1360,7 +1360,7 @@ class AdminsAdminView(discord.ui.View):
         await private_response(interaction, "Solo admins autorizados pueden gestionar administradores.")
         return False
 
-    @discord.ui.button(label="Ver admins actuales", emoji="ðŸ‘¥", style=discord.ButtonStyle.primary)
+    @discord.ui.button(label="Ver admins actuales", emoji="👥", style=discord.ButtonStyle.primary)
     async def list_admins(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
         if await self.require_admin(interaction):
             await dm_or_private(
@@ -1370,7 +1370,7 @@ class AdminsAdminView(discord.ui.View):
                 "lista_admins",
             )
 
-    @discord.ui.button(label="Agregar admin", emoji="âž•", style=discord.ButtonStyle.success)
+    @discord.ui.button(label="Agregar admin", emoji="➕", style=discord.ButtonStyle.success)
     async def add_admin(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
         if await self.require_admin(interaction):
             await private_response(
@@ -1383,7 +1383,7 @@ class AdminsAdminView(discord.ui.View):
                 ),
             )
 
-    @discord.ui.button(label="Eliminar admin", emoji="âž–", style=discord.ButtonStyle.danger)
+    @discord.ui.button(label="Eliminar admin", emoji="➖", style=discord.ButtonStyle.danger)
     async def remove_admin(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
         if await self.require_admin(interaction):
             await private_response(
@@ -1431,12 +1431,12 @@ class PayoutReviewView(discord.ui.View):
         super().__init__(timeout=None)
         self.cog = cog
         self.code = code
-        self.add_button("Aprobar", "approve", "âœ…", discord.ButtonStyle.success, row=0)
-        self.add_button("Rechazar", "reject", "âŒ", discord.ButtonStyle.danger, row=0)
-        self.add_button("Corregir Split", "edit", "ðŸ› ï¸", discord.ButtonStyle.secondary, row=0)
-        self.add_button("Pedir CorrecciÃ³n", "correction", "ðŸ”", discord.ButtonStyle.secondary, row=1)
-        self.add_button("Ver Detalle", "detail", "ðŸ”", discord.ButtonStyle.primary, row=1)
-        self.add_button("AuditorÃ­a", "audit", "ðŸ“‹", discord.ButtonStyle.secondary, row=1)
+        self.add_button("Aprobar", "approve", "✅", discord.ButtonStyle.success, row=0)
+        self.add_button("Rechazar", "reject", "❌", discord.ButtonStyle.danger, row=0)
+        self.add_button("Corregir Split", "edit", "🛠️", discord.ButtonStyle.secondary, row=0)
+        self.add_button("Pedir Corrección", "correction", "🔁", discord.ButtonStyle.secondary, row=1)
+        self.add_button("Ver Detalle", "detail", "🔍", discord.ButtonStyle.primary, row=1)
+        self.add_button("Auditoría", "audit", "📋", discord.ButtonStyle.secondary, row=1)
 
     def add_button(
         self,
@@ -1478,7 +1478,7 @@ class PayoutReviewView(discord.ui.View):
         if action == "approve":
             await private_response(
                 interaction,
-                f"Â¿Confirmas esta operacion?\nAprobar Split `{self.code}` y depositar saldos.",
+                f"¿Confirmas esta operacion?\nAprobar Split `{self.code}` y depositar saldos.",
                 view=ConfirmAdminActionView(
                     self.cog,
                     admin_id=interaction.user.id,
@@ -1524,16 +1524,16 @@ class PendingPayoutSelect(discord.ui.Select):
     def __init__(self, cog: "Admin", payouts):
         options = []
         for payout in list(payouts)[:25]:
-            status_label = "Requiere correcciÃ³n" if payout["status"] == PAYOUT_CORRECTION else "Pendiente"
+            status_label = "Requiere corrección" if payout["status"] == PAYOUT_CORRECTION else "Pendiente"
             options.append(
                 discord.SelectOption(
-                    label=f"{payout['code']} Â· {status_label}"[:100],
+                    label=f"{payout['code']} · {status_label}"[:100],
                     value=str(payout["code"]),
                     description=(
-                        f"Caller {payout['caller_id']} Â· "
+                        f"Caller {payout['caller_id']} · "
                         f"Repartible {format_amount(payout['distributable'])}"
                     )[:100],
-                    emoji="ðŸ”" if payout["status"] == PAYOUT_CORRECTION else "ðŸ“‹",
+                    emoji="🔁" if payout["status"] == PAYOUT_CORRECTION else "📋",
                 )
             )
         super().__init__(
@@ -1584,10 +1584,10 @@ class PendingPayoutManagementView(discord.ui.View):
         selected = self.selected_payout()
         extra = ""
         if selected is not None:
-            status_label = "ðŸ” Requiere correcciÃ³n" if selected["status"] == PAYOUT_CORRECTION else "â³ Pendiente"
+            status_label = "🔁 Requiere corrección" if selected["status"] == PAYOUT_CORRECTION else "⏳ Pendiente"
             extra = (
-                f"\n\nSeleccionado: `{selected['code']}` Â· {status_label} Â· "
-                f"Caller <@{selected['caller_id']}> Â· "
+                f"\n\nSeleccionado: `{selected['code']}` · {status_label} · "
+                f"Caller <@{selected['caller_id']}> · "
                 f"Repartible {format_amount(selected['distributable'])}"
             )
         return (self.cog.pending_payouts_text(guild_id) + extra)[:1900]
@@ -1605,7 +1605,7 @@ class PendingPayoutManagementView(discord.ui.View):
             await private_response(interaction, "No encontre ese Split.")
             return None
         if current["status"] not in {PAYOUT_PENDING, PAYOUT_CORRECTION}:
-            await private_response(interaction, "Ese Split ya no estÃ¡ pendiente; ya fue procesado.")
+            await private_response(interaction, "Ese Split ya no está pendiente; ya fue procesado.")
             return None
         return current
 
@@ -1614,11 +1614,11 @@ class PendingPayoutManagementView(discord.ui.View):
         if payout is None:
             return None
         if payout["status"] != PAYOUT_PENDING:
-            await private_response(interaction, "Ese Split ya requiere correcciÃ³n y no estÃ¡ pendiente de aprobaciÃ³n.")
+            await private_response(interaction, "Ese Split ya requiere corrección y no está pendiente de aprobación.")
             return None
         return payout
 
-    @discord.ui.button(label="Aprobar", emoji="âœ…", style=discord.ButtonStyle.success, row=1)
+    @discord.ui.button(label="Aprobar", emoji="✅", style=discord.ButtonStyle.success, row=1)
     async def approve(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
         if not await self.require_owner_admin(interaction):
             return
@@ -1627,7 +1627,7 @@ class PendingPayoutManagementView(discord.ui.View):
             return
         await private_response(
             interaction,
-            f"Â¿Confirmas esta operacion?\nAprobar Split `{payout['code']}` y depositar saldos.",
+            f"¿Confirmas esta operacion?\nAprobar Split `{payout['code']}` y depositar saldos.",
             view=ConfirmAdminActionView(
                 self.cog,
                 admin_id=interaction.user.id,
@@ -1636,7 +1636,7 @@ class PendingPayoutManagementView(discord.ui.View):
             ),
         )
 
-    @discord.ui.button(label="Rechazar", emoji="âŒ", style=discord.ButtonStyle.danger, row=1)
+    @discord.ui.button(label="Rechazar", emoji="❌", style=discord.ButtonStyle.danger, row=1)
     async def reject(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
         if not await self.require_owner_admin(interaction):
             return
@@ -1645,7 +1645,7 @@ class PendingPayoutManagementView(discord.ui.View):
             return
         await interaction.response.send_modal(PayoutReasonModal(self.cog, str(payout["code"]), PAYOUT_REJECTED))
 
-    @discord.ui.button(label="Corregir Split", emoji="ðŸ› ï¸", style=discord.ButtonStyle.secondary, row=1)
+    @discord.ui.button(label="Corregir Split", emoji="🛠️", style=discord.ButtonStyle.secondary, row=1)
     async def correct(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
         if not await self.require_owner_admin(interaction):
             return
@@ -1662,7 +1662,7 @@ class PendingPayoutManagementView(discord.ui.View):
             str(payout["code"]),
         )
 
-    @discord.ui.button(label="Pedir CorrecciÃ³n", emoji="ðŸ”", style=discord.ButtonStyle.secondary, row=2)
+    @discord.ui.button(label="Pedir Corrección", emoji="🔁", style=discord.ButtonStyle.secondary, row=2)
     async def request_correction(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
         if not await self.require_owner_admin(interaction):
             return
@@ -1670,11 +1670,11 @@ class PendingPayoutManagementView(discord.ui.View):
         if payout is None:
             return
         if payout["status"] == PAYOUT_CORRECTION:
-            await private_response(interaction, "Ese Split ya requiere correcciÃ³n.")
+            await private_response(interaction, "Ese Split ya requiere corrección.")
             return
         await interaction.response.send_modal(PayoutReasonModal(self.cog, str(payout["code"]), PAYOUT_CORRECTION))
 
-    @discord.ui.button(label="Ver Detalle", emoji="ðŸ”", style=discord.ButtonStyle.primary, row=2)
+    @discord.ui.button(label="Ver Detalle", emoji="🔍", style=discord.ButtonStyle.primary, row=2)
     async def detail(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
         if not await self.require_owner_admin(interaction):
             return
@@ -1688,7 +1688,7 @@ class PendingPayoutManagementView(discord.ui.View):
             "detalle_split_pendiente_admin",
         )
 
-    @discord.ui.button(label="AuditorÃ­a", emoji="ðŸ“‹", style=discord.ButtonStyle.secondary, row=2)
+    @discord.ui.button(label="Auditoría", emoji="📋", style=discord.ButtonStyle.secondary, row=2)
     async def audit(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
         if not await self.require_owner_admin(interaction):
             return
@@ -1714,8 +1714,8 @@ class SplitsAdminView(discord.ui.View):
         return False
 
     @discord.ui.button(
-        label="Pendientes de aprobaciÃ³n",
-        emoji="â³",
+        label="Pendientes de aprobación",
+        emoji="⏳",
         style=discord.ButtonStyle.primary,
         custom_id="g3n:admin:splits:pending",
     )
@@ -1724,7 +1724,7 @@ class SplitsAdminView(discord.ui.View):
             return
         rows = self.cog.pending_payout_rows(interaction.guild.id)
         if not rows:
-            await private_response(interaction, "No hay Splits pendientes de aprobaciÃ³n.")
+            await private_response(interaction, "No hay Splits pendientes de aprobación.")
             return
         await private_response(
             interaction,
@@ -1738,7 +1738,7 @@ class SplitsAdminView(discord.ui.View):
 
     @discord.ui.button(
         label="Aprobados",
-        emoji="âœ…",
+        emoji="✅",
         style=discord.ButtonStyle.success,
         custom_id="g3n:admin:splits:approved",
     )
@@ -1753,7 +1753,7 @@ class SplitsAdminView(discord.ui.View):
 
     @discord.ui.button(
         label="Actividades pendientes de split",
-        emoji="ðŸ”´",
+        emoji="🔴",
         style=discord.ButtonStyle.danger,
         custom_id="g3n:admin:splits:pending_activities",
     )
@@ -1776,7 +1776,7 @@ class SplitsAdminView(discord.ui.View):
 
     @discord.ui.button(
         label="Lista general",
-        emoji="ðŸ“š",
+        emoji="📚",
         style=discord.ButtonStyle.secondary,
         custom_id="g3n:admin:splits:all",
     )
@@ -1796,13 +1796,13 @@ class PendingSplitActivitySelect(discord.ui.Select):
         for activity in activities[:25]:
             options.append(
                 discord.SelectOption(
-                    label=f"{activity['code']} Â· {activity['name']}"[:100],
+                    label=f"{activity['code']} · {activity['name']}"[:100],
                     value=str(activity["id"]),
                     description=(
-                        f"Caller {activity['caller_id']} Â· "
-                        f"{activity['confirmed']} asist. Â· {activity['horario'] or activity['ended_at']}"
+                        f"Caller {activity['caller_id']} · "
+                        f"{activity['confirmed']} asist. · {activity['horario'] or activity['ended_at']}"
                     )[:100],
-                    emoji="ðŸ”´",
+                    emoji="🔴",
                 )
             )
         super().__init__(
@@ -1817,7 +1817,7 @@ class PendingSplitActivitySelect(discord.ui.Select):
     async def callback(self, interaction: discord.Interaction) -> None:
         parent = self.view
         if not isinstance(parent, PendingSplitActivitiesView):
-            await private_response(interaction, "No pude actualizar esta selecciÃ³n.")
+            await private_response(interaction, "No pude actualizar esta selección.")
             return
         if interaction.user.id != parent.admin_id or not is_admin_subject(self.cog.db, interaction):
             await private_response(interaction, "Solo el admin que abrio este menu puede usarlo.")
@@ -1860,7 +1860,7 @@ class PendingSplitActivitiesView(discord.ui.View):
             await private_response(interaction, "Selecciona una actividad primero.")
         return activity
 
-    @discord.ui.button(label="Revisar detalles", emoji="ðŸ”Ž", style=discord.ButtonStyle.secondary, row=1)
+    @discord.ui.button(label="Revisar detalles", emoji="🔎", style=discord.ButtonStyle.secondary, row=1)
     async def details(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
         if not await self.require_owner_admin(interaction):
             return
@@ -1872,7 +1872,7 @@ class PendingSplitActivitiesView(discord.ui.View):
             self.cog.pending_split_activity_detail_text(interaction.guild, int(activity["id"])),
         )
 
-    @discord.ui.button(label="Recordar caller", emoji="ðŸ””", style=discord.ButtonStyle.primary, row=1)
+    @discord.ui.button(label="Recordar caller", emoji="🔔", style=discord.ButtonStyle.primary, row=1)
     async def remind(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
         if not await self.require_owner_admin(interaction):
             return
@@ -1881,7 +1881,7 @@ class PendingSplitActivitiesView(discord.ui.View):
             return
         await self.cog.remind_pending_split_caller(interaction, int(activity["id"]))
 
-    @discord.ui.button(label="Crear split", emoji="ðŸ’°", style=discord.ButtonStyle.success, row=1)
+    @discord.ui.button(label="Crear split", emoji="💰", style=discord.ButtonStyle.success, row=1)
     async def create_split(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
         if not await self.require_owner_admin(interaction):
             return
@@ -1959,7 +1959,7 @@ class NotificationChannelConfigView(discord.ui.View):
 
     @discord.ui.button(
         label="Usar canal actual",
-        emoji="ðŸ“",
+        emoji="📍",
         style=discord.ButtonStyle.primary,
         row=1,
     )
@@ -1978,7 +1978,7 @@ class NotificationChannelConfigView(discord.ui.View):
 
     @discord.ui.button(
         label="Usar respaldo",
-        emoji="â†©ï¸",
+        emoji="↩️",
         style=discord.ButtonStyle.secondary,
         row=1,
     )
@@ -2001,7 +2001,7 @@ class NotificationChannelConfigView(discord.ui.View):
         await private_response(
             interaction,
             (
-                f"**{self.label}** volverÃ¡ a usar su canal de respaldo.\n\n"
+                f"**{self.label}** volverá a usar su canal de respaldo.\n\n"
                 f"{self.cog.notification_settings_text(interaction.guild.id)}"
             ),
         )
@@ -2060,7 +2060,7 @@ class ApprovedPingChannelRemoveView(discord.ui.View):
 
 def channel_setting_text(value: str | None) -> str:
     if value:
-        return f"<#{value}>" if value.isdigit() else f"ID invÃ¡lido: `{value}`"
+        return f"<#{value}>" if value.isdigit() else f"ID inválido: `{value}`"
     return "Sin configurar"
 
 
@@ -2151,7 +2151,7 @@ class PingPublicationChannelConfigView(discord.ui.View):
 
     @discord.ui.button(
         label="Usar canal actual",
-        emoji="ðŸ“",
+        emoji="📍",
         style=discord.ButtonStyle.primary,
         row=1,
     )
@@ -2170,7 +2170,7 @@ class PingPublicationChannelConfigView(discord.ui.View):
 
     @discord.ui.button(
         label="Quitar canal",
-        emoji="â†©ï¸",
+        emoji="↩️",
         style=discord.ButtonStyle.secondary,
         row=1,
     )
@@ -2197,7 +2197,7 @@ class PingPublicationChannelConfigView(discord.ui.View):
         await private_response(
             interaction,
             (
-                f"**{PING_PUBLICATIONS_LABEL}** quedÃ³ sin canal configurado.\n\n"
+                f"**{PING_PUBLICATIONS_LABEL}** quedó sin canal configurado.\n\n"
                 f"{self.cog.notification_settings_text(interaction.guild.id)}"
             ),
         )
@@ -2283,7 +2283,7 @@ class RegearChannelConfigView(discord.ui.View):
         await private_response(
             interaction,
             (
-                f"âœ… Canal de Requips configurado correctamente:\n<#{channel_id}>\n\n"
+                f"✅ Canal de Requips configurado correctamente:\n<#{channel_id}>\n\n"
                 f"{self.cog.notification_settings_text(interaction.guild.id)}"
             ),
         )
@@ -2296,7 +2296,7 @@ class RegearChannelConfigView(discord.ui.View):
 
     @discord.ui.button(
         label="Usar canal actual",
-        emoji="ðŸ“",
+        emoji="📍",
         style=discord.ButtonStyle.primary,
         row=1,
     )
@@ -2315,7 +2315,7 @@ class RegearChannelConfigView(discord.ui.View):
 
     @discord.ui.button(
         label="Quitar canal",
-        emoji="â†©ï¸",
+        emoji="↩️",
         style=discord.ButtonStyle.secondary,
         row=1,
     )
@@ -2338,7 +2338,7 @@ class RegearChannelConfigView(discord.ui.View):
         await private_response(
             interaction,
             (
-                f"**{REGEAR_CHANNEL_LABEL}** quedÃ³ sin canal configurado.\n\n"
+                f"**{REGEAR_CHANNEL_LABEL}** quedó sin canal configurado.\n\n"
                 f"{self.cog.notification_settings_text(interaction.guild.id)}"
             ),
         )
@@ -2388,7 +2388,7 @@ class RegearNotificationChannelConfigView(discord.ui.View):
         await private_response(
             interaction,
             (
-                f"âœ… Notificaciones de Requips configuradas correctamente:\n<#{channel_id}>\n\n"
+                f"✅ Notificaciones de Requips configuradas correctamente:\n<#{channel_id}>\n\n"
                 f"{self.cog.notification_settings_text(interaction.guild.id)}"
             ),
         )
@@ -2401,7 +2401,7 @@ class RegearNotificationChannelConfigView(discord.ui.View):
 
     @discord.ui.button(
         label="Usar canal actual",
-        emoji="ðŸ“",
+        emoji="📍",
         style=discord.ButtonStyle.primary,
         row=1,
     )
@@ -2420,7 +2420,7 @@ class RegearNotificationChannelConfigView(discord.ui.View):
 
     @discord.ui.button(
         label="Quitar canal",
-        emoji="â†©ï¸",
+        emoji="↩️",
         style=discord.ButtonStyle.secondary,
         row=1,
     )
@@ -2443,7 +2443,7 @@ class RegearNotificationChannelConfigView(discord.ui.View):
         await private_response(
             interaction,
             (
-                f"**{REGEAR_NOTIFICATION_CHANNEL_LABEL}** quedÃ³ sin canal configurado.\n\n"
+                f"**{REGEAR_NOTIFICATION_CHANNEL_LABEL}** quedó sin canal configurado.\n\n"
                 f"{self.cog.notification_settings_text(interaction.guild.id)}"
             ),
         )
@@ -2453,7 +2453,7 @@ class NotificationCategorySelect(discord.ui.Select):
     def __init__(self, cog: "Admin"):
         self.cog = cog
         super().__init__(
-            placeholder="Selecciona el tipo de notificaciÃ³n",
+            placeholder="Selecciona el tipo de notificación",
             min_values=1,
             max_values=1,
             options=[
@@ -2479,7 +2479,7 @@ class NotificationCategorySelect(discord.ui.Select):
             interaction.guild.id,
             ADMIN_CHANNEL_SETTINGS[category][0],
         )
-        current_text = f"<#{current}>" if current else "sin canal especÃ­fico"
+        current_text = f"<#{current}>" if current else "sin canal específico"
         await private_response(
             interaction,
             (
@@ -2498,7 +2498,7 @@ class NotificationsAdminView(discord.ui.View):
 
     @discord.ui.button(
         label=PING_PUBLICATIONS_LABEL,
-        emoji="ðŸ“£",
+        emoji="📣",
         style=discord.ButtonStyle.primary,
         row=1,
     )
@@ -2530,7 +2530,7 @@ class NotificationsAdminView(discord.ui.View):
 
     @discord.ui.button(
         label=REGEAR_CHANNEL_LABEL,
-        emoji="ðŸ›¡ï¸",
+        emoji="🛡️",
         style=discord.ButtonStyle.primary,
         row=1,
     )
@@ -2558,7 +2558,7 @@ class NotificationsAdminView(discord.ui.View):
 
     @discord.ui.button(
         label=REGEAR_NOTIFICATION_CHANNEL_LABEL,
-        emoji="ðŸ›¡ï¸",
+        emoji="🛡️",
         style=discord.ButtonStyle.primary,
         row=1,
     )
@@ -2585,8 +2585,8 @@ class NotificationsAdminView(discord.ui.View):
         )
 
     @discord.ui.button(
-        label="Ver configuraciÃ³n",
-        emoji="ðŸ‘ï¸",
+        label="Ver configuración",
+        emoji="👁️",
         style=discord.ButtonStyle.secondary,
         row=1,
     )
@@ -2631,7 +2631,7 @@ class RegearRankingUserSelect(discord.ui.Select):
                     label=label,
                     value=str(user_id),
                     description=description,
-                    emoji="ðŸ›¡ï¸",
+                    emoji="🛡️",
                 )
             )
         super().__init__(
@@ -2708,7 +2708,7 @@ class RankingsAdminView(discord.ui.View):
         await private_response(interaction, "Solo admins autorizados pueden consultar rankings.")
         return False
 
-    @discord.ui.button(label="Resumen", emoji="ðŸ†", style=discord.ButtonStyle.secondary, row=0)
+    @discord.ui.button(label="Resumen", emoji="🏆", style=discord.ButtonStyle.secondary, row=0)
     async def summary(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
         if await self.require_admin(interaction):
             await interaction.response.edit_message(
@@ -2717,7 +2717,7 @@ class RankingsAdminView(discord.ui.View):
                 view=RankingsAdminView(self.cog),
             )
 
-    @discord.ui.button(label="Ranking de Requips", emoji="ðŸ›¡ï¸", style=discord.ButtonStyle.primary, row=0)
+    @discord.ui.button(label="Ranking de Requips", emoji="🛡️", style=discord.ButtonStyle.primary, row=0)
     async def regear_ranking(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
         if await self.require_admin(interaction):
             await interaction.response.edit_message(
@@ -2738,7 +2738,7 @@ class ExtraAdminOptionsView(discord.ui.View):
         await private_response(interaction, "Solo admins autorizados pueden usar estas opciones.")
         return False
 
-    @discord.ui.button(label="Rankings", emoji="ðŸ†", style=discord.ButtonStyle.secondary)
+    @discord.ui.button(label="Rankings", emoji="🏆", style=discord.ButtonStyle.secondary)
     async def rankings(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
         if await self.require_admin(interaction):
             await private_response(
@@ -2841,7 +2841,7 @@ class ConfigAdminView(discord.ui.View):
         await private_response(interaction, "Solo admins autorizados pueden usar estas opciones.")
         return False
 
-    @discord.ui.button(label="Notificaciones", emoji="ðŸ””", style=discord.ButtonStyle.primary)
+    @discord.ui.button(label="Notificaciones", emoji="🔔", style=discord.ButtonStyle.primary)
     async def notifications(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
         if await self.require_admin(interaction):
             await private_response(
@@ -3005,7 +3005,7 @@ class AdminPanelView(discord.ui.View):
     async def callers(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
         if await self.require_admin(interaction):
             embed = discord.Embed(
-                title="ðŸ“£ Gestion de Callers G3NESYS",
+                title="📣 Gestion de Callers G3NESYS",
                 description=(
                     "Consulta el ranking o administra quienes pueden dirigir actividades.\n\n"
                     "PCALL da acceso al Panel de Callers sin registrar al usuario como caller oficial.\n\n"
@@ -3022,7 +3022,7 @@ class AdminPanelView(discord.ui.View):
     async def recruiters(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
         if await self.require_admin(interaction):
             embed = discord.Embed(
-                title="ðŸ›¡ï¸ Gestion de Reclutadores G3NESYS",
+                title="🛡️ Gestion de Reclutadores G3NESYS",
                 description=(
                     "Agrega, elimina o consulta a quienes tienen el rol de Reclutador. "
                     "Si el rol no existe, se creara al agregar al primer reclutador."
@@ -3080,7 +3080,7 @@ class AdminPanelView(discord.ui.View):
                 view=FineAdminView(self.cog),
             )
 
-    @discord.ui.button(label="MÃ¡s", emoji="\U0001F9ED", style=discord.ButtonStyle.secondary, custom_id="g3n:admin:more", row=4)
+    @discord.ui.button(label="Más", emoji="\U0001F9ED", style=discord.ButtonStyle.secondary, custom_id="g3n:admin:more", row=4)
     async def more(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
         if await self.require_admin(interaction):
             await private_response(
@@ -3375,7 +3375,7 @@ class Admin(commands.Cog):
     def recruiters_text(self, guild: discord.Guild) -> str:
         roles = self.recruiter_roles(guild)
         if not roles:
-            return "ðŸ›¡ï¸ **Reclutadores actuales**\nEl rol Reclutador todavia no existe."
+            return "🛡️ **Reclutadores actuales**\nEl rol Reclutador todavia no existe."
         role_ids = {role.id for role in roles}
         members = sorted(
             (
@@ -3386,11 +3386,11 @@ class Admin(commands.Cog):
             key=lambda member: member.display_name.casefold(),
         )
         if not members:
-            return "ðŸ›¡ï¸ **Reclutadores actuales**\nNingun usuario tiene el rol de Reclutador."
-        lines = ["ðŸ›¡ï¸ **Reclutadores actuales**"]
+            return "🛡️ **Reclutadores actuales**\nNingun usuario tiene el rol de Reclutador."
+        lines = ["🛡️ **Reclutadores actuales**"]
         lines.extend(f"{index}. {member.mention}" for index, member in enumerate(members[:50], start=1))
         if len(members) > 50:
-            lines.append(f"â€¦ y {len(members) - 50} mas.")
+            lines.append(f"… y {len(members) - 50} mas.")
         return "\n".join(lines)
 
     def admins_text(self, guild: discord.Guild) -> str:
@@ -3403,11 +3403,11 @@ class Admin(commands.Cog):
             key=lambda member: member.display_name.casefold(),
         )
         if not members:
-            return "ðŸ” **Admins actuales**\nNo encontre administradores autorizados."
-        lines = ["ðŸ” **Admins actuales**"]
+            return "🔐 **Admins actuales**\nNo encontre administradores autorizados."
+        lines = ["🔐 **Admins actuales**"]
         lines.extend(f"{index}. {member.mention}" for index, member in enumerate(members[:50], start=1))
         if len(members) > 50:
-            lines.append(f"â€¦ y {len(members) - 50} mas.")
+            lines.append(f"… y {len(members) - 50} mas.")
         return "\n".join(lines)
 
     async def add_recruiter_interaction(
@@ -3464,7 +3464,7 @@ class Admin(commands.Cog):
         )
         await private_response(
             interaction,
-            f"ðŸ›¡ï¸ {member.mention} ahora tiene el rol {role.mention}.",
+            f"🛡️ {member.mention} ahora tiene el rol {role.mention}.",
         )
 
     async def remove_recruiter_interaction(
@@ -3507,7 +3507,7 @@ class Admin(commands.Cog):
         )
         await private_response(
             interaction,
-            f"âž– {member.mention} ya no tiene el rol de Reclutador.",
+            f"➖ {member.mention} ya no tiene el rol de Reclutador.",
         )
 
     async def prompt_admin_change(
@@ -3536,7 +3536,7 @@ class Admin(commands.Cog):
         has_admin_role = self.member_has_configured_admin_role(guild, member)
         if action == "add":
             if not self.configured_admin_roles(guild):
-                await private_response(interaction, "âŒ Primero debes configurar el rol de Admin.")
+                await private_response(interaction, "❌ Primero debes configurar el rol de Admin.")
                 return
             if currently_authorized and has_admin_role:
                 await private_response(interaction, f"{member.mention} ya tiene acceso administrativo.")
@@ -3552,7 +3552,7 @@ class Admin(commands.Cog):
         )
         await private_response(
             interaction,
-            f"Â¿Confirmas {verb} a {member.mention}?{warning}",
+            f"¿Confirmas {verb} a {member.mention}?{warning}",
             view=ConfirmAdminActionView(
                 self,
                 admin_id=interaction.user.id,
@@ -3587,7 +3587,7 @@ class Admin(commands.Cog):
         role_note = ""
         if authorized:
             if not admin_roles:
-                raise ValueError("âŒ Primero debes configurar el rol de Admin.")
+                raise ValueError("❌ Primero debes configurar el rol de Admin.")
             role = admin_roles[0]
             if role not in member.roles:
                 try:
@@ -3658,14 +3658,14 @@ class Admin(commands.Cog):
             guild=guild,
             category="general_admin",
             content=(
-                f"{'âž•' if authorized else 'âž–'} <@{user_id}> "
+                f"{'➕' if authorized else '➖'} <@{user_id}> "
                 f"{'fue agregado como admin' if authorized else 'fue eliminado como admin'} "
                 f"por <@{changed_by}>."
             ),
         )
         return (
-            "âœ… Admin agregado correctamente.\n"
-            "Se le asignÃ³ el rol de Admin en Discord y ya puede usar el Panel de Admins."
+            "✅ Admin agregado correctamente.\n"
+            "Se le asignó el rol de Admin en Discord y ya puede usar el Panel de Admins."
             if authorized
             else f"Se retiro el acceso administrativo de {member.mention}."
         )
@@ -3693,11 +3693,11 @@ class Admin(commands.Cog):
             await private_response(interaction, "Esta operacion debe realizarse dentro del servidor.")
             return
         if not is_admin_subject(self.db, interaction):
-            await private_response(interaction, "âŒ Solo los administradores pueden usar liquidaciÃ³n rÃ¡pida.")
+            await private_response(interaction, "❌ Solo los administradores pueden usar liquidación rápida.")
             return
         payout = self.get_activity_payout_for_quick_liquidation(guild.id, activity_id)
         if payout is None:
-            await private_response(interaction, "âŒ Debes splitear actividad primero.")
+            await private_response(interaction, "❌ Debes splitear actividad primero.")
             return
         if payout["status"] != PAYOUT_DEPOSITED:
             await private_response(interaction, "El Split debe estar aprobado y depositado antes de liquidarlo.")
@@ -3709,8 +3709,8 @@ class Admin(commands.Cog):
         await private_response(
             interaction,
             (
-                f"Split `{payout['code']}` Â· **{payout['activity_name']}**\n"
-                f"Pendientes: {len(participants)} miembros Â· "
+                f"Split `{payout['code']}` · **{payout['activity_name']}**\n"
+                f"Pendientes: {len(participants)} miembros · "
                 f"{format_amount(sum(int(row['amount']) for row in participants))}\n\n"
                 "Elige si deseas liquidar la actividad completa o a un solo miembro."
             ),
@@ -3733,7 +3733,7 @@ class Admin(commands.Cog):
         total = sum(int(row["amount"]) for row in participants)
         activity_reference = payout["activity_code"] or f"ID {payout['activity_id']}"
         embed = discord.Embed(
-            title="âš¡ Confirmar liquidacion rapida",
+            title="⚡ Confirmar liquidacion rapida",
             description=(
                 f"**Split:** {payout['code']}\n"
                 f"**Actividad:** {payout['activity_name']} ({activity_reference})\n"
@@ -3748,7 +3748,7 @@ class Admin(commands.Cog):
             user_id = int(row["user_id"])
             member = guild.get_member(user_id)
             name = member.display_name if member else f"Usuario {user_id}"
-            lines.append(f"â€¢ {name} (<@{user_id}>) â€” {format_amount(row['amount'])}")
+            lines.append(f"• {name} (<@{user_id}>) — {format_amount(row['amount'])}")
         chunks: list[str] = []
         current = ""
         for line in lines:
@@ -3846,7 +3846,7 @@ class Admin(commands.Cog):
                 user=member,
                 action="liquidacion_rapida",
                 content=(
-                    "âš¡ Tu saldo fue liquidado directamente por un administrador.\n\n"
+                    "⚡ Tu saldo fue liquidado directamente por un administrador.\n\n"
                     f"Split: {result.payout_code}\n"
                     f"Actividad: {result.activity_name}\n"
                     f"Cantidad liquidada: {format_amount(item.amount)}\n"
@@ -3863,7 +3863,7 @@ class Admin(commands.Cog):
             guild=guild,
             category="splits",
             content=(
-                f"âš¡ Liquidacion rapida **{result.mode}** {result.code} realizada "
+                f"⚡ Liquidacion rapida **{result.mode}** {result.code} realizada "
                 f"por <@{admin_id}> sobre el Split {result.payout_code}. "
                 f"Total: {format_amount(result.total_amount)}. Miembros: {members}"
             )[:1900],
@@ -3911,7 +3911,7 @@ class Admin(commands.Cog):
             observation="Caller autorizado desde el panel administrativo.",
         )
         dm_status = "Le envie la bienvenida formal por DM." if delivered else "No pude enviarle DM, pero el acceso quedo activo."
-        await private_response(interaction, f"ðŸ“£ {member.mention} ahora es caller autorizado. {dm_status}")
+        await private_response(interaction, f"📣 {member.mention} ahora es caller autorizado. {dm_status}")
 
     async def add_pcall_interaction(
         self,
@@ -4005,7 +4005,7 @@ class Admin(commands.Cog):
         )
         await private_response(
             interaction,
-            f"âž– {member.mention} ya no es caller autorizado. Â¿Deseas enviarle un aviso amistoso?",
+            f"➖ {member.mention} ya no es caller autorizado. ¿Deseas enviarle un aviso amistoso?",
             view=CallerRemovalNoticeView(
                 self.db,
                 guild_id=interaction.guild.id,
@@ -4043,9 +4043,9 @@ class Admin(commands.Cog):
             (interaction.guild.id, member.id),
         )
         result = (
-            f"ðŸŸ¢ Se retiro la penalizacion de {member.mention}. Ya puede volver a usar las funciones de caller."
+            f"🟢 Se retiro la penalizacion de {member.mention}. Ya puede volver a usar las funciones de caller."
             if authorized is not None
-            else f"ðŸŸ¢ Se retiro la penalizacion de {member.mention}. Debes agregarlo nuevamente si volvera a ser caller."
+            else f"🟢 Se retiro la penalizacion de {member.mention}. Debes agregarlo nuevamente si volvera a ser caller."
         )
         await private_response(
             interaction,
@@ -4064,13 +4064,13 @@ class Admin(commands.Cog):
             (guild_id,),
         )
         if not rows:
-            return "ðŸŸ¢ **Callers penalizados**\nNo hay penalizaciones activas."
-        lines = ["âš ï¸ **Callers penalizados**"]
+            return "🟢 **Callers penalizados**\nNo hay penalizaciones activas."
+        lines = ["⚠️ **Callers penalizados**"]
         for index, row in enumerate(rows, start=1):
             lines.append(
-                f"{index}. <@{row['user_id']}> â€¢ **{row['score_at_penalty']} puntos** â€¢ {row['reason']}"
+                f"{index}. <@{row['user_id']}> • **{row['score_at_penalty']} puntos** • {row['reason']}"
             )
-        lines.append("Usa `ðŸŸ¢ Quitar penalizacion` en el menu de Callers para rehabilitar a alguien.")
+        lines.append("Usa `🟢 Quitar penalizacion` en el menu de Callers para rehabilitar a alguien.")
         return "\n".join(lines)
 
     def caller_ranking_embeds(self, guild: discord.Guild) -> list[discord.Embed]:
@@ -4078,7 +4078,7 @@ class Admin(commands.Cog):
         if not rows:
             return [
                 discord.Embed(
-                    title="ðŸ“£ Callers de G3NESYS",
+                    title="📣 Callers de G3NESYS",
                     description="Todavia no hay callers autorizados.",
                     color=discord.Color.magenta(),
                 )
@@ -4086,10 +4086,10 @@ class Admin(commands.Cog):
         pages: list[discord.Embed] = []
         page_size = 5
         total_pages = (len(rows) + page_size - 1) // page_size
-        medals = {1: "ðŸ¥‡", 2: "ðŸ¥ˆ", 3: "ðŸ¥‰"}
+        medals = {1: "🥇", 2: "🥈", 3: "🥉"}
         for page_index in range(total_pages):
             embed = discord.Embed(
-                title="ðŸ“£ Ranking de Callers G3NESYS",
+                title="📣 Ranking de Callers G3NESYS",
                 description=(
                     "Clasificacion calculada con actividades, asistencia y cumplimiento.\n"
                     "La plata incluye Splits aprobados y depositados."
@@ -4101,21 +4101,21 @@ class Admin(commands.Cog):
                 member = guild.get_member(int(row["user_id"]))
                 name = member.display_name if member else f"Usuario {row['user_id']}"
                 badge = medals.get(index, f"#{index}")
-                status = " â€¢ â›” Penalizado" if int(row["penalized"]) else ""
+                status = " • ⛔ Penalizado" if int(row["penalized"]) else ""
                 embed.add_field(
-                    name=f"{badge} {name} â€¢ {row['score']} puntos{status}",
+                    name=f"{badge} {name} • {row['score']} puntos{status}",
                     value=(
-                        f"ðŸ’° Repartido: **{format_amount(row['distributed'])}**\n"
-                        f"âš”ï¸ Creadas: **{row['activities_created']}** â€¢ "
-                        f"âœ… Completadas: **{row['activities_completed']}**\n"
-                        f"âŒ Canceladas: **{row['activities_cancelled']}** â€¢ "
-                        f"ðŸ›¡ï¸ Justificadas: **{row['cancellations_exempt']}**\n"
-                        f"ðŸ™‹ Asistencias: **{row['attendances']}** â€¢ "
-                        f"ðŸš« Ausencias: **{row['absences']}**"
+                        f"💰 Repartido: **{format_amount(row['distributed'])}**\n"
+                        f"⚔️ Creadas: **{row['activities_created']}** • "
+                        f"✅ Completadas: **{row['activities_completed']}**\n"
+                        f"❌ Canceladas: **{row['activities_cancelled']}** • "
+                        f"🛡️ Justificadas: **{row['cancellations_exempt']}**\n"
+                        f"🙋 Asistencias: **{row['attendances']}** • "
+                        f"🚫 Ausencias: **{row['absences']}**"
                     ),
                     inline=False,
                 )
-            embed.set_footer(text=f"Pagina {page_index + 1}/{total_pages} â€¢ {len(rows)} callers autorizados")
+            embed.set_footer(text=f"Pagina {page_index + 1}/{total_pages} • {len(rows)} callers autorizados")
             pages.append(embed)
         return pages
 
@@ -4125,7 +4125,7 @@ class Admin(commands.Cog):
             (guild_id, code),
         )
         embed = discord.Embed(
-            title=f"ðŸ“‹ Split pendiente {code}",
+            title=f"📋 Split pendiente {code}",
             description="Revisa el Split y usa los botones para aprobar, rechazar o pedir correccion.",
             color=discord.Color.gold(),
         )
@@ -4137,7 +4137,7 @@ class Admin(commands.Cog):
         embed.add_field(name="Aporte gremial", value=format_amount(payout["guild_amount"]), inline=True)
         embed.add_field(
             name="Porcentaje caller",
-            value=f"{float(payout['caller_percent'] or 0):.1f}% â€” {format_amount(payout['caller_amount'])}",
+            value=f"{float(payout['caller_percent'] or 0):.1f}% — {format_amount(payout['caller_amount'])}",
             inline=True,
         )
         embed.add_field(name="Monto repartible", value=format_amount(payout["distributable"]), inline=True)
@@ -4208,8 +4208,8 @@ class Admin(commands.Cog):
             guild=ctx.guild,
             category="general_admin",
             content=(
-                f"ðŸ“ˆ Ingreso registrado por <@{ctx.author.id}>: {format_amount(amount)} Â· "
-                f"{category} Â· {description}"
+                f"📈 Ingreso registrado por <@{ctx.author.id}>: {format_amount(amount)} · "
+                f"{category} · {description}"
             ),
         )
         await ctx.reply("Ingreso registrado.", mention_author=False)
@@ -4224,7 +4224,7 @@ class Admin(commands.Cog):
             await ctx.reply(str(exc), mention_author=False)
             return
         await ctx.reply(
-            f"Â¿Confirmas esta operacion?\nRegistrar egreso de {format_amount(amount)} por {description}",
+            f"¿Confirmas esta operacion?\nRegistrar egreso de {format_amount(amount)} por {description}",
             view=ConfirmAdminActionView(
                 self,
                 admin_id=ctx.author.id,
@@ -4254,7 +4254,7 @@ class Admin(commands.Cog):
             return
         await ctx.reply(
             (
-                "Â¿Confirmas esta operacion?\n"
+                "¿Confirmas esta operacion?\n"
                 f"Depositar {format_amount(amount)} a {member.mention} como {balance_type}.\n"
                 f"Motivo: {reason}"
             ),
@@ -4327,7 +4327,7 @@ class Admin(commands.Cog):
             guild=ctx.guild,
             category="withdrawals",
             content=(
-                f"âŒ Cobro `{code}` rechazado por <@{ctx.author.id}> para "
+                f"❌ Cobro `{code}` rechazado por <@{ctx.author.id}> para "
                 f"<@{withdrawal['user_id']}>. Motivo: {reason}"
             ),
         )
@@ -4352,7 +4352,7 @@ class Admin(commands.Cog):
         message = normalize_admin_message(admin_message)
         await ctx.reply(
             (
-                f"Â¿Confirmas esta operacion?\nLiquidar `{code}` por {format_amount(amount)}."
+                f"¿Confirmas esta operacion?\nLiquidar `{code}` por {format_amount(amount)}."
                 f"{admin_message_block(message)}"
             ),
             view=ConfirmAdminActionView(
@@ -4369,7 +4369,7 @@ class Admin(commands.Cog):
         if not await require_admin_context(ctx, self.db):
             return
         await ctx.reply(
-            f"Â¿Confirmas esta operacion?\nAprobar Split `{code}` y depositar saldos.",
+            f"¿Confirmas esta operacion?\nAprobar Split `{code}` y depositar saldos.",
             view=ConfirmAdminActionView(
                 self,
                 admin_id=ctx.author.id,
@@ -4455,8 +4455,8 @@ class Admin(commands.Cog):
             guild=interaction.guild,
             category="general_admin",
             content=(
-                f"ðŸ“ˆ Ingreso registrado por <@{interaction.user.id}>: {format_amount(amount)} Â· "
-                f"{modal.category.value} Â· {modal.description.value}"
+                f"📈 Ingreso registrado por <@{interaction.user.id}>: {format_amount(amount)} · "
+                f"{modal.category.value} · {modal.description.value}"
             ),
         )
         await private_response(interaction, "Ingreso registrado.")
@@ -4469,7 +4469,7 @@ class Admin(commands.Cog):
             return
         await private_response(
             interaction,
-            f"Â¿Confirmas esta operacion?\nRegistrar egreso de {format_amount(amount)}.",
+            f"¿Confirmas esta operacion?\nRegistrar egreso de {format_amount(amount)}.",
             view=ConfirmAdminActionView(
                 self,
                 admin_id=interaction.user.id,
@@ -4617,7 +4617,7 @@ class Admin(commands.Cog):
             return
         await private_response(
             interaction,
-            f"Â¿Confirmas esta operacion?\nDepositar {format_amount(amount)} a <@{user_id}>.",
+            f"¿Confirmas esta operacion?\nDepositar {format_amount(amount)} a <@{user_id}>.",
             view=ConfirmAdminActionView(
                 self,
                 admin_id=interaction.user.id,
@@ -4665,8 +4665,8 @@ class Admin(commands.Cog):
                 guild=guild,
                 category="general_admin",
                 content=(
-                    f"ðŸ“‰ Egreso registrado por <@{interaction.user.id}>: "
-                    f"{format_amount(payload['amount'])} Â· {payload['category']} Â· "
+                    f"📉 Egreso registrado por <@{interaction.user.id}>: "
+                    f"{format_amount(payload['amount'])} · {payload['category']} · "
                     f"{payload['description']}"
                 ),
             )
@@ -4689,7 +4689,7 @@ class Admin(commands.Cog):
                     user=member,
                     action="deposito_admin",
                     content=(
-                        "ðŸ’° Has recibido un deposito.\n\n"
+                        "💰 Has recibido un deposito.\n\n"
                         f"Cantidad: {format_amount(payload['amount'])}\n"
                         f"Tipo: {self.readable_balance_type(str(payload['balance_type']))}\n"
                         f"Motivo: {payload['reason']}\n"
@@ -4701,9 +4701,9 @@ class Admin(commands.Cog):
                 guild=guild,
                 category="general_admin",
                 content=(
-                    f"ðŸ’° Deposito administrativo por <@{interaction.user.id}> a "
-                    f"<@{payload['user_id']}>: {format_amount(payload['amount'])} Â· "
-                    f"{payload['reason']} Â· Movimiento #{movement_id}."
+                    f"💰 Deposito administrativo por <@{interaction.user.id}> a "
+                    f"<@{payload['user_id']}>: {format_amount(payload['amount'])} · "
+                    f"{payload['reason']} · Movimiento #{movement_id}."
                 ),
             )
             return f"Deposito registrado. Movimiento #{movement_id}."
@@ -4846,7 +4846,7 @@ class Admin(commands.Cog):
             affected_user_id=int(withdrawal["user_id"]),
             amount=int(withdrawal["amount_requested"]),
             observation=(
-                f"{code} Â· Indicaciones: {admin_message}"
+                f"{code} · Indicaciones: {admin_message}"
                 if admin_message
                 else code
             ),
@@ -4869,7 +4869,7 @@ class Admin(commands.Cog):
             guild=guild,
             category="withdrawals",
             content=(
-                f"âœ… Cobro `{code}` aprobado por <@{admin_id}> para "
+                f"✅ Cobro `{code}` aprobado por <@{admin_id}> para "
                 f"<@{withdrawal['user_id']}> por {format_amount(withdrawal['amount_requested'])}."
                 f"{admin_message_block(admin_message)}"
             ),
@@ -5057,11 +5057,20 @@ class Admin(commands.Cog):
 
     async def delegate_withdrawal(self, guild: discord.Guild, code: str, admin_id: int, officer_id: int, place: str, schedule: str, note: str = "") -> str:
         code = code.strip().upper()
+        place = place.strip()
+        schedule = schedule.strip()
+        note = note.strip()
+        if not place:
+            raise ValueError("El lugar de pago es obligatorio.")
+        if not schedule:
+            raise ValueError("El dia y horario de pago son obligatorios.")
         withdrawal = self.db.fetch_one("SELECT * FROM withdrawals WHERE guild_id = ? AND code = ?", (guild.id, code))
         if withdrawal is None:
             raise ValueError("No encontre esa solicitud.")
-        if withdrawal["status"] not in {WITHDRAWAL_APPROVED, WITHDRAWAL_PARTIAL, WITHDRAWAL_DELEGATED, WITHDRAWAL_REASSIGNMENT}:
-            raise ValueError("Solo se pueden delegar solicitudes activas aprobadas.")
+        allowed_statuses = {WITHDRAWAL_PENDING, WITHDRAWAL_APPROVED, WITHDRAWAL_REASSIGNMENT}
+        old_status = str(withdrawal["status"])
+        if old_status not in allowed_statuses:
+            raise ValueError("Solo se pueden delegar solicitudes pendientes, aprobadas o pendientes de reasignacion.")
         officer = guild.get_member(officer_id)
         if officer is None or officer.bot:
             raise ValueError("El delegado debe pertenecer al servidor y no puede ser bot.")
@@ -5070,19 +5079,86 @@ class Admin(commands.Cog):
         if not self.is_payment_delegate_active(guild.id, officer.id):
             log_action(self.db, guild.id, admin_id=admin_id, action="Seleccion de delegado no autorizado", system="Banco", affected_user_id=officer.id, observation=code)
             raise ValueError("Este usuario no esta autorizado como delegado de pagos.")
+
         now = utc_now_iso()
-        old_status = str(withdrawal["status"])
-        self.db.execute(
-            """
-            UPDATE withdrawals
-            SET status = ?, assigned_officer_id = ?, delegated_by = ?, payment_place = ?,
-                payment_schedule = ?, delegated_at = ?, updated_at = ?
-            WHERE guild_id = ? AND id = ?
-            """,
-            (WITHDRAWAL_DELEGATED, officer_id, admin_id, place[:200], schedule[:80], now, now, guild.id, int(withdrawal["id"])),
-        )
-        self.log_withdrawal_action(int(withdrawal["id"]), action_type="delegacion", author_id=admin_id, amount=self.withdrawal_pending_amount(withdrawal), old_status=old_status, new_status=WITHDRAWAL_DELEGATED, note=f"oficial={officer_id}; lugar={place}; horario={schedule}; {note}")
-        log_action(self.db, guild.id, admin_id=admin_id, action="Delegar cobro", system="Banco", affected_user_id=int(withdrawal["user_id"]), amount=self.withdrawal_pending_amount(withdrawal), observation=f"{code}; oficial={officer_id}; lugar={place}; horario={schedule}; {note}")
+        with self.db.transaction() as cursor:
+            current = cursor.execute(
+                "SELECT * FROM withdrawals WHERE guild_id = ? AND id = ?",
+                (guild.id, int(withdrawal["id"])),
+            ).fetchone()
+            if current is None:
+                raise ValueError("No encontre esa solicitud.")
+            current_status = str(current["status"])
+            if current_status not in allowed_statuses:
+                raise ValueError("Solo se pueden delegar solicitudes pendientes, aprobadas o pendientes de reasignacion.")
+            pending_amount = self.withdrawal_pending_amount(current)
+            action_type = "aprobacion_delegacion" if current_status == WITHDRAWAL_PENDING else "delegacion"
+            audit_action = "Solicitud aprobada y delegada" if current_status == WITHDRAWAL_PENDING else "Delegar cobro"
+            cursor.execute(
+                """
+                UPDATE withdrawals
+                SET status = ?,
+                    approved_by = CASE WHEN status = ? THEN ? ELSE approved_by END,
+                    approved_at = CASE WHEN status = ? THEN ? ELSE approved_at END,
+                    assigned_officer_id = ?, delegated_by = ?, payment_place = ?,
+                    payment_schedule = ?, delegated_at = ?, updated_at = ?
+                WHERE guild_id = ? AND id = ? AND status IN (?, ?, ?)
+                """,
+                (
+                    WITHDRAWAL_DELEGATED,
+                    WITHDRAWAL_PENDING,
+                    admin_id,
+                    WITHDRAWAL_PENDING,
+                    now,
+                    officer_id,
+                    admin_id,
+                    place[:200],
+                    schedule[:80],
+                    now,
+                    now,
+                    guild.id,
+                    int(withdrawal["id"]),
+                    WITHDRAWAL_PENDING,
+                    WITHDRAWAL_APPROVED,
+                    WITHDRAWAL_REASSIGNMENT,
+                ),
+            )
+            cursor.execute(
+                """
+                INSERT INTO withdrawal_action_logs (
+                    withdrawal_id, action_type, author_id, amount,
+                    old_status, new_status, note, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    int(withdrawal["id"]),
+                    action_type,
+                    admin_id,
+                    pending_amount,
+                    current_status,
+                    WITHDRAWAL_DELEGATED,
+                    f"delegado={officer_id}; lugar={place}; horario={schedule}; {note}".strip(),
+                    now,
+                ),
+            )
+            cursor.execute(
+                """
+                INSERT INTO audit_logs (
+                    guild_id, admin_id, action, affected_user_id, amount,
+                    system, observation, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    guild.id,
+                    admin_id,
+                    audit_action,
+                    int(withdrawal["user_id"]),
+                    pending_amount,
+                    "Banco",
+                    f"{code}; estado_anterior={current_status}; estado_final={WITHDRAWAL_DELEGATED}; delegado={officer_id}; lugar={place}; horario={schedule}; {note}".strip(),
+                    now,
+                ),
+            )
         bank_cog = self.bot.get_cog("Bank")
         if bank_cog is not None:
             await bank_cog.send_delegated_withdrawal_dm(guild, code, officer, note)
@@ -5156,7 +5232,7 @@ class Admin(commands.Cog):
                     user=caller,
                     action="deposito_porcentaje_caller",
                     content=(
-                        f"ðŸ“£ Recibiste {format_amount(caller_amount)} por tu porcentaje de caller "
+                        f"📣 Recibiste {format_amount(caller_amount)} por tu porcentaje de caller "
                         f"en el Split `{code}`."
                     ),
                 )
@@ -5201,7 +5277,7 @@ class Admin(commands.Cog):
                     user=member,
                     action="deposito_split",
                     content=(
-                        "ðŸ’° Has recibido un deposito por Split.\n\n"
+                        "💰 Has recibido un deposito por Split.\n\n"
                         f"Cantidad: {format_amount(amount)}\n"
                         f"Tipo: {self.readable_balance_type(balance_type)}\n"
                         f"Split: {code}"
@@ -5244,10 +5320,10 @@ class Admin(commands.Cog):
             guild=guild,
             category="splits",
             content=(
-                f"âœ… Split `{code}` aprobado y depositado por <@{admin_id}>. "
-                f"Participantes: {len(participants)} Â· "
-                f"Repartible: {format_amount(payout['distributable'])} Â· "
-                f"Caller: {format_amount(caller_amount)} Â· "
+                f"✅ Split `{code}` aprobado y depositado por <@{admin_id}>. "
+                f"Participantes: {len(participants)} · "
+                f"Repartible: {format_amount(payout['distributable'])} · "
+                f"Caller: {format_amount(caller_amount)} · "
                 f"Gremio: {format_amount(payout['guild_amount'])}."
             ),
         )
@@ -5311,7 +5387,7 @@ class Admin(commands.Cog):
             guild=guild,
             category="splits",
             content=(
-                f"ðŸ“‹ Split `{code}` actualizado a **{status}** por <@{admin_id}>. "
+                f"📋 Split `{code}` actualizado a **{status}** por <@{admin_id}>. "
                 f"Motivo: {reason}"
             ),
         )
@@ -5387,8 +5463,8 @@ class Admin(commands.Cog):
         regear_channel = self.db.get_setting(guild_id, REGEAR_CHANNEL_SETTING_KEY)
         regear_notification_channel = self.db.get_setting(guild_id, REGEAR_NOTIFICATION_CHANNEL_SETTING_KEY)
         lines = [
-            "ðŸ”” **Canales de notificaciones administrativas**",
-            "Los avisos privados para usuarios continÃºan enviÃ¡ndose por DM.",
+            "🔔 **Canales de notificaciones administrativas**",
+            "Los avisos privados para usuarios continúan enviándose por DM.",
             "",
         ]
         for category, label, emoji in NOTIFICATION_CHANNEL_CATEGORIES:
@@ -5398,7 +5474,7 @@ class Admin(commands.Cog):
                 destination = (
                     f"<#{specific}>"
                     if specific.isdigit()
-                    else f"ID invÃ¡lido: `{specific}`"
+                    else f"ID inválido: `{specific}`"
                 )
             else:
                 fallback = next(
@@ -5418,12 +5494,12 @@ class Admin(commands.Cog):
         lines.extend(
             [
                 "",
-                f"ðŸ“£ **{PING_PUBLICATIONS_LABEL}:** {channel_setting_text(pings_channel)}",
+                f"📣 **{PING_PUBLICATIONS_LABEL}:** {channel_setting_text(pings_channel)}",
                 f"   Aprobados para callers: {self.approved_ping_channels_summary(guild_id)}",
-                f"ðŸ›¡ï¸ **{REGEAR_CHANNEL_LABEL}:** {channel_setting_text(regear_channel)}",
-                f"ðŸ›¡ï¸ **{REGEAR_NOTIFICATION_CHANNEL_LABEL}:** {channel_setting_text(regear_notification_channel)}",
+                f"🛡️ **{REGEAR_CHANNEL_LABEL}:** {channel_setting_text(regear_channel)}",
+                f"🛡️ **{REGEAR_NOTIFICATION_CHANNEL_LABEL}:** {channel_setting_text(regear_notification_channel)}",
                 "",
-                "Selecciona una categorÃ­a para establecer o cambiar su canal.",
+                "Selecciona una categoría para establecer o cambiar su canal.",
                 "Usa los botones de pings, Requips y Notificaciones de Requips para elegir sus canales de trabajo.",
             ]
         )
@@ -5479,7 +5555,7 @@ class Admin(commands.Cog):
         )
         if not withdrawal_rows and not quick_rows:
             return "No hay liquidaciones registradas."
-        lines = ["ðŸ§¾ **Historial de liquidaciones**"]
+        lines = ["🧾 **Historial de liquidaciones**"]
         grouped_quick: dict[int, dict] = {}
         for row in quick_rows:
             liquidation = grouped_quick.setdefault(
@@ -5501,11 +5577,11 @@ class Admin(commands.Cog):
                 for user_id, amount in liquidation["items"]
             )
             lines.append(
-                f"âš¡ {liquidation['code']} Â· Split {liquidation['payout_code']} Â· "
-                f"{liquidation['mode']} Â· {format_amount(liquidation['total_amount'])} Â· "
-                f"Por <@{liquidation['admin_id']}> Â· {liquidation['created_at']}"
+                f"⚡ {liquidation['code']} · Split {liquidation['payout_code']} · "
+                f"{liquidation['mode']} · {format_amount(liquidation['total_amount'])} · "
+                f"Por <@{liquidation['admin_id']}> · {liquidation['created_at']}"
             )
-            lines.append(f"â†³ {members}")
+            lines.append(f"↳ {members}")
         for row in withdrawal_rows:
             liquidator = (
                 f"<@{row['liquidated_by']}>"
@@ -5513,18 +5589,18 @@ class Admin(commands.Cog):
                 else "Sistema"
             )
             lines.append(
-                f"`{row['code']}` <@{row['user_id']}> Â· "
+                f"`{row['code']}` <@{row['user_id']}> · "
                 f"{format_amount(row['amount_liquidated'] or 0)} de "
-                f"{format_amount(row['amount_requested'])} Â· {row['status']} Â· "
-                f"Por {liquidator} Â· {row['liquidated_at']}"
+                f"{format_amount(row['amount_requested'])} · {row['status']} · "
+                f"Por {liquidator} · {row['liquidated_at']}"
             )
             if row["approval_admin_message"]:
                 lines.append(
-                    f"â†³ Indicaciones al aprobar: {row['approval_admin_message']}"
+                    f"↳ Indicaciones al aprobar: {row['approval_admin_message']}"
                 )
             if row["liquidation_admin_message"]:
                 lines.append(
-                    f"â†³ Indicaciones al liquidar: {row['liquidation_admin_message']}"
+                    f"↳ Indicaciones al liquidar: {row['liquidation_admin_message']}"
                 )
         return "\n".join(lines)[:1900]
 
@@ -5540,7 +5616,7 @@ class Admin(commands.Cog):
         )
         if not rows:
             return "No hay multas pendientes."
-        lines = ["ðŸš¨ **Multas pendientes**"]
+        lines = ["🚨 **Multas pendientes**"]
         for row in rows:
             lines.append(
                 f"`{row['code']}` <@{row['user_id']}> {format_amount(row['amount'])} - {row['reason']}"
@@ -5582,7 +5658,7 @@ class Admin(commands.Cog):
         rows = list(rows) if rows is not None else self.pending_split_activities(guild_id)
         if not rows:
             return "No hay actividades pendientes de split."
-        lines = ["ðŸ”´ **Actividades pendientes de split**"]
+        lines = ["🔴 **Actividades pendientes de split**"]
         for row in rows:
             voice = f"<#{row['voice_channel_id']}>" if row["voice_channel_id"] else "Sin canal"
             date = row["horario"] or row["ended_at"] or row["created_at"]
@@ -5590,7 +5666,7 @@ class Admin(commands.Cog):
                 [
                     "",
                     f"`{row['code']}` **{row['name']}**",
-                    f"Caller: <@{row['caller_id']}> Â· Fecha/hora: `{date}` Â· Voz: {voice}",
+                    f"Caller: <@{row['caller_id']}> · Fecha/hora: `{date}` · Voz: {voice}",
                     (
                         f"Asistencia: {row['confirmed']} confirmados, "
                         f"{row['absent']} ausentes, {row['registered']} registrados"
@@ -5626,7 +5702,7 @@ class Admin(commands.Cog):
         voice = f"<#{activity['voice_channel_id']}>" if activity["voice_channel_id"] else "Sin canal"
         date = activity["horario"] or activity["ended_at"] or activity["created_at"]
         lines = [
-            f"ðŸ”´ **Actividad pendiente de split:** `{activity['code']}`",
+            f"🔴 **Actividad pendiente de split:** `{activity['code']}`",
             f"Nombre: **{activity['name']}**",
             f"Caller: <@{activity['caller_id']}>",
             f"Fecha/hora: `{date}`",
@@ -5641,8 +5717,8 @@ class Admin(commands.Cog):
             percent = float(row["participation_percent"] or 0)
             minutes = int(row["voice_seconds"] or 0) // 60
             lines.append(
-                f"â€¢ <@{row['user_id']}> Â· {row['role_name'] or 'Sin rol'} Â· "
-                f"{state} Â· {percent:.1f}% Â· {minutes} min"
+                f"• <@{row['user_id']}> · {row['role_name'] or 'Sin rol'} · "
+                f"{state} · {percent:.1f}% · {minutes} min"
             )
         return "\n".join(lines)[:1900]
 
@@ -5679,7 +5755,7 @@ class Admin(commands.Cog):
             user=caller,
             action="recordatorio_split_pendiente",
             content=(
-                f"ðŸ”´ Recordatorio: la actividad `{activity['code']}` **{activity['name']}** "
+                f"🔴 Recordatorio: la actividad `{activity['code']}` **{activity['name']}** "
                 "ya fue finalizada y sigue pendiente de split."
             ),
         )
@@ -5703,27 +5779,27 @@ class Admin(commands.Cog):
     def pending_payouts_text(self, guild_id: int) -> str:
         rows = self.pending_payout_rows(guild_id)
         if not rows:
-            return "No hay Splits pendientes de aprobaciÃ³n."
+            return "No hay Splits pendientes de aprobación."
         pending = [row for row in rows if row["status"] == PAYOUT_PENDING]
         correction = [row for row in rows if row["status"] == PAYOUT_CORRECTION]
-        lines = ["â³ **Splits pendientes de aprobaciÃ³n**"]
+        lines = ["⏳ **Splits pendientes de aprobación**"]
         if pending:
             for row in pending:
                 lines.append(
-                    f"`{row['code']}` Â· Caller <@{row['caller_id']}> Â· "
-                    f"Repartible {format_amount(row['distributable'])} Â· "
-                    f"Gremio {format_amount(row['guild_amount'])} Â· "
+                    f"`{row['code']}` · Caller <@{row['caller_id']}> · "
+                    f"Repartible {format_amount(row['distributable'])} · "
+                    f"Gremio {format_amount(row['guild_amount'])} · "
                     f"Caller {format_amount(row['caller_amount'])}"
                 )
         else:
             lines.append("Sin splits listos para aprobar.")
         if correction:
-            lines.extend(["", "ðŸ” **Requiere correcciÃ³n**"])
+            lines.extend(["", "🔁 **Requiere corrección**"])
             for row in correction:
                 lines.append(
-                    f"`{row['code']}` Â· Caller <@{row['caller_id']}> Â· "
-                    f"Repartible {format_amount(row['distributable'])} Â· "
-                    f"Gremio {format_amount(row['guild_amount'])} Â· "
+                    f"`{row['code']}` · Caller <@{row['caller_id']}> · "
+                    f"Repartible {format_amount(row['distributable'])} · "
+                    f"Gremio {format_amount(row['guild_amount'])} · "
                     f"Caller {format_amount(row['caller_amount'])}"
                 )
         return "\n".join(lines)[:1900]
@@ -5742,8 +5818,8 @@ class Admin(commands.Cog):
 
     def payouts_list_text(self, guild_id: int, *, mode: str) -> str:
         if mode == "pending":
-            title = "â³ **Splits pendientes de aprobaciÃ³n**"
-            empty = "No hay Splits pendientes de aprobaciÃ³n."
+            title = "⏳ **Splits pendientes de aprobación**"
+            empty = "No hay Splits pendientes de aprobación."
             query = """
                 SELECT code, caller_id, distributable, guild_amount,
                        caller_amount, status, created_at, reviewed_at
@@ -5753,7 +5829,7 @@ class Admin(commands.Cog):
             """
             params = (guild_id, PAYOUT_PENDING)
         elif mode == "approved":
-            title = "âœ… **Splits aprobados**"
+            title = "✅ **Splits aprobados**"
             empty = "No hay Splits aprobados."
             query = """
                 SELECT code, caller_id, distributable, guild_amount,
@@ -5764,7 +5840,7 @@ class Admin(commands.Cog):
             """
             params = (guild_id, PAYOUT_APPROVED, PAYOUT_DEPOSITED)
         elif mode == "all":
-            title = "ðŸ“š **Lista general de Splits**"
+            title = "📚 **Lista general de Splits**"
             empty = "No hay Splits registrados."
             query = """
                 SELECT code, caller_id, distributable, guild_amount,
@@ -5783,14 +5859,14 @@ class Admin(commands.Cog):
         lines = [title]
         for row in rows:
             lines.append(
-                f"`{row['code']}` Â· **{row['status']}** Â· Caller <@{row['caller_id']}> Â· "
-                f"Repartible {format_amount(row['distributable'])} Â· "
-                f"Gremio {format_amount(row['guild_amount'])} Â· "
+                f"`{row['code']}` · **{row['status']}** · Caller <@{row['caller_id']}> · "
+                f"Repartible {format_amount(row['distributable'])} · "
+                f"Gremio {format_amount(row['guild_amount'])} · "
                 f"Caller {format_amount(row['caller_amount'])}"
             )
         if mode == "pending":
             lines.append(
-                "Usa los botones del mensaje de revisiÃ³n para aprobar, rechazar o pedir correcciÃ³n."
+                "Usa los botones del mensaje de revisión para aprobar, rechazar o pedir corrección."
             )
         return "\n".join(lines)[:1900]
 
@@ -5814,15 +5890,15 @@ class Admin(commands.Cog):
             if not rows:
                 return "Sin participantes."
             return "\n".join(
-                f"â€¢ <@{row['user_id']}> - {row['participation_percent']}% - {format_amount(row['amount'])}"
+                f"• <@{row['user_id']}> - {row['participation_percent']}% - {format_amount(row['amount'])}"
                 for row in rows
             )
         lines = [
-            f"ðŸ“‹ **Detalle de Split {code}**",
+            f"📋 **Detalle de Split {code}**",
             f"Caller: <@{payout['caller_id']}>",
             f"Loot bruto: {format_amount(payout['gross_loot'])}",
             f"Aporte gremial: {format_amount(payout['guild_amount'])}",
-            f"Pago caller: {float(payout['caller_percent'] or 0):.1f}% â€” {format_amount(payout['caller_amount'])}",
+            f"Pago caller: {float(payout['caller_percent'] or 0):.1f}% — {format_amount(payout['caller_amount'])}",
             f"Monto repartible: {format_amount(payout['distributable'])}",
             "",
             "**Participantes**",
@@ -5831,7 +5907,7 @@ class Admin(commands.Cog):
             lines.append("Sin participantes.")
         for row in rows:
             lines.append(
-                f"â€¢ <@{row['user_id']}> - {row['participation_percent']}% - {format_amount(row['amount'])}"
+                f"• <@{row['user_id']}> - {row['participation_percent']}% - {format_amount(row['amount'])}"
             )
         return "\n".join(lines)
 
@@ -5923,11 +5999,11 @@ class Admin(commands.Cog):
         label = regear_filter_label(filter_key)
         currency = self.db.get_setting(guild.id, "currency_name", "plata")
         embed = discord.Embed(
-            title=f"ðŸ›¡ï¸ Ranking de Requips - {label}",
+            title=f"🛡️ Ranking de Requips - {label}",
             color=discord.Color.gold(),
         )
         embed.description = (
-            "Ordenado por mayor nÃºmero de solicitudes, luego mÃ¡s pagados y luego solicitud mÃ¡s reciente.\n"
+            "Ordenado por mayor número de solicitudes, luego más pagados y luego solicitud más reciente.\n"
             "Usa el selector para consultar el historial completo de un jugador."
         )
         if not rows:
@@ -5940,9 +6016,9 @@ class Admin(commands.Cog):
             lines.append(
                 f"**{index}.** <@{user_id}> | "
                 f"Total: **{row['total_requests']}** | "
-                f"âœ… {row['paid_count']} | ðŸ•’ {row['pending_payment_count']} | "
-                f"âŒ {row['rejected_count']} | â³ {row['pending_count']} | "
-                f"Monto: {amount} | Ãšltima: {discord_date(row['last_created'], 'd')}"
+                f"✅ {row['paid_count']} | 🕒 {row['pending_payment_count']} | "
+                f"❌ {row['rejected_count']} | ⏳ {row['pending_count']} | "
+                f"Monto: {amount} | Última: {discord_date(row['last_created'], 'd')}"
             )
         embed.add_field(name="Jugadores", value="\n".join(lines), inline=False)
         if len(rows) > 15:
@@ -5972,21 +6048,21 @@ class Admin(commands.Cog):
         rows = self.regear_user_history_rows(guild.id, user_id)
         member = guild.get_member(user_id)
         subject = member.mention if member is not None else f"<@{user_id}>"
-        header = f"ðŸ›¡ï¸ **Requips de {subject}**"
+        header = f"🛡️ **Requips de {subject}**"
         if not rows:
             return [f"{header}\nSin solicitudes registradas."]
         currency = self.db.get_setting(guild.id, "currency_name", "plata")
         lines: list[str] = []
         for row in rows:
             reviewed_by = f"<@{row['reviewed_by']}>" if row["reviewed_by"] else "Sin revisar"
-            reviewed_at = discord_date(row["reviewed_at"], "f") if row["reviewed_at"] else "Sin revisiÃ³n"
+            reviewed_at = discord_date(row["reviewed_at"], "f") if row["reviewed_at"] else "Sin revisión"
             capture = f"[Ver captura]({row['image_url']})" if row["image_url"] else "Sin captura"
             message = f"[Ver mensaje]({row['message_url']})" if row["message_url"] else "Sin mensaje"
             parts = [
                 f"**{row['request_code']}**",
                 regear_status_display(str(row["status"] or "pending")),
                 f"Creada: {discord_date(row['created_at'], 'd')}",
-                f"RevisiÃ³n: {reviewed_at}",
+                f"Revisión: {reviewed_at}",
                 f"Revisado por: {reviewed_by}",
                 capture,
                 message,
