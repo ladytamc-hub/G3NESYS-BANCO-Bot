@@ -17,6 +17,7 @@ from ..constants import (
 )
 from ..permissions import has_bank_access, is_admin_subject, is_full_member, require_admin_context
 from ..services.audit import log_action
+from ..services.callers import is_caller_penalized
 from ..services.economy import (
     create_withdrawal_request,
     format_percent,
@@ -404,8 +405,18 @@ class WithdrawalOfficerSelect(discord.ui.UserSelect):
         officer = self.values[0]
         member = interaction.guild.get_member(officer.id)
         admin_cog = self.cog.bot.get_cog("Admin")
-        if member is None or member.bot or admin_cog is None or not admin_cog.member_has_admin_access(interaction.guild, member):
-            await private_response(interaction, "Selecciona un oficial valido con permisos.")
+        if admin_cog is None:
+            await private_response(interaction, "El panel administrativo no esta disponible.")
+            return
+        if member is None or member.bot:
+            await private_response(interaction, "Selecciona un miembro valido del servidor.")
+            return
+        if is_caller_penalized(self.cog.db, interaction.guild.id, member.id):
+            await private_response(interaction, "Este usuario esta bloqueado por una penalizacion activa.")
+            return
+        if not admin_cog.is_payment_delegate_active(interaction.guild.id, member.id):
+            log_action(self.cog.db, interaction.guild.id, admin_id=interaction.user.id, action="Seleccion de delegado no autorizado", system="Banco", affected_user_id=member.id, observation=self.code)
+            await private_response(interaction, "Este usuario no esta autorizado como delegado de pagos.")
             return
         await interaction.response.send_modal(WithdrawalDelegateDetailsModal(self.cog, self.guild_id, self.code, officer.id))
 
@@ -531,7 +542,10 @@ class WithdrawalReviewView(discord.ui.View):
             await interaction.response.send_modal(WithdrawalNoPaidModal(self.cog, self.guild_id, self.code))
             return
         if action == "delegate":
-            await private_response(interaction, "Selecciona el oficial que realizara el pago:", view=WithdrawalDelegateView(self.cog, self.guild_id, self.code))
+            if admin_cog.active_payment_delegate_count(interaction.guild.id) == 0:
+                await private_response(interaction, "No hay delegados de pago configurados. A\u00f1ade uno desde Panel de Admins > Delegados de pago.")
+                return
+            await private_response(interaction, "Selecciona el delegado que realizara el pago:", view=WithdrawalDelegateView(self.cog, self.guild_id, self.code))
 
 
 class TicketCreateModal(discord.ui.Modal, title="Crear ticket"):

@@ -637,6 +637,18 @@ CREATE TABLE IF NOT EXISTS admin_access (
     PRIMARY KEY (guild_id, user_id)
 );
 
+CREATE TABLE IF NOT EXISTS payment_delegates (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    guild_id INTEGER NOT NULL,
+    user_id INTEGER NOT NULL,
+    active INTEGER NOT NULL DEFAULT 1,
+    added_by INTEGER NOT NULL,
+    added_at TEXT NOT NULL,
+    removed_by INTEGER,
+    removed_at TEXT,
+    UNIQUE(guild_id, user_id)
+);
+
 CREATE TABLE IF NOT EXISTS caller_penalties (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     guild_id INTEGER NOT NULL,
@@ -1075,6 +1087,9 @@ ON payout_audit_logs(guild_id, payout_id, created_at);
 
 CREATE INDEX IF NOT EXISTS idx_withdrawals_guild_status
 ON withdrawals(guild_id, status);
+
+CREATE INDEX IF NOT EXISTS idx_payment_delegates_active
+ON payment_delegates(guild_id, active);
 
 CREATE INDEX IF NOT EXISTS idx_regear_requests_guild_status
 ON regear_requests(guild_id, status);

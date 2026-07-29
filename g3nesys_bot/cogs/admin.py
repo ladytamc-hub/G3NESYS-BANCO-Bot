@@ -1251,6 +1251,104 @@ class RecruitersAdminView(discord.ui.View):
             )
 
 
+
+class PaymentDelegateAddSelect(discord.ui.UserSelect):
+    def __init__(self, cog: "Admin", *, admin_id: int):
+        super().__init__(placeholder="Busca el miembro que recibira pagos delegados", min_values=1, max_values=1)
+        self.cog = cog
+        self.admin_id = admin_id
+
+    async def callback(self, interaction: discord.Interaction) -> None:
+        if interaction.user.id != self.admin_id or not is_admin_subject(self.cog.db, interaction):
+            if interaction.guild is not None:
+                log_action(self.cog.db, interaction.guild.id, admin_id=interaction.user.id, action="Intento sin permisos delegados de pago", system="Banco", observation="add")
+            await private_response(interaction, "Solo el admin que abrio este menu puede usarlo.")
+            return
+        member = interaction.guild.get_member(self.values[0].id) if interaction.guild else None
+        await self.cog.add_payment_delegate_interaction(interaction, member)
+
+
+class PaymentDelegateAddView(discord.ui.View):
+    def __init__(self, cog: "Admin", *, admin_id: int):
+        super().__init__(timeout=300)
+        self.add_item(PaymentDelegateAddSelect(cog, admin_id=admin_id))
+
+
+class PaymentDelegateRemoveSelect(discord.ui.Select):
+    def __init__(self, cog: "Admin", *, admin_id: int, guild: discord.Guild, rows):
+        options = []
+        for row in list(rows)[:25]:
+            user_id = int(row["user_id"])
+            active_count = cog.active_delegated_withdrawals_count(int(row["guild_id"]), user_id)
+            options.append(
+                discord.SelectOption(
+                    label=short_member_label(guild, user_id)[:100],
+                    value=str(user_id),
+                    description=f"ID {user_id} | Pagos activos: {active_count}"[:100],
+                    emoji="\U0001F464",
+                )
+            )
+        super().__init__(placeholder="Selecciona el delegado que deseas quitar", min_values=1, max_values=1, options=options)
+        self.cog = cog
+        self.admin_id = admin_id
+
+    async def callback(self, interaction: discord.Interaction) -> None:
+        if interaction.user.id != self.admin_id or not is_admin_subject(self.cog.db, interaction):
+            if interaction.guild is not None:
+                log_action(self.cog.db, interaction.guild.id, admin_id=interaction.user.id, action="Intento sin permisos delegados de pago", system="Banco", observation="remove")
+            await private_response(interaction, "Solo el admin que abrio este menu puede usarlo.")
+            return
+        await self.cog.remove_payment_delegate_interaction(interaction, int(self.values[0]))
+
+
+class PaymentDelegateRemoveView(discord.ui.View):
+    def __init__(self, cog: "Admin", *, admin_id: int, guild: discord.Guild, rows):
+        super().__init__(timeout=300)
+        self.add_item(PaymentDelegateRemoveSelect(cog, admin_id=admin_id, guild=guild, rows=rows))
+
+
+class PaymentDelegatesAdminView(discord.ui.View):
+    def __init__(self, cog: "Admin"):
+        super().__init__(timeout=300)
+        self.cog = cog
+
+    async def require_admin(self, interaction: discord.Interaction) -> bool:
+        if is_admin_subject(self.cog.db, interaction):
+            return True
+        if interaction.guild is not None:
+            log_action(self.cog.db, interaction.guild.id, admin_id=interaction.user.id, action="Intento sin permisos delegados de pago", system="Banco")
+        await private_response(interaction, "Solo admins autorizados pueden gestionar delegados de pago.")
+        return False
+
+    @discord.ui.button(label="A\u00f1adir delegado", emoji="\U00002795", style=discord.ButtonStyle.success)
+    async def add_delegate(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
+        if await self.require_admin(interaction):
+            await private_response(
+                interaction,
+                "Selecciona el miembro autorizado para recibir pagos delegados:",
+                view=PaymentDelegateAddView(self.cog, admin_id=interaction.user.id),
+            )
+
+    @discord.ui.button(label="Quitar delegado", emoji="\U00002796", style=discord.ButtonStyle.danger)
+    async def remove_delegate(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
+        if not await self.require_admin(interaction):
+            return
+        rows = self.cog.payment_delegate_rows(interaction.guild.id, active_only=True)
+        if not rows:
+            await private_response(interaction, "No hay delegados de pago activos para quitar.")
+            return
+        await private_response(
+            interaction,
+            "Selecciona el delegado que deseas desactivar. Las solicitudes historicas no se modifican.",
+            view=PaymentDelegateRemoveView(self.cog, admin_id=interaction.user.id, guild=interaction.guild, rows=rows),
+        )
+
+    @discord.ui.button(label="Ver delegados", emoji="\U0001F4CB", style=discord.ButtonStyle.secondary)
+    async def list_delegates(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
+        if await self.require_admin(interaction):
+            await dm_or_private(self.cog, interaction, self.cog.payment_delegates_text(interaction.guild), "delegados_pago")
+
+
 class AdminsAdminView(discord.ui.View):
     def __init__(self, cog: "Admin"):
         super().__init__(timeout=300)
@@ -2939,6 +3037,15 @@ class AdminPanelView(discord.ui.View):
                 view=RecruitersAdminView(self.cog),
             )
 
+    @discord.ui.button(label="Delegados de pago", emoji="\U0001F464", style=discord.ButtonStyle.primary, custom_id="g3n:admin:payment_delegates", row=3)
+    async def payment_delegates(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
+        if await self.require_admin(interaction):
+            await private_response(
+                interaction,
+                "Administra quienes pueden recibir pagos delegados:",
+                view=PaymentDelegatesAdminView(self.cog),
+            )
+
     @discord.ui.button(label="Admins", emoji="\U0001F510", style=discord.ButtonStyle.primary, custom_id="g3n:admin:admins", row=3)
     async def admins(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
         if await self.require_admin(interaction):
@@ -2991,14 +3098,6 @@ class AdminPanelView(discord.ui.View):
                 view=ConfigAdminView(self.cog),
             )
 
-    @discord.ui.button(label="Tasas predeterminadas", style=discord.ButtonStyle.secondary, custom_id="g3n:admin:default_rates", row=4)
-    async def default_rates(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
-        if await self.require_admin(interaction):
-            await private_response(
-                interaction,
-                self.cog.default_rates_text(interaction.guild.id),
-                view=DefaultRatesAdminView(self.cog),
-            )
 
 
 class Admin(commands.Cog):
@@ -3039,6 +3138,145 @@ class Admin(commands.Cog):
         return not split_csv_ids(configured_roles) and any(
             role.name.strip().casefold() in ADMIN_ROLE_NAMES for role in member.roles
         )
+
+    def is_payment_delegate_active(self, guild_id: int, user_id: int) -> bool:
+        row = self.db.fetch_one(
+            "SELECT active FROM payment_delegates WHERE guild_id = ? AND user_id = ?",
+            (guild_id, user_id),
+        )
+        return row is not None and bool(row["active"])
+
+    def active_payment_delegate_count(self, guild_id: int) -> int:
+        row = self.db.fetch_one(
+            "SELECT COUNT(*) AS total FROM payment_delegates WHERE guild_id = ? AND active = 1",
+            (guild_id,),
+        )
+        return int(row["total"] if row is not None else 0)
+
+    def payment_delegate_rows(self, guild_id: int, *, active_only: bool = False):
+        where = "WHERE guild_id = ?"
+        params: tuple = (guild_id,)
+        if active_only:
+            where += " AND active = 1"
+        return self.db.fetch_all(
+            f"""
+            SELECT *
+            FROM payment_delegates
+            {where}
+            ORDER BY active DESC, added_at ASC
+            """,
+            params,
+        )
+
+    def active_delegated_withdrawals_count(self, guild_id: int, user_id: int) -> int:
+        row = self.db.fetch_one(
+            """
+            SELECT COUNT(*) AS total
+            FROM withdrawals
+            WHERE guild_id = ?
+              AND assigned_officer_id = ?
+              AND status IN (?, ?, ?)
+            """,
+            (guild_id, user_id, WITHDRAWAL_DELEGATED, WITHDRAWAL_PARTIAL, WITHDRAWAL_REASSIGNMENT),
+        )
+        return int(row["total"] if row is not None else 0)
+
+    def payment_delegates_text(self, guild: discord.Guild) -> str:
+        rows = self.payment_delegate_rows(guild.id)
+        if not rows:
+            return "**Delegados de pago**\nNo hay delegados configurados."
+        lines = ["**Delegados de pago**"]
+        for row in rows:
+            user_id = int(row["user_id"])
+            member = guild.get_member(user_id)
+            name = member.display_name if member is not None else "Usuario no disponible"
+            status = "Activo" if int(row["active"]) else "Inactivo"
+            active_payments = self.active_delegated_withdrawals_count(guild.id, user_id)
+            lines.append(
+                f"- **{name}** | ID `{user_id}` | {status} | "
+                f"Alta: `{row['added_at']}` por <@{row['added_by']}> | "
+                f"Pagos activos: {active_payments}"
+            )
+        return "\n".join(lines)[:1900]
+
+    async def add_payment_delegate_interaction(self, interaction: discord.Interaction, member: discord.Member | None) -> None:
+        if interaction.guild is None:
+            await private_response(interaction, "Esta operacion debe realizarse dentro del servidor.")
+            return
+        if not is_admin_subject(self.db, interaction):
+            log_action(self.db, interaction.guild.id, admin_id=interaction.user.id, action="Intento sin permisos delegados de pago", system="Banco", observation="add")
+            await private_response(interaction, "Solo admins autorizados pueden gestionar delegados de pago.")
+            return
+        if member is None or member.guild.id != interaction.guild.id:
+            await private_response(interaction, "El usuario debe pertenecer a este servidor.")
+            return
+        if member.bot:
+            await private_response(interaction, "No se pueden configurar bots como delegados de pago.")
+            return
+        if is_caller_penalized(self.db, interaction.guild.id, member.id):
+            await private_response(interaction, "Este usuario esta bloqueado por una penalizacion activa.")
+            return
+        existing = self.db.fetch_one(
+            "SELECT * FROM payment_delegates WHERE guild_id = ? AND user_id = ?",
+            (interaction.guild.id, member.id),
+        )
+        now = utc_now_iso()
+        if existing is not None and int(existing["active"]):
+            log_action(self.db, interaction.guild.id, admin_id=interaction.user.id, action="Intento duplicado delegado de pago", system="Banco", affected_user_id=member.id)
+            await private_response(interaction, f"{member.mention} ya esta registrado como delegado de pago activo.")
+            return
+        if existing is None:
+            self.db.execute(
+                """
+                INSERT INTO payment_delegates (guild_id, user_id, active, added_by, added_at)
+                VALUES (?, ?, 1, ?, ?)
+                """,
+                (interaction.guild.id, member.id, interaction.user.id, now),
+            )
+            action = "Alta de delegado de pago"
+            message = f"{member.mention} fue agregado como delegado de pago."
+        else:
+            self.db.execute(
+                """
+                UPDATE payment_delegates
+                SET active = 1, added_by = ?, added_at = ?, removed_by = NULL, removed_at = NULL
+                WHERE guild_id = ? AND user_id = ?
+                """,
+                (interaction.user.id, now, interaction.guild.id, member.id),
+            )
+            action = "Reactivacion de delegado de pago"
+            message = f"{member.mention} fue reactivado como delegado de pago."
+        log_action(self.db, interaction.guild.id, admin_id=interaction.user.id, action=action, system="Banco", affected_user_id=member.id)
+        await private_response(interaction, message)
+
+    async def remove_payment_delegate_interaction(self, interaction: discord.Interaction, user_id: int) -> None:
+        if interaction.guild is None:
+            await private_response(interaction, "Esta operacion debe realizarse dentro del servidor.")
+            return
+        if not is_admin_subject(self.db, interaction):
+            log_action(self.db, interaction.guild.id, admin_id=interaction.user.id, action="Intento sin permisos delegados de pago", system="Banco", observation="remove")
+            await private_response(interaction, "Solo admins autorizados pueden gestionar delegados de pago.")
+            return
+        row = self.db.fetch_one(
+            "SELECT * FROM payment_delegates WHERE guild_id = ? AND user_id = ? AND active = 1",
+            (interaction.guild.id, user_id),
+        )
+        if row is None:
+            await private_response(interaction, "Ese usuario no esta registrado como delegado activo.")
+            return
+        active_payments = self.active_delegated_withdrawals_count(interaction.guild.id, user_id)
+        now = utc_now_iso()
+        self.db.execute(
+            """
+            UPDATE payment_delegates
+            SET active = 0, removed_by = ?, removed_at = ?
+            WHERE guild_id = ? AND user_id = ?
+            """,
+            (interaction.user.id, now, interaction.guild.id, user_id),
+        )
+        log_action(self.db, interaction.guild.id, admin_id=interaction.user.id, action="Baja de delegado de pago", system="Banco", affected_user_id=user_id, observation=f"pagos_activos={active_payments}")
+        warning = f"\nAdvertencia: conserva {active_payments} pago(s) activo(s) ya asignado(s)." if active_payments else ""
+        await private_response(interaction, f"<@{user_id}> ya no aparecera para nuevas delegaciones.{warning}")
 
     def configured_admin_roles(self, guild: discord.Guild) -> list[discord.Role]:
         role_ids = split_csv_ids(self.db.get_setting(guild.id, "admin_role_ids"))
@@ -4825,8 +5063,13 @@ class Admin(commands.Cog):
         if withdrawal["status"] not in {WITHDRAWAL_APPROVED, WITHDRAWAL_PARTIAL, WITHDRAWAL_DELEGATED, WITHDRAWAL_REASSIGNMENT}:
             raise ValueError("Solo se pueden delegar solicitudes activas aprobadas.")
         officer = guild.get_member(officer_id)
-        if officer is None or officer.bot or not self.member_has_admin_access(guild, officer):
-            raise ValueError("El oficial debe pertenecer al servidor y tener permisos administrativos/financieros.")
+        if officer is None or officer.bot:
+            raise ValueError("El delegado debe pertenecer al servidor y no puede ser bot.")
+        if is_caller_penalized(self.db, guild.id, officer.id):
+            raise ValueError("Este usuario esta bloqueado por una penalizacion activa.")
+        if not self.is_payment_delegate_active(guild.id, officer.id):
+            log_action(self.db, guild.id, admin_id=admin_id, action="Seleccion de delegado no autorizado", system="Banco", affected_user_id=officer.id, observation=code)
+            raise ValueError("Este usuario no esta autorizado como delegado de pagos.")
         now = utc_now_iso()
         old_status = str(withdrawal["status"])
         self.db.execute(
