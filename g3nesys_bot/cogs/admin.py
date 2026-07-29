@@ -2831,22 +2831,22 @@ class AdminPanelView(discord.ui.View):
         await private_response(interaction, "Solo admins autorizados pueden usar este panel.")
         return False
 
-    @discord.ui.button(label="Ver Plata Gremial", emoji="ðŸ’°", style=discord.ButtonStyle.primary, custom_id="g3n:admin:treasury", row=0)
+    @discord.ui.button(label="Ver Plata Gremial", emoji="\U0001F4B0", style=discord.ButtonStyle.primary, custom_id="g3n:admin:treasury", row=0)
     async def treasury(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
         if await self.require_admin(interaction):
             await dm_or_private(self.cog, interaction, self.cog.treasury_text(interaction.guild.id), "tesoreria_panel")
 
-    @discord.ui.button(label="Registrar Ingreso", emoji="ðŸ“¥", style=discord.ButtonStyle.success, custom_id="g3n:admin:income", row=0)
+    @discord.ui.button(label="Registrar Ingreso", emoji="\U0001F4E5", style=discord.ButtonStyle.success, custom_id="g3n:admin:income", row=0)
     async def income(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
         if await self.require_admin(interaction):
             await interaction.response.send_modal(IncomeModal(self.cog))
 
-    @discord.ui.button(label="Registrar Egreso", emoji="ðŸ“¤", style=discord.ButtonStyle.danger, custom_id="g3n:admin:expense", row=0)
+    @discord.ui.button(label="Registrar Egreso", emoji="\U0001F4E4", style=discord.ButtonStyle.danger, custom_id="g3n:admin:expense", row=0)
     async def expense(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
         if await self.require_admin(interaction):
             await interaction.response.send_modal(ExpenseModal(self.cog))
 
-    @discord.ui.button(label="Depositar a Usuario", emoji="ðŸª™", style=discord.ButtonStyle.success, custom_id="g3n:admin:deposit", row=1)
+    @discord.ui.button(label="Depositar a Usuario", emoji="\U0001F4B0", style=discord.ButtonStyle.success, custom_id="g3n:admin:deposit", row=1)
     async def deposit(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
         if await self.require_admin(interaction):
             await private_response(
@@ -2855,7 +2855,7 @@ class AdminPanelView(discord.ui.View):
                 view=DepositOptionsView(self.cog, admin_id=interaction.user.id),
             )
 
-    @discord.ui.button(label="Solicitudes de Cobro", emoji="ðŸ’³", style=discord.ButtonStyle.secondary, custom_id="g3n:admin:withdrawals", row=1)
+    @discord.ui.button(label="Solicitudes de Cobro", emoji="\U0001F4B3", style=discord.ButtonStyle.secondary, custom_id="g3n:admin:withdrawals", row=1)
     async def withdrawals(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
         if await self.require_admin(interaction):
             await private_response(
@@ -2864,12 +2864,12 @@ class AdminPanelView(discord.ui.View):
                 view=WithdrawalAdminView(self.cog),
             )
 
-    @discord.ui.button(label="Edo.Cta.Usuario", emoji="ðŸ‘¤", style=discord.ButtonStyle.secondary, custom_id="g3n:admin:statement", row=1)
+    @discord.ui.button(label="Edo.Cta.Usuario", emoji="\U0001F464", style=discord.ButtonStyle.secondary, custom_id="g3n:admin:statement", row=1)
     async def statement(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
         if await self.require_admin(interaction):
             await interaction.response.send_modal(UserStatementModal(self.cog))
 
-    @discord.ui.button(label="Revisar Splits", emoji="ðŸ“‹", style=discord.ButtonStyle.secondary, custom_id="g3n:admin:payouts", row=2)
+    @discord.ui.button(label="Revisar Splits", emoji="\U0001F4CB", style=discord.ButtonStyle.secondary, custom_id="g3n:admin:payouts", row=2)
     async def payouts(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
         if await self.require_admin(interaction):
             await private_response(
@@ -2878,7 +2878,7 @@ class AdminPanelView(discord.ui.View):
                 view=SplitsAdminView(self.cog),
             )
 
-    @discord.ui.button(label="Historial Liq.", emoji="ðŸ§¾", style=discord.ButtonStyle.secondary, custom_id="g3n:admin:liquidation_history", row=2)
+    @discord.ui.button(label="Historial Liq.", emoji="\U0001F9FE", style=discord.ButtonStyle.secondary, custom_id="g3n:admin:liquidation_history", row=2)
     async def liquidation_history(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
         if await self.require_admin(interaction):
             await dm_or_private(
@@ -2898,12 +2898,12 @@ class AdminPanelView(discord.ui.View):
             return
         await bank_cog.show_admin_tickets_menu(interaction)
 
-    @discord.ui.button(label="Edo.Cta.Gremio", emoji="ðŸ“œ", style=discord.ButtonStyle.secondary, custom_id="g3n:admin:history", row=2)
+    @discord.ui.button(label="Edo.Cta.Gremio", emoji="\U0001F4DC", style=discord.ButtonStyle.secondary, custom_id="g3n:admin:history", row=2)
     async def history(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
         if await self.require_admin(interaction):
             await dm_or_private(self.cog, interaction, self.cog.history_text(interaction.guild.id), "historial_panel")
 
-    @discord.ui.button(label="Callers", emoji="ðŸ“£", style=discord.ButtonStyle.primary, custom_id="g3n:admin:callers", row=3)
+    @discord.ui.button(label="Callers", emoji="\U0001F4E3", style=discord.ButtonStyle.primary, custom_id="g3n:admin:callers", row=3)
     async def callers(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
         if await self.require_admin(interaction):
             embed = discord.Embed(
@@ -2920,7 +2920,7 @@ class AdminPanelView(discord.ui.View):
             )
             await private_response(interaction, "Menu de callers:", embed=embed, view=CallersAdminView(self.cog))
 
-    @discord.ui.button(label="Reclutadores", emoji="ðŸ›¡ï¸", style=discord.ButtonStyle.primary, custom_id="g3n:admin:recruiters", row=3)
+    @discord.ui.button(label="Reclutadores", emoji="\U0001F6E1\uFE0F", style=discord.ButtonStyle.primary, custom_id="g3n:admin:recruiters", row=3)
     async def recruiters(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
         if await self.require_admin(interaction):
             embed = discord.Embed(
@@ -2939,7 +2939,7 @@ class AdminPanelView(discord.ui.View):
                 view=RecruitersAdminView(self.cog),
             )
 
-    @discord.ui.button(label="Admins", emoji="ðŸ”", style=discord.ButtonStyle.primary, custom_id="g3n:admin:admins", row=3)
+    @discord.ui.button(label="Admins", emoji="\U0001F510", style=discord.ButtonStyle.primary, custom_id="g3n:admin:admins", row=3)
     async def admins(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
         if await self.require_admin(interaction):
             await private_response(
@@ -2948,7 +2948,7 @@ class AdminPanelView(discord.ui.View):
                 view=AdminsAdminView(self.cog),
             )
 
-    @discord.ui.button(label="Reportes", emoji="ðŸ“Š", style=discord.ButtonStyle.secondary, custom_id="g3n:admin:reports", row=4)
+    @discord.ui.button(label="Reportes", emoji="\U0001F4CA", style=discord.ButtonStyle.secondary, custom_id="g3n:admin:reports", row=4)
     async def reports(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
         if await self.require_admin(interaction):
             await interaction.response.defer(ephemeral=True)
@@ -2959,12 +2959,12 @@ class AdminPanelView(discord.ui.View):
                 ephemeral=True,
             )
 
-    @discord.ui.button(label="Auditoria", emoji="ðŸ”", style=discord.ButtonStyle.secondary, custom_id="g3n:admin:audit", row=4)
+    @discord.ui.button(label="Auditoria", emoji="\U0001F50D", style=discord.ButtonStyle.secondary, custom_id="g3n:admin:audit", row=4)
     async def audit(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
         if await self.require_admin(interaction):
             await dm_or_private(self.cog, interaction, self.cog.audit_text(interaction.guild.id), "auditoria_panel")
 
-    @discord.ui.button(label="Multas", emoji="ðŸš¨", style=discord.ButtonStyle.danger, custom_id="g3n:admin:fines", row=3)
+    @discord.ui.button(label="Multas", emoji="\U0001F6A8", style=discord.ButtonStyle.danger, custom_id="g3n:admin:fines", row=3)
     async def fines(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
         if await self.require_admin(interaction):
             await private_response(
@@ -2973,7 +2973,7 @@ class AdminPanelView(discord.ui.View):
                 view=FineAdminView(self.cog),
             )
 
-    @discord.ui.button(label="MÃ¡s", emoji="ðŸ§­", style=discord.ButtonStyle.secondary, custom_id="g3n:admin:more", row=4)
+    @discord.ui.button(label="MÃ¡s", emoji="\U0001F9ED", style=discord.ButtonStyle.secondary, custom_id="g3n:admin:more", row=4)
     async def more(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
         if await self.require_admin(interaction):
             await private_response(
@@ -2982,7 +2982,7 @@ class AdminPanelView(discord.ui.View):
                 view=ExtraAdminOptionsView(self.cog),
             )
 
-    @discord.ui.button(label="Config.", emoji="âš™ï¸", style=discord.ButtonStyle.secondary, custom_id="g3n:admin:config", row=4)
+    @discord.ui.button(label="Config.", emoji="\u2699\uFE0F", style=discord.ButtonStyle.secondary, custom_id="g3n:admin:config", row=4)
     async def config(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
         if await self.require_admin(interaction):
             await private_response(
