@@ -2048,7 +2048,23 @@ class CallerAssignmentView(discord.ui.View):
         self.activity_id = activity_id
         self.author_id = author_id
         self.notify_previous = notify_previous
+        self.selected_caller_id = None
+        for option in options:
+            if option.default:
+                try:
+                    self.selected_caller_id = int(option.value)
+                except ValueError:
+                    self.selected_caller_id = None
+                break
         self.add_item(CallerAssignmentSelect(self, options))
+        continue_button = discord.ui.Button(
+            label="Continuar",
+            style=discord.ButtonStyle.success,
+            row=1,
+            disabled=self.selected_caller_id is None,
+        )
+        continue_button.callback = self.continue_with_selected
+        self.add_item(continue_button)
 
     async def require_admin_draft(self, interaction: discord.Interaction):
         activity, error = self.cog.draft_activity_for_user(
@@ -2064,6 +2080,12 @@ class CallerAssignmentView(discord.ui.View):
             return None
         return activity
 
+    async def continue_with_selected(self, interaction: discord.Interaction) -> None:
+        if self.selected_caller_id is None:
+            await private_response(interaction, "Selecciona un caller valido antes de continuar.")
+            return
+        await self.assign_caller(interaction, self.selected_caller_id)
+
     async def assign_caller(self, interaction: discord.Interaction, caller_id: int) -> None:
         activity = await self.require_admin_draft(interaction)
         if activity is None or interaction.guild is None:
@@ -2073,6 +2095,7 @@ class CallerAssignmentView(discord.ui.View):
             await private_response(interaction, error or "No encontre ese caller.")
             return
         previous_caller_id = int(activity["caller_id"])
+        self.selected_caller_id = caller_id
         if self.notify_previous and previous_caller_id == caller_id:
             await private_response(interaction, "Ese usuario ya es el caller asignado de esta actividad.")
             return
@@ -2192,6 +2215,57 @@ class PingPreviewView(discord.ui.View):
 
         return callback
 
+
+class EditActivityScheduleModal(discord.ui.Modal, title="Editar horario"):
+    def __init__(self, cog: "Activities", activity_id: int, current: str):
+        super().__init__(timeout=180)
+        self.cog = cog
+        self.activity_id = activity_id
+        self.schedule = discord.ui.TextInput(
+            label="Nuevo horario",
+            placeholder="Usa el mismo formato actual del ping",
+            default=current[:40],
+            max_length=40,
+        )
+        self.add_item(self.schedule)
+
+    async def on_submit(self, interaction: discord.Interaction) -> None:
+        await self.cog.edit_activity_schedule_from_modal(
+            interaction,
+            self.activity_id,
+            str(self.schedule.value),
+        )
+
+
+class EditActivityVoiceChannelSelect(discord.ui.ChannelSelect):
+    def __init__(self, parent_view: "EditActivityVoiceChannelView"):
+        super().__init__(
+            placeholder="Selecciona el nuevo canal de voz",
+            channel_types=[discord.ChannelType.voice, discord.ChannelType.stage_voice],
+            min_values=1,
+            max_values=1,
+        )
+        self.parent_view = parent_view
+
+    async def callback(self, interaction: discord.Interaction) -> None:
+        channel = resolve_selected_voice_channel(interaction.guild, self.values[0]) if interaction.guild else None
+        if channel is None:
+            await private_response(interaction, "Selecciona un canal de voz valido.")
+            return
+        await self.parent_view.cog.edit_activity_voice_channel(
+            interaction,
+            self.parent_view.activity_id,
+            channel,
+        )
+
+
+class EditActivityVoiceChannelView(discord.ui.View):
+    def __init__(self, cog: "Activities", activity_id: int):
+        super().__init__(timeout=180)
+        self.cog = cog
+        self.activity_id = activity_id
+        self.add_item(EditActivityVoiceChannelSelect(self))
+
 class ActivityEditMenuView(discord.ui.View):
     def __init__(self, cog: "Activities", activity_id: int):
         super().__init__(timeout=180)
@@ -2244,6 +2318,46 @@ class ActivityEditMenuView(discord.ui.View):
         if not await self.cog.require_activity_notes_editor(interaction, activity):
             return
         await self.cog.prompt_edit_notes_modal(interaction, activity)
+
+    @discord.ui.button(
+        label="Editar horario",
+        emoji="\U0001F552",
+        style=discord.ButtonStyle.secondary,
+    )
+    async def edit_schedule(
+        self,
+        interaction: discord.Interaction,
+        _: discord.ui.Button,
+    ) -> None:
+        activity = await self.get_activity(interaction)
+        if activity is None:
+            return
+        if not await self.cog.require_activity_manager(interaction, activity, "editar horario"):
+            return
+        await interaction.response.send_modal(
+            EditActivityScheduleModal(self.cog, int(activity["id"]), str(activity["horario"] or ""))
+        )
+
+    @discord.ui.button(
+        label="Editar canal",
+        emoji="\U0001F399",
+        style=discord.ButtonStyle.secondary,
+    )
+    async def edit_voice_channel(
+        self,
+        interaction: discord.Interaction,
+        _: discord.ui.Button,
+    ) -> None:
+        activity = await self.get_activity(interaction)
+        if activity is None:
+            return
+        if not await self.cog.require_activity_manager(interaction, activity, "editar canal"):
+            return
+        await private_response(
+            interaction,
+            f"Canal actual: <#{activity['voice_channel_id']}>. Selecciona el nuevo canal de voz:",
+            view=EditActivityVoiceChannelView(self.cog, int(activity["id"])),
+        )
 
     @discord.ui.button(
         label="Editar caller",
@@ -2332,20 +2446,88 @@ class PayoutPercentModal(discord.ui.Modal, title="Editar participacion"):
         )
 
 
-class PayoutUserSelect(discord.ui.Select):
+class PayoutManualUserIdModal(discord.ui.Modal, title="Agregar participante por ID"):
     def __init__(
         self,
         cog: "Activities",
         *,
         guild_id: int,
         payout_code: str,
-        action: str,
+        source_message=None,
+    ):
+        super().__init__(timeout=180)
+        self.cog = cog
+        self.guild_id = guild_id
+        self.payout_code = payout_code
+        self.source_message = source_message
+        self.user_id_input = discord.ui.TextInput(
+            label="ID de Discord",
+            placeholder="123456789012345678",
+            min_length=15,
+            max_length=25,
+        )
+        self.add_item(self.user_id_input)
+
+    async def on_submit(self, interaction: discord.Interaction) -> None:
+        raw = str(self.user_id_input.value).strip()
+        if not raw.isdigit():
+            await private_response(interaction, "El ID de Discord debe contener solamente numeros.")
+            return
+        await self.cog.add_payout_member_interaction(
+            interaction,
+            self.guild_id,
+            self.payout_code,
+            int(raw),
+            percent=100,
+            source_message=self.source_message,
+            addition_method="ID",
+        )
+
+
+class PayoutAddUserSelect(discord.ui.UserSelect):
+    def __init__(
+        self,
+        cog: "Activities",
+        *,
+        guild_id: int,
+        payout_code: str,
+        source_message=None,
+    ):
+        super().__init__(
+            placeholder="Busca o selecciona un miembro del servidor",
+            min_values=1,
+            max_values=1,
+            row=0,
+        )
+        self.cog = cog
+        self.guild_id = guild_id
+        self.payout_code = payout_code
+        self.source_message = source_message
+
+    async def callback(self, interaction: discord.Interaction) -> None:
+        await self.cog.add_payout_member_interaction(
+            interaction,
+            self.guild_id,
+            self.payout_code,
+            int(self.values[0].id),
+            percent=100,
+            source_message=self.source_message,
+            addition_method="selector",
+        )
+
+
+class PayoutRemoveUserSelect(discord.ui.Select):
+    def __init__(
+        self,
+        cog: "Activities",
+        *,
+        guild_id: int,
+        payout_code: str,
         options: list[discord.SelectOption],
         source_message=None,
     ):
-        placeholder = "Selecciona un usuario para añadir" if action == "add" else "Selecciona un usuario para eliminar"
         super().__init__(
-            placeholder=placeholder,
+            placeholder="Selecciona un usuario para eliminar",
             min_values=1,
             max_values=1,
             options=options,
@@ -2354,26 +2536,14 @@ class PayoutUserSelect(discord.ui.Select):
         self.cog = cog
         self.guild_id = guild_id
         self.payout_code = payout_code
-        self.action = action
         self.source_message = source_message
 
     async def callback(self, interaction: discord.Interaction) -> None:
-        user_id = int(self.values[0])
-        if self.action == "add":
-            await self.cog.add_payout_member_interaction(
-                interaction,
-                self.guild_id,
-                self.payout_code,
-                user_id,
-                percent=100,
-                source_message=self.source_message,
-            )
-            return
         await self.cog.remove_payout_user_interaction(
             interaction,
             self.guild_id,
             self.payout_code,
-            user_id,
+            int(self.values[0]),
             source_message=self.source_message,
         )
 
@@ -2386,18 +2556,49 @@ class PayoutUserSelectView(discord.ui.View):
         guild_id: int,
         payout_code: str,
         action: str,
-        options: list[discord.SelectOption],
+        options: list[discord.SelectOption] | None = None,
         source_message=None,
     ):
         super().__init__(timeout=180)
-        self.add_item(
-            PayoutUserSelect(
-                cog,
-                guild_id=guild_id,
-                payout_code=payout_code,
-                action=action,
-                options=options,
-                source_message=source_message,
+        self.cog = cog
+        self.guild_id = guild_id
+        self.payout_code = payout_code
+        self.source_message = source_message
+        if action == "add":
+            self.add_item(
+                PayoutAddUserSelect(
+                    cog,
+                    guild_id=guild_id,
+                    payout_code=payout_code,
+                    source_message=source_message,
+                )
+            )
+            manual_button = discord.ui.Button(
+                label="Ingresar ID",
+                emoji="\U00002328",
+                style=discord.ButtonStyle.secondary,
+                row=1,
+            )
+            manual_button.callback = self.manual_id
+            self.add_item(manual_button)
+        else:
+            self.add_item(
+                PayoutRemoveUserSelect(
+                    cog,
+                    guild_id=guild_id,
+                    payout_code=payout_code,
+                    options=options or [],
+                    source_message=source_message,
+                )
+            )
+
+    async def manual_id(self, interaction: discord.Interaction) -> None:
+        await interaction.response.send_modal(
+            PayoutManualUserIdModal(
+                self.cog,
+                guild_id=self.guild_id,
+                payout_code=self.payout_code,
+                source_message=self.source_message,
             )
         )
 
@@ -3430,8 +3631,17 @@ class Activities(commands.Cog):
             ctx.guild.id,
             int(payout["id"]),
             actor_id=ctx.author.id,
-            action="Porcentaje actualizado",
-            details=f"Usuario {member.id}: {percent}%",
+            action="Usuario a?adido manualmente",
+            details=f"Usuario {member.id}: {percent}% | metodo=comando | agregado_por={ctx.author.id}",
+        )
+        log_action(
+            self.db,
+            ctx.guild.id,
+            admin_id=ctx.author.id,
+            action="Participante agregado manualmente a Split",
+            system="Splits",
+            affected_user_id=member.id,
+            observation=f"Split {code}; metodo=comando; porcentaje={percent}%",
         )
         await ctx.reply(f"Participacion de {member.mention} actualizada a {percent}%.", mention_author=False)
 
@@ -4793,6 +5003,81 @@ class Activities(commands.Cog):
                 int(activity["id"]),
                 str(activity["notes"] or ""),
             ),
+        )
+
+    async def edit_activity_schedule_from_modal(
+        self,
+        interaction: discord.Interaction,
+        activity_id: int,
+        raw_schedule: str,
+    ) -> None:
+        activity = self.get_activity(activity_id)
+        if activity is None or interaction.guild is None or int(activity["guild_id"]) != interaction.guild.id:
+            await private_response(interaction, "No encontre esta actividad en este servidor.")
+            return
+        if not await self.require_activity_manager(interaction, activity, "editar horario"):
+            return
+        if activity["status"] in {ACTIVITY_IN_PROGRESS, ACTIVITY_FINISHED, ACTIVITY_CANCELLED, ACTIVITY_DELETED, ACTIVITY_PAYOUT_CREATED}:
+            await private_response(interaction, "No se puede cambiar el horario en el estado actual del ping.")
+            return
+        new_schedule = resolve_template_text(raw_schedule, interaction.guild)[:40]
+        if not new_schedule.strip():
+            await private_response(interaction, "El horario no puede quedar vacio.")
+            return
+        old_schedule = str(activity["horario"] or "")
+        self.db.execute(
+            "UPDATE activities SET horario = ? WHERE guild_id = ? AND id = ?",
+            (new_schedule, interaction.guild.id, activity_id),
+        )
+        await self.update_activity_message(activity_id)
+        log_action(
+            self.db,
+            interaction.guild.id,
+            admin_id=interaction.user.id,
+            action="Editar horario de ping",
+            system="Pings",
+            observation=f"{activity['code']}: {old_schedule} -> {new_schedule}",
+        )
+        await private_response(
+            interaction,
+            f"Horario actualizado por <@{interaction.user.id}>.\nAnterior: `{old_schedule}`\nNuevo: `{new_schedule}`",
+        )
+
+    async def edit_activity_voice_channel(
+        self,
+        interaction: discord.Interaction,
+        activity_id: int,
+        channel,
+    ) -> None:
+        activity = self.get_activity(activity_id)
+        if activity is None or interaction.guild is None or int(activity["guild_id"]) != interaction.guild.id:
+            await private_response(interaction, "No encontre esta actividad en este servidor.")
+            return
+        if not await self.require_activity_manager(interaction, activity, "editar canal"):
+            return
+        if activity["status"] in {ACTIVITY_FINISHED, ACTIVITY_CANCELLED, ACTIVITY_DELETED, ACTIVITY_PAYOUT_CREATED}:
+            await private_response(interaction, "No se puede cambiar el canal en el estado actual del ping.")
+            return
+        if not isinstance(channel, (discord.VoiceChannel, discord.StageChannel)):
+            await private_response(interaction, "Selecciona un canal de voz valido.")
+            return
+        old_channel_id = int(activity["voice_channel_id"] or 0)
+        self.db.execute(
+            "UPDATE activities SET voice_channel_id = ? WHERE guild_id = ? AND id = ?",
+            (channel.id, interaction.guild.id, activity_id),
+        )
+        await self.update_activity_message(activity_id)
+        log_action(
+            self.db,
+            interaction.guild.id,
+            admin_id=interaction.user.id,
+            action="Editar canal de ping",
+            system="Pings",
+            observation=f"{activity['code']}: {old_channel_id} -> {channel.id}",
+        )
+        await private_response(
+            interaction,
+            f"Canal actualizado por <@{interaction.user.id}>.\nAnterior: <#{old_channel_id}>\nNuevo: {channel.mention}",
         )
 
     async def edit_activity_notes_from_modal(
@@ -7106,23 +7391,17 @@ class Activities(commands.Cog):
         if not self.can_manage_payout_interaction(interaction, payout):
             await private_response(interaction, "Solo el caller del Split o un admin puede modificarlo.")
             return
-        guild = self.bot.get_guild(guild_id)
-        if guild is None:
-            await private_response(interaction, "No pude encontrar el servidor para listar usuarios.")
-            return
-        options = await self.eligible_payout_add_options(guild, int(payout["id"]))
-        if not options:
-            await private_response(interaction, "No hay usuarios disponibles para añadir.")
+        if self.bot.get_guild(guild_id) is None:
+            await private_response(interaction, "No pude encontrar el servidor para resolver usuarios.")
             return
         await private_response(
             interaction,
-            "Selecciona el usuario que deseas añadir al Split:",
+            "Busca un miembro del servidor o ingresa su ID de Discord para agregarlo al Split:",
             view=PayoutUserSelectView(
                 self,
                 guild_id=guild_id,
                 payout_code=code,
                 action="add",
-                options=options,
                 source_message=source_message,
             ),
         )
@@ -7136,6 +7415,7 @@ class Activities(commands.Cog):
         *,
         percent: float = 100,
         source_message=None,
+        addition_method: str = "selector",
     ) -> None:
         payout = self.get_payout_by_code(guild_id, code)
         if payout is None:
@@ -7149,8 +7429,13 @@ class Activities(commands.Cog):
             return
         guild = self.bot.get_guild(guild_id)
         member = guild.get_member(user_id) if guild else None
+        if member is None and guild is not None:
+            try:
+                member = await guild.fetch_member(user_id)
+            except (discord.NotFound, discord.Forbidden, discord.HTTPException):
+                member = None
         if member is None:
-            await private_response(interaction, "No pude encontrar ese usuario en el servidor.")
+            await private_response(interaction, "No pude encontrar ese usuario dentro del servidor.")
             return
         if member.bot:
             await private_response(interaction, "No se pueden añadir bots al Split.")
@@ -7183,8 +7468,17 @@ class Activities(commands.Cog):
             guild_id,
             int(payout["id"]),
             actor_id=interaction.user.id,
-            action="Usuario añadido",
-            details=f"Usuario {user_id}: {percent}%",
+            action="Usuario a?adido manualmente",
+            details=f"Usuario {user_id}: {percent}% | metodo={addition_method} | agregado_por={interaction.user.id}",
+        )
+        log_action(
+            self.db,
+            guild_id,
+            admin_id=interaction.user.id,
+            action="Participante agregado manualmente a Split",
+            system="Splits",
+            affected_user_id=user_id,
+            observation=f"Split {code}; metodo={addition_method}; porcentaje={percent}%",
         )
         await self.refresh_payout_source_message(source_message, guild_id, code)
         await private_response(
@@ -7310,6 +7604,7 @@ class Activities(commands.Cog):
             code,
             user_id,
             percent=percent,
+            addition_method="ID",
         )
 
     async def send_payout_to_review_interaction(

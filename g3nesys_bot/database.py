@@ -175,6 +175,21 @@ class Database:
             self._conn.execute(
                 "ALTER TABLE withdrawals ADD COLUMN liquidation_admin_message TEXT"
             )
+        extra_withdrawal_columns = {
+            "assigned_officer_id": "INTEGER",
+            "delegated_by": "INTEGER",
+            "payment_place": "TEXT",
+            "payment_schedule": "TEXT",
+            "delegated_at": "TEXT",
+            "returned_at": "TEXT",
+            "return_reason": "TEXT",
+            "closed_at": "TEXT",
+            "updated_at": "TEXT",
+        }
+        for column, column_type in extra_withdrawal_columns.items():
+            if column not in withdrawal_columns:
+                self._conn.execute(f"ALTER TABLE withdrawals ADD COLUMN {column} {column_type}")
+
 
         regear_columns = {
             row["name"]
@@ -326,13 +341,24 @@ class Database:
                     rejection_reason TEXT,
                     approval_admin_message TEXT,
                     liquidation_admin_message TEXT,
+                    assigned_officer_id INTEGER,
+                    delegated_by INTEGER,
+                    payment_place TEXT,
+                    payment_schedule TEXT,
+                    delegated_at TEXT,
+                    returned_at TEXT,
+                    return_reason TEXT,
+                    closed_at TEXT,
+                    updated_at TEXT,
                     UNIQUE(guild_id, code)
                 )
                 """,
                 "id, code, guild_id, user_id, amount_requested, amount_liquidated, "
                 "status, reason, created_at, approved_by, approved_at, "
                 "liquidated_by, liquidated_at, rejected_by, rejected_at, rejection_reason, "
-                "approval_admin_message, liquidation_admin_message",
+                "approval_admin_message, liquidation_admin_message, assigned_officer_id, "
+                "delegated_by, payment_place, payment_schedule, delegated_at, returned_at, "
+                "return_reason, closed_at, updated_at",
             ),
             "payouts": (
                 """
@@ -442,6 +468,10 @@ class Database:
             "ON withdrawals(guild_id, status)"
         )
         self._conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_withdrawal_logs_withdrawal "
+            "ON withdrawal_action_logs(withdrawal_id, created_at)"
+        )
+        self._conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_penalties_guild_user_active "
             "ON penalizacion_actividades(guild_id, usuario_id, activo)"
         )
@@ -468,6 +498,22 @@ class Database:
         self._conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_regear_requests_message "
             "ON regear_requests(guild_id, message_id)"
+        )
+        self._conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_tickets_guild_status "
+            "ON tickets(guild_id, status, created_at)"
+        )
+        self._conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_tickets_guild_user "
+            "ON tickets(guild_id, user_id, created_at)"
+        )
+        self._conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_ticket_messages_ticket "
+            "ON ticket_messages(ticket_id, created_at)"
+        )
+        self._conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_ticket_attachments_ticket "
+            "ON ticket_attachments(ticket_id, created_at)"
         )
 
     def _has_unique_index(self, table: str, columns: tuple[str, ...]) -> bool:
@@ -800,6 +846,15 @@ CREATE TABLE IF NOT EXISTS withdrawals (
     rejection_reason TEXT,
     approval_admin_message TEXT,
     liquidation_admin_message TEXT,
+    assigned_officer_id INTEGER,
+    delegated_by INTEGER,
+    payment_place TEXT,
+    payment_schedule TEXT,
+    delegated_at TEXT,
+    returned_at TEXT,
+    return_reason TEXT,
+    closed_at TEXT,
+    updated_at TEXT,
     UNIQUE(guild_id, code)
 );
 
@@ -899,6 +954,18 @@ CREATE TABLE IF NOT EXISTS regear_requests (
     UNIQUE(guild_id, message_id)
 );
 
+CREATE TABLE IF NOT EXISTS withdrawal_action_logs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    withdrawal_id INTEGER NOT NULL REFERENCES withdrawals(id) ON DELETE CASCADE,
+    action_type TEXT NOT NULL,
+    author_id INTEGER NOT NULL,
+    amount INTEGER,
+    old_status TEXT,
+    new_status TEXT,
+    note TEXT,
+    created_at TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS movements (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     code TEXT NOT NULL,
@@ -940,6 +1007,48 @@ CREATE TABLE IF NOT EXISTS dm_logs (
     created_at TEXT NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS tickets (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    code TEXT NOT NULL,
+    guild_id INTEGER NOT NULL,
+    user_id INTEGER NOT NULL,
+    subject TEXT NOT NULL,
+    description TEXT NOT NULL,
+    status TEXT NOT NULL,
+    assigned_admin_id INTEGER,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    closed_at TEXT,
+    thread_id INTEGER,
+    notification_message_id INTEGER,
+    UNIQUE(guild_id, code)
+);
+
+CREATE TABLE IF NOT EXISTS ticket_messages (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    ticket_id INTEGER NOT NULL REFERENCES tickets(id) ON DELETE CASCADE,
+    author_id INTEGER NOT NULL,
+    message_type TEXT NOT NULL,
+    content TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    dm_sent INTEGER,
+    dm_error TEXT,
+    old_status TEXT,
+    new_status TEXT
+);
+
+CREATE TABLE IF NOT EXISTS ticket_attachments (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    ticket_id INTEGER NOT NULL REFERENCES tickets(id) ON DELETE CASCADE,
+    author_id INTEGER NOT NULL,
+    url TEXT NOT NULL,
+    filename TEXT NOT NULL,
+    content_type TEXT,
+    message_id INTEGER NOT NULL,
+    channel_id INTEGER NOT NULL,
+    created_at TEXT NOT NULL
+);
+
 CREATE INDEX IF NOT EXISTS idx_fines_user_status
 ON fines(guild_id, user_id, status);
 
@@ -972,5 +1081,17 @@ ON regear_requests(guild_id, status);
 
 CREATE INDEX IF NOT EXISTS idx_regear_requests_message
 ON regear_requests(guild_id, message_id);
+
+CREATE INDEX IF NOT EXISTS idx_tickets_guild_status
+ON tickets(guild_id, status, created_at);
+
+CREATE INDEX IF NOT EXISTS idx_tickets_guild_user
+ON tickets(guild_id, user_id, created_at);
+
+CREATE INDEX IF NOT EXISTS idx_ticket_messages_ticket
+ON ticket_messages(ticket_id, created_at);
+
+CREATE INDEX IF NOT EXISTS idx_ticket_attachments_ticket
+ON ticket_attachments(ticket_id, created_at);
 
 """

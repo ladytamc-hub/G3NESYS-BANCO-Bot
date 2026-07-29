@@ -3,8 +3,20 @@ from __future__ import annotations
 import discord
 from discord.ext import commands
 
-from ..constants import BANK_PANEL_IMAGE, WITHDRAWAL_APPROVED, WITHDRAWAL_PENDING
+from ..constants import (
+    BANK_PANEL_IMAGE,
+    WITHDRAWAL_APPROVED,
+    WITHDRAWAL_CANCELLED,
+    WITHDRAWAL_DELEGATED,
+    WITHDRAWAL_PAID,
+    WITHDRAWAL_PARTIAL,
+    WITHDRAWAL_PENDING,
+    WITHDRAWAL_REASSIGNMENT,
+    WITHDRAWAL_REJECTED,
+    WITHDRAWAL_UNPAID,
+)
 from ..permissions import has_bank_access, is_admin_subject, is_full_member, require_admin_context
+from ..services.audit import log_action
 from ..services.economy import (
     create_withdrawal_request,
     format_percent,
@@ -14,6 +26,31 @@ from ..services.economy import (
     transfer_between_members,
 )
 from ..services.notifications import send_admin_notification, send_dm_safe
+from ..services.tickets import (
+    OPEN_TICKET_STATUSES,
+    TICKET_ADMIN_REPLY,
+    TICKET_CLOSED,
+    TICKET_IN_PROGRESS,
+    TICKET_INTERNAL_NOTE,
+    TICKET_PENDING,
+    TICKET_RESOLVED,
+    TICKET_STATUSES,
+    TICKET_WAITING_USER,
+    add_attachment,
+    add_ticket_message,
+    assign_ticket,
+    change_ticket_status,
+    create_ticket,
+    find_ticket_for_attachment,
+    get_ticket,
+    list_tickets,
+    search_tickets_by_user,
+    set_ticket_notification,
+    set_ticket_thread,
+    ticket_attachments,
+    ticket_messages,
+    validate_ticket_status,
+)
 from ..utils import format_amount, parse_channel_id, parse_int_amount, utc_now_iso
 
 
@@ -258,20 +295,26 @@ class LiquidateWithdrawalReviewModal(discord.ui.Modal, title="Liquidar cobro"):
         self.code = code
 
     async def on_submit(self, interaction: discord.Interaction) -> None:
-        if interaction.guild is None or interaction.guild.id != self.guild_id:
+        guild = interaction.guild or self.cog.bot.get_guild(self.guild_id)
+        if guild is None or guild.id != self.guild_id:
             await private_response(interaction, "Este cobro pertenece a otro servidor.")
-            return
-        if not is_admin_subject(self.cog.db, interaction):
-            await private_response(interaction, "Solo admins autorizados pueden liquidar cobros.")
             return
         admin_cog = self.cog.bot.get_cog("Admin")
         if admin_cog is None:
             await private_response(interaction, "El panel administrativo no esta disponible.")
             return
+        if interaction.guild is not None and not is_admin_subject(self.cog.db, interaction):
+            withdrawal = self.cog.db.fetch_one(
+                "SELECT assigned_officer_id FROM withdrawals WHERE guild_id = ? AND code = ?",
+                (self.guild_id, self.code),
+            )
+            if withdrawal is None or int(withdrawal["assigned_officer_id"] or 0) != interaction.user.id:
+                await private_response(interaction, "Solo admins u oficiales asignados pueden registrar pagos.")
+                return
         try:
             amount = parse_int_amount(str(self.amount.value))
             result = await admin_cog.liquidate_withdrawal(
-                interaction.guild,
+                guild,
                 self.code,
                 amount,
                 interaction.user.id,
@@ -283,50 +326,451 @@ class LiquidateWithdrawalReviewModal(discord.ui.Modal, title="Liquidar cobro"):
         await private_response(interaction, result)
 
 
+class WithdrawalNoPaidModal(discord.ui.Modal, title="No pagado"):
+    def __init__(self, cog: "Bank", guild_id: int, code: str):
+        super().__init__(timeout=180)
+        self.cog = cog
+        self.guild_id = guild_id
+        self.code = code
+        self.note = discord.ui.TextInput(label="Nota opcional", required=False, style=discord.TextStyle.paragraph, max_length=600)
+        self.add_item(self.note)
+
+    async def on_submit(self, interaction: discord.Interaction) -> None:
+        admin_cog = self.cog.bot.get_cog("Admin")
+        if admin_cog is None:
+            await private_response(interaction, "El panel administrativo no esta disponible.")
+            return
+        try:
+            result = await admin_cog.mark_withdrawal_unpaid(interaction.guild, self.code, interaction.user.id, str(self.note.value).strip())
+        except ValueError as exc:
+            await private_response(interaction, str(exc))
+            return
+        await private_response(interaction, result)
+
+
+class WithdrawalDelegateDetailsModal(discord.ui.Modal, title="Delegar pago"):
+    def __init__(self, cog: "Bank", guild_id: int, code: str, officer_id: int):
+        super().__init__(timeout=180)
+        self.cog = cog
+        self.guild_id = guild_id
+        self.code = code
+        self.officer_id = officer_id
+        self.place = discord.ui.TextInput(label="Lugar de pago", placeholder="Banco de Bridgewatch", max_length=200)
+        self.schedule = discord.ui.TextInput(label="Dia y horario", placeholder="30 de julio, 00:00 UTC", max_length=80)
+        self.note = discord.ui.TextInput(label="Nota opcional", required=False, style=discord.TextStyle.paragraph, max_length=500)
+        self.add_item(self.place)
+        self.add_item(self.schedule)
+        self.add_item(self.note)
+
+    async def on_submit(self, interaction: discord.Interaction) -> None:
+        admin_cog = self.cog.bot.get_cog("Admin")
+        if admin_cog is None:
+            await private_response(interaction, "El panel administrativo no esta disponible.")
+            return
+        try:
+            result = await admin_cog.delegate_withdrawal(
+                interaction.guild,
+                self.code,
+                interaction.user.id,
+                self.officer_id,
+                str(self.place.value).strip(),
+                str(self.schedule.value).strip(),
+                str(self.note.value).strip(),
+            )
+        except ValueError as exc:
+            await private_response(interaction, str(exc))
+            return
+        await private_response(interaction, result)
+
+
+class WithdrawalOfficerSelect(discord.ui.UserSelect):
+    def __init__(self, cog: "Bank", guild_id: int, code: str):
+        super().__init__(placeholder="Busca al oficial autorizado", min_values=1, max_values=1)
+        self.cog = cog
+        self.guild_id = guild_id
+        self.code = code
+
+    async def callback(self, interaction: discord.Interaction) -> None:
+        if interaction.guild is None or interaction.guild.id != self.guild_id:
+            await private_response(interaction, "Este cobro pertenece a otro servidor.")
+            return
+        if not is_admin_subject(self.cog.db, interaction):
+            await private_response(interaction, "Solo admins autorizados pueden delegar cobros.")
+            return
+        officer = self.values[0]
+        member = interaction.guild.get_member(officer.id)
+        admin_cog = self.cog.bot.get_cog("Admin")
+        if member is None or member.bot or admin_cog is None or not admin_cog.member_has_admin_access(interaction.guild, member):
+            await private_response(interaction, "Selecciona un oficial valido con permisos.")
+            return
+        await interaction.response.send_modal(WithdrawalDelegateDetailsModal(self.cog, self.guild_id, self.code, officer.id))
+
+
+class WithdrawalDelegateView(discord.ui.View):
+    def __init__(self, cog: "Bank", guild_id: int, code: str):
+        super().__init__(timeout=180)
+        self.add_item(WithdrawalOfficerSelect(cog, guild_id, code))
+
+
+class OfficerReturnWithdrawalModal(discord.ui.Modal, title="Retornar cobro"):
+    def __init__(self, cog: "Bank", guild_id: int, code: str):
+        super().__init__(timeout=180)
+        self.cog = cog
+        self.guild_id = guild_id
+        self.code = code
+        self.reason = discord.ui.TextInput(label="Motivo del retorno", style=discord.TextStyle.paragraph, max_length=600)
+        self.add_item(self.reason)
+
+    async def on_submit(self, interaction: discord.Interaction) -> None:
+        admin_cog = self.cog.bot.get_cog("Admin")
+        if admin_cog is None:
+            await private_response(interaction, "El panel administrativo no esta disponible.")
+            return
+        guild = self.cog.bot.get_guild(self.guild_id)
+        if guild is None:
+            await private_response(interaction, "No pude encontrar el servidor.")
+            return
+        try:
+            result = await admin_cog.return_delegated_withdrawal(guild, self.code, interaction.user.id, str(self.reason.value).strip())
+        except ValueError as exc:
+            await private_response(interaction, str(exc))
+            return
+        await private_response(interaction, result)
+
+
+class OfficerWithdrawalView(discord.ui.View):
+    def __init__(self, cog: "Bank", guild_id: int, code: str):
+        super().__init__(timeout=None)
+        self.cog = cog
+        self.guild_id = guild_id
+        self.code = code
+        self._add("Marcar como pagado", "paid", "\U00002705", discord.ButtonStyle.success)
+        self._add("Pago parcial", "partial", "\U0001F4B5", discord.ButtonStyle.primary)
+        self._add("Retornar cobro", "return", "\U000021A9", discord.ButtonStyle.danger)
+
+    def _add(self, label: str, action: str, emoji: str, style: discord.ButtonStyle) -> None:
+        button = discord.ui.Button(label=label, emoji=emoji, style=style, custom_id=f"g3n:withdrawal_officer:{action}:{self.guild_id}:{self.code}")
+        button.callback = self.handle
+        self.add_item(button)
+
+    async def handle(self, interaction: discord.Interaction) -> None:
+        action = str(interaction.data.get("custom_id", "")).split(":")[2]
+        admin_cog = self.cog.bot.get_cog("Admin")
+        guild = self.cog.bot.get_guild(self.guild_id)
+        if admin_cog is None or guild is None:
+            await private_response(interaction, "No pude resolver esta solicitud.")
+            return
+        if action == "paid":
+            try:
+                result = await admin_cog.pay_withdrawal_full(guild, self.code, interaction.user.id)
+            except ValueError as exc:
+                await private_response(interaction, str(exc))
+                return
+            await private_response(interaction, result)
+            return
+        if action == "partial":
+            await interaction.response.send_modal(LiquidateWithdrawalReviewModal(self.cog, self.guild_id, self.code))
+            return
+        await interaction.response.send_modal(OfficerReturnWithdrawalModal(self.cog, self.guild_id, self.code))
+
+
 class WithdrawalReviewView(discord.ui.View):
     def __init__(self, cog: "Bank", guild_id: int, code: str):
         super().__init__(timeout=None)
         self.cog = cog
         self.guild_id = guild_id
         self.code = code
-        approve = discord.ui.Button(
-            label="Aprobar cobro",
-            emoji="✅",
-            style=discord.ButtonStyle.success,
-            custom_id=f"g3n:withdrawal:approve:{guild_id}:{code}",
-        )
-        liquidate = discord.ui.Button(
-            label="Liquidar cobro",
-            emoji="💵",
-            style=discord.ButtonStyle.primary,
-            custom_id=f"g3n:withdrawal:liquidate:{guild_id}:{code}",
-        )
-        approve.callback = self.approve
-        liquidate.callback = self.liquidate
-        self.add_item(approve)
-        self.add_item(liquidate)
+        self._add_button("Aprobar cobro", "approve", "\U00002705", discord.ButtonStyle.success, row=0)
+        self._add_button("Pagado", "paid", "\U00002705", discord.ButtonStyle.success, row=0)
+        self._add_button("Pago parcial", "liquidate", "\U0001F4B5", discord.ButtonStyle.primary, row=0)
+        self._add_button("No pagado", "unpaid", "\U000021A9", discord.ButtonStyle.danger, row=1)
+        self._add_button("Delegar pago", "delegate", "\U0001F464", discord.ButtonStyle.secondary, row=1)
 
-    async def approve(self, interaction: discord.Interaction) -> None:
+    def _add_button(self, label: str, action: str, emoji: str, style: discord.ButtonStyle, *, row: int) -> None:
+        button = discord.ui.Button(
+            label=label,
+            emoji=emoji,
+            style=style,
+            custom_id=f"g3n:withdrawal:{action}:{self.guild_id}:{self.code}",
+            row=row,
+        )
+        button.callback = self.handle
+        self.add_item(button)
+
+    async def handle(self, interaction: discord.Interaction) -> None:
         if interaction.guild is None or interaction.guild.id != self.guild_id:
             await private_response(interaction, "Este cobro pertenece a otro servidor.")
             return
-        if not is_admin_subject(self.cog.db, interaction):
-            await private_response(interaction, "Solo admins autorizados pueden aprobar cobros.")
+        action = str(interaction.data.get("custom_id", "")).split(":")[2]
+        if action in {"approve", "delegate"} and not is_admin_subject(self.cog.db, interaction):
+            await private_response(interaction, "Solo admins autorizados pueden gestionar cobros.")
             return
-        await interaction.response.send_modal(
-            ApproveWithdrawalReviewModal(self.cog, self.guild_id, self.code)
+        admin_cog = self.cog.bot.get_cog("Admin")
+        if admin_cog is None:
+            await private_response(interaction, "El panel administrativo no esta disponible.")
+            return
+        if action == "approve":
+            await interaction.response.send_modal(ApproveWithdrawalReviewModal(self.cog, self.guild_id, self.code))
+            return
+        if action == "liquidate":
+            await interaction.response.send_modal(LiquidateWithdrawalReviewModal(self.cog, self.guild_id, self.code))
+            return
+        if action == "paid":
+            try:
+                result = await admin_cog.pay_withdrawal_full(interaction.guild, self.code, interaction.user.id)
+            except ValueError as exc:
+                await private_response(interaction, str(exc))
+                return
+            await private_response(interaction, result)
+            return
+        if action == "unpaid":
+            await interaction.response.send_modal(WithdrawalNoPaidModal(self.cog, self.guild_id, self.code))
+            return
+        if action == "delegate":
+            await private_response(interaction, "Selecciona el oficial que realizara el pago:", view=WithdrawalDelegateView(self.cog, self.guild_id, self.code))
+
+
+class TicketCreateModal(discord.ui.Modal, title="Crear ticket"):
+    def __init__(self, cog: "Bank"):
+        super().__init__(timeout=180)
+        self.cog = cog
+        self.subject = discord.ui.TextInput(
+            label="Asunto",
+            placeholder="Motivo principal del ticket",
+            max_length=100,
+        )
+        self.description = discord.ui.TextInput(
+            label="Descripcion",
+            placeholder="Explica el problema, solicitud o duda",
+            style=discord.TextStyle.paragraph,
+            max_length=1800,
+        )
+        self.add_item(self.subject)
+        self.add_item(self.description)
+
+    async def on_submit(self, interaction: discord.Interaction) -> None:
+        await self.cog.create_ticket_interaction(
+            interaction,
+            str(self.subject.value),
+            str(self.description.value),
         )
 
-    async def liquidate(self, interaction: discord.Interaction) -> None:
+
+class TicketAdminReplyModal(discord.ui.Modal, title="Responder ticket"):
+    def __init__(self, cog: "Bank", guild_id: int, code: str):
+        super().__init__(timeout=180)
+        self.cog = cog
+        self.guild_id = guild_id
+        self.code = code
+        self.response_text = discord.ui.TextInput(
+            label="Respuesta para el usuario",
+            style=discord.TextStyle.paragraph,
+            max_length=1800,
+        )
+        self.add_item(self.response_text)
+
+    async def on_submit(self, interaction: discord.Interaction) -> None:
+        await self.cog.reply_ticket_interaction(
+            interaction,
+            self.guild_id,
+            self.code,
+            str(self.response_text.value),
+        )
+
+
+class TicketFollowupModal(discord.ui.Modal, title="Dar seguimiento"):
+    def __init__(self, cog: "Bank", guild_id: int, code: str):
+        super().__init__(timeout=180)
+        self.cog = cog
+        self.guild_id = guild_id
+        self.code = code
+        self.visibility = discord.ui.TextInput(
+            label="Tipo: usuario o interna",
+            placeholder="usuario / interna",
+            default="interna",
+            max_length=20,
+        )
+        self.new_status = discord.ui.TextInput(
+            label="Estado nuevo opcional",
+            placeholder="Pendiente, En seguimiento, Esperando respuesta del usuario, Resuelto, Cerrado",
+            required=False,
+            max_length=40,
+        )
+        self.content = discord.ui.TextInput(
+            label="Contenido",
+            style=discord.TextStyle.paragraph,
+            max_length=1800,
+        )
+        self.add_item(self.visibility)
+        self.add_item(self.new_status)
+        self.add_item(self.content)
+
+    async def on_submit(self, interaction: discord.Interaction) -> None:
+        await self.cog.followup_ticket_interaction(
+            interaction,
+            self.guild_id,
+            self.code,
+            visibility=str(self.visibility.value),
+            content=str(self.content.value),
+            new_status=str(self.new_status.value).strip() or None,
+        )
+
+
+class TicketSearchByIdModal(discord.ui.Modal, title="Buscar ticket"):
+    def __init__(self, cog: "Bank"):
+        super().__init__(timeout=180)
+        self.cog = cog
+        self.code = discord.ui.TextInput(label="ID del ticket", placeholder="TKT-000001", max_length=20)
+        self.add_item(self.code)
+
+    async def on_submit(self, interaction: discord.Interaction) -> None:
+        await self.cog.show_ticket_detail_interaction(interaction, str(self.code.value).strip())
+
+
+class TicketSearchByUserModal(discord.ui.Modal, title="Buscar tickets por usuario"):
+    def __init__(self, cog: "Bank"):
+        super().__init__(timeout=180)
+        self.cog = cog
+        self.user_id = discord.ui.TextInput(label="ID o mencion del usuario", max_length=40)
+        self.add_item(self.user_id)
+
+    async def on_submit(self, interaction: discord.Interaction) -> None:
+        user_id = parse_channel_id(str(self.user_id.value))
+        if user_id is None:
+            await private_response(interaction, "No pude leer ese usuario.")
+            return
+        await self.cog.show_tickets_by_user(interaction, user_id)
+
+
+class TicketAdminActionView(discord.ui.View):
+    def __init__(self, cog: "Bank", guild_id: int, code: str):
+        super().__init__(timeout=None)
+        self.cog = cog
+        self.guild_id = guild_id
+        self.code = code
+        self.add_button("Responder", "respond", "\U0001F4AC", discord.ButtonStyle.primary, row=0)
+        self.add_button("Dar seguimiento", "follow", "\U0001F4DD", discord.ButtonStyle.secondary, row=0)
+        self.add_button("Resolver", "resolve", "\U00002705", discord.ButtonStyle.success, row=0)
+        self.add_button("Cerrar", "close", "\U0001F512", discord.ButtonStyle.danger, row=0)
+        self.add_button("Reabrir", "reopen", "\U0001F513", discord.ButtonStyle.secondary, row=1)
+
+    def add_button(self, label: str, action: str, emoji: str, style: discord.ButtonStyle, *, row: int) -> None:
+        button = discord.ui.Button(
+            label=label,
+            emoji=emoji,
+            style=style,
+            custom_id=f"g3n:ticket:{action}:{self.guild_id}:{self.code}",
+            row=row,
+        )
+        button.callback = self.handle_button
+        self.add_item(button)
+
+    async def handle_button(self, interaction: discord.Interaction) -> None:
         if interaction.guild is None or interaction.guild.id != self.guild_id:
-            await private_response(interaction, "Este cobro pertenece a otro servidor.")
+            await private_response(interaction, "Este ticket pertenece a otro servidor.")
             return
         if not is_admin_subject(self.cog.db, interaction):
-            await private_response(interaction, "Solo admins autorizados pueden liquidar cobros.")
+            await private_response(interaction, "Solo admins autorizados pueden gestionar tickets.")
             return
-        await interaction.response.send_modal(
-            LiquidateWithdrawalReviewModal(self.cog, self.guild_id, self.code)
+        action = str(interaction.data.get("custom_id", "")).split(":")[2]
+        if action == "respond":
+            await interaction.response.send_modal(TicketAdminReplyModal(self.cog, self.guild_id, self.code))
+            return
+        if action == "follow":
+            await interaction.response.send_modal(TicketFollowupModal(self.cog, self.guild_id, self.code))
+            return
+        status = {
+            "resolve": TICKET_RESOLVED,
+            "close": TICKET_CLOSED,
+            "reopen": TICKET_IN_PROGRESS,
+        }.get(action)
+        if status is None:
+            await private_response(interaction, "Accion de ticket desconocida.")
+            return
+        await self.cog.change_ticket_status_interaction(interaction, self.guild_id, self.code, status)
+
+
+class TicketListSelect(discord.ui.Select):
+    def __init__(self, cog: "Bank", rows):
+        options = []
+        for row in rows:
+            options.append(
+                discord.SelectOption(
+                    label=f"{row['code']} - {row['subject']}"[:100],
+                    value=str(row["code"]),
+                    description=(
+                        f"{row['status']} | Usuario {row['user_id']} | "
+                        f"Resp {row['message_count']} | Evid {row['attachment_count']}"
+                    )[:100],
+                )
+            )
+        super().__init__(placeholder="Selecciona un ticket", min_values=1, max_values=1, options=options)
+        self.cog = cog
+
+    async def callback(self, interaction: discord.Interaction) -> None:
+        await self.cog.show_ticket_detail_interaction(interaction, str(self.values[0]))
+
+
+class TicketListView(discord.ui.View):
+    def __init__(self, cog: "Bank", rows):
+        super().__init__(timeout=300)
+        if rows:
+            self.add_item(TicketListSelect(cog, rows))
+
+
+class TicketsAdminMenuView(discord.ui.View):
+    def __init__(self, cog: "Bank"):
+        super().__init__(timeout=300)
+        self.cog = cog
+
+    async def require_admin(self, interaction: discord.Interaction) -> bool:
+        if is_admin_subject(self.cog.db, interaction):
+            return True
+        await private_response(interaction, "Solo admins autorizados pueden consultar tickets.")
+        return False
+
+    async def show_status(self, interaction: discord.Interaction, statuses: tuple[str, ...]) -> None:
+        if not await self.require_admin(interaction):
+            return
+        rows = list_tickets(self.cog.db, interaction.guild.id, statuses, limit=10)
+        if not rows:
+            await private_response(interaction, "No hay tickets en esa vista.")
+            return
+        await private_response(
+            interaction,
+            self.cog.ticket_list_text(rows),
+            view=TicketListView(self.cog, rows),
         )
+
+    @discord.ui.button(label="Tickets pendientes", style=discord.ButtonStyle.primary, row=0)
+    async def pending(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
+        await self.show_status(interaction, (TICKET_PENDING,))
+
+    @discord.ui.button(label="En seguimiento", style=discord.ButtonStyle.secondary, row=0)
+    async def progress(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
+        await self.show_status(interaction, (TICKET_IN_PROGRESS,))
+
+    @discord.ui.button(label="Esperando respuesta", style=discord.ButtonStyle.secondary, row=1)
+    async def waiting(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
+        await self.show_status(interaction, (TICKET_WAITING_USER,))
+
+    @discord.ui.button(label="Resueltos", style=discord.ButtonStyle.success, row=1)
+    async def resolved(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
+        await self.show_status(interaction, (TICKET_RESOLVED,))
+
+    @discord.ui.button(label="Cerrados", style=discord.ButtonStyle.danger, row=1)
+    async def closed(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
+        await self.show_status(interaction, (TICKET_CLOSED,))
+
+    @discord.ui.button(label="Buscar por ID", style=discord.ButtonStyle.primary, row=2)
+    async def search_id(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
+        if await self.require_admin(interaction):
+            await interaction.response.send_modal(TicketSearchByIdModal(self.cog))
+
+    @discord.ui.button(label="Buscar por usuario", style=discord.ButtonStyle.primary, row=2)
+    async def search_user(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
+        if await self.require_admin(interaction):
+            await interaction.response.send_modal(TicketSearchByUserModal(self.cog))
 
 
 class Bank(commands.Cog):
@@ -339,14 +783,381 @@ class Bank(commands.Cog):
         pending = self.db.fetch_all(
             """
             SELECT guild_id, code FROM withdrawals
-            WHERE status IN (?, ?)
+            WHERE status IN (?, ?, ?, ?, ?)
             """,
-            (WITHDRAWAL_PENDING, WITHDRAWAL_APPROVED),
+            (WITHDRAWAL_PENDING, WITHDRAWAL_APPROVED, WITHDRAWAL_PARTIAL, WITHDRAWAL_DELEGATED, WITHDRAWAL_REASSIGNMENT),
         )
         for row in pending:
             self.bot.add_view(
                 WithdrawalReviewView(self, int(row["guild_id"]), str(row["code"]))
             )
+        tickets = self.db.fetch_all(
+            "SELECT guild_id, code FROM tickets",
+        )
+        for row in tickets:
+            self.bot.add_view(
+                TicketAdminActionView(self, int(row["guild_id"]), str(row["code"]))
+            )
+
+    async def open_ticket_modal(self, interaction: discord.Interaction) -> None:
+        if not isinstance(interaction.user, discord.Member) or not has_bank_access(self.db, interaction.user):
+            await private_response(interaction, "Necesitas rol MIEMBRO G3NESYS o INVITADO.")
+            return
+        await interaction.response.send_modal(TicketCreateModal(self))
+
+    async def create_ticket_interaction(
+        self,
+        interaction: discord.Interaction,
+        subject: str,
+        description: str,
+    ) -> None:
+        if interaction.guild is None or not isinstance(interaction.user, discord.Member):
+            await private_response(interaction, "Los tickets se crean desde el servidor.")
+            return
+        if not has_bank_access(self.db, interaction.user):
+            await private_response(interaction, "Necesitas rol MIEMBRO G3NESYS o INVITADO.")
+            return
+        try:
+            ticket = create_ticket(self.db, interaction.guild.id, interaction.user.id, subject, description)
+        except ValueError as exc:
+            await private_response(interaction, str(exc))
+            return
+        thread = await self.try_create_ticket_thread(interaction, str(ticket["code"]))
+        if thread is not None:
+            set_ticket_thread(self.db, int(ticket["id"]), thread.id)
+            ticket = get_ticket(self.db, interaction.guild.id, str(ticket["code"]))
+        dm_sent = await send_dm_safe(
+            self.db,
+            guild_id=interaction.guild.id,
+            user=interaction.user,
+            action="ticket_creado",
+            embed=self.ticket_user_confirmation_embed(interaction.guild, ticket),
+        )
+        log_action(
+            self.db,
+            interaction.guild.id,
+            admin_id=interaction.user.id,
+            action="Creacion de ticket",
+            system="Banco",
+            affected_user_id=interaction.user.id,
+            observation=f"Ticket {ticket['code']} creado. DM={'ok' if dm_sent else 'fallo'}.",
+        )
+        await self.notify_ticket_created(interaction.guild, ticket)
+        evidence_target = thread.mention if thread is not None else "este canal mencionando el ID del ticket"
+        dm_note = "" if dm_sent else " No pude enviarte la confirmacion por DM, pero el ticket fue creado."
+        await private_response(
+            interaction,
+            (
+                f"Ticket `{ticket['code']}` creado con estado `{ticket['status']}`.{dm_note}\n"
+                f"Si deseas adjuntar evidencias, envia las imagenes en {evidence_target}."
+            ),
+        )
+
+    async def try_create_ticket_thread(self, interaction: discord.Interaction, code: str):
+        channel = interaction.channel
+        if not isinstance(channel, (discord.TextChannel, discord.ForumChannel)):
+            return None
+        try:
+            if isinstance(channel, discord.ForumChannel):
+                thread, _message = await channel.create_thread(
+                    name=f"{code}-evidencias",
+                    content=(
+                        f"Ticket `{code}` creado por {interaction.user.mention}. "
+                        "Envia aqui las imagenes o evidencias relacionadas."
+                    ),
+                    reason="Ticket Banco G3NESYS",
+                )
+                return thread
+            thread = await channel.create_thread(
+                name=f"{code}-evidencias",
+                type=discord.ChannelType.public_thread,
+                reason="Ticket Banco G3NESYS",
+            )
+            await thread.send(
+                f"Ticket `{code}` creado por {interaction.user.mention}. "
+                "Envia aqui las imagenes o evidencias relacionadas."
+            )
+            return thread
+        except (discord.Forbidden, discord.HTTPException):
+            return None
+
+    def ticket_user_confirmation_embed(self, guild: discord.Guild, ticket) -> discord.Embed:
+        embed = discord.Embed(
+            title=f"Ticket {ticket['code']}",
+            color=discord.Color.gold(),
+        )
+        embed.add_field(name="Asunto", value=str(ticket["subject"])[:1024], inline=False)
+        embed.add_field(name="Estado inicial", value=str(ticket["status"]), inline=True)
+        embed.add_field(name="Fecha de creacion", value=str(ticket["created_at"]), inline=True)
+        embed.description = "El equipo administrativo dara seguimiento a tu solicitud."
+        return embed
+
+    def ticket_admin_embed(self, guild: discord.Guild, ticket) -> discord.Embed:
+        attachments = ticket_attachments(self.db, int(ticket["id"]), limit=5)
+        messages = list(reversed(ticket_messages(self.db, int(ticket["id"]), limit=8)))
+        embed = discord.Embed(
+            title=f"Ticket {ticket['code']}",
+            description=str(ticket["description"])[:1800],
+            color=discord.Color.orange() if ticket["status"] in OPEN_TICKET_STATUSES else discord.Color.green(),
+        )
+        embed.add_field(name="Usuario", value=f"<@{ticket['user_id']}>", inline=True)
+        embed.add_field(name="Discord ID", value=str(ticket["user_id"]), inline=True)
+        embed.add_field(name="Estado", value=str(ticket["status"]), inline=True)
+        embed.add_field(name="Asunto", value=str(ticket["subject"])[:1024], inline=False)
+        embed.add_field(name="Creado", value=str(ticket["created_at"]), inline=True)
+        embed.add_field(name="Actualizado", value=str(ticket["updated_at"]), inline=True)
+        assigned = f"<@{ticket['assigned_admin_id']}>" if ticket["assigned_admin_id"] else "Sin asignar"
+        embed.add_field(name="Admin asignado", value=assigned, inline=True)
+        embed.add_field(name="Imagenes adjuntas", value=str(len(attachments)), inline=True)
+        if ticket["thread_id"]:
+            embed.add_field(name="Espacio de evidencias", value=f"<#{ticket['thread_id']}>", inline=True)
+        if messages:
+            lines = []
+            for row in messages:
+                marker = "Usuario" if row["message_type"] == "respuesta_usuario" else "Admin" if row["message_type"] == TICKET_ADMIN_REPLY else "Interna"
+                status = f" ({row['old_status']} -> {row['new_status']})" if row["new_status"] else ""
+                lines.append(f"{marker}{status}: {str(row['content'])[:160]}")
+            embed.add_field(name="Historial reciente", value="\n".join(lines)[:1024], inline=False)
+        if attachments:
+            links = [f"[{row['filename']}]({row['url']})" for row in attachments]
+            embed.add_field(name="Evidencias", value="\n".join(links)[:1024], inline=False)
+            embed.set_image(url=str(attachments[0]["url"]))
+        return embed
+
+    async def notify_ticket_created(self, guild: discord.Guild, ticket) -> None:
+        view = TicketAdminActionView(self, guild.id, str(ticket["code"]))
+        self.bot.add_view(view)
+        message = await send_admin_notification(
+            self.db,
+            guild=guild,
+            category="general_admin",
+            embed=self.ticket_admin_embed(guild, ticket),
+            view=view,
+        )
+        if message is not None:
+            set_ticket_notification(self.db, int(ticket["id"]), message.id)
+
+    def ticket_list_text(self, rows) -> str:
+        lines = ["**Tickets**"]
+        for row in rows:
+            assigned = f"<@{row['assigned_admin_id']}>" if row["assigned_admin_id"] else "Sin asignar"
+            lines.append(
+                f"`{row['code']}` | <@{row['user_id']}> | {row['subject']} | "
+                f"{row['created_at']} | {row['status']} | {assigned} | "
+                f"Resp: {row['message_count']} | Evid: {row['attachment_count']}"
+            )
+        return "\n".join(lines)[:1900]
+
+    async def show_admin_tickets_menu(self, interaction: discord.Interaction) -> None:
+        await private_response(interaction, "Panel de tickets:", view=TicketsAdminMenuView(self))
+
+    async def show_ticket_detail_interaction(self, interaction: discord.Interaction, code: str) -> None:
+        if interaction.guild is None or not is_admin_subject(self.db, interaction):
+            await private_response(interaction, "Solo admins autorizados pueden consultar tickets.")
+            return
+        ticket = get_ticket(self.db, interaction.guild.id, code)
+        if ticket is None:
+            await private_response(interaction, "No encontre ese ticket.")
+            return
+        view = TicketAdminActionView(self, interaction.guild.id, str(ticket["code"]))
+        self.bot.add_view(view)
+        await private_response(interaction, "Detalle del ticket:", embed=self.ticket_admin_embed(interaction.guild, ticket), view=view)
+
+    async def show_tickets_by_user(self, interaction: discord.Interaction, user_id: int) -> None:
+        if interaction.guild is None or not is_admin_subject(self.db, interaction):
+            await private_response(interaction, "Solo admins autorizados pueden consultar tickets.")
+            return
+        rows = search_tickets_by_user(self.db, interaction.guild.id, user_id, limit=10)
+        if not rows:
+            await private_response(interaction, "No encontre tickets para ese usuario.")
+            return
+        await private_response(interaction, self.ticket_list_text(rows), view=TicketListView(self, rows))
+
+    async def reply_ticket_interaction(self, interaction: discord.Interaction, guild_id: int, code: str, content: str) -> None:
+        ticket = await self.require_ticket_admin_action(interaction, guild_id, code, allow_closed=False)
+        if ticket is None:
+            return
+        member = interaction.guild.get_member(int(ticket["user_id"]))
+        dm_sent = False
+        dm_error = None
+        if member is not None:
+            dm_sent = await send_dm_safe(
+                self.db,
+                guild_id=guild_id,
+                user=member,
+                action="respuesta_ticket",
+                content=f"Respuesta al ticket `{code}`:\n\n{content[:1800]}",
+            )
+            if not dm_sent:
+                dm_error = "No se pudo enviar DM al usuario."
+        else:
+            dm_error = "Usuario no encontrado en el servidor."
+        old_status = str(ticket["status"])
+        new_status = TICKET_IN_PROGRESS if old_status == TICKET_PENDING else old_status
+        assign_ticket(self.db, int(ticket["id"]), interaction.user.id)
+        add_ticket_message(
+            self.db,
+            int(ticket["id"]),
+            author_id=interaction.user.id,
+            message_type=TICKET_ADMIN_REPLY,
+            content=content,
+            dm_sent=dm_sent,
+            dm_error=dm_error,
+            old_status=old_status,
+            new_status=new_status if new_status != old_status else None,
+        )
+        log_action(self.db, guild_id, admin_id=interaction.user.id, action="Respuesta enviada a ticket", system="Banco", affected_user_id=int(ticket["user_id"]), observation=f"Ticket {code}. DM={'ok' if dm_sent else 'fallo'}.")
+        await self.refresh_ticket_message(interaction, code)
+        await private_response(interaction, f"Respuesta guardada para `{code}`." + (" Advertencia: no pude enviar DM." if not dm_sent else ""))
+
+    async def followup_ticket_interaction(self, interaction: discord.Interaction, guild_id: int, code: str, *, visibility: str, content: str, new_status: str | None) -> None:
+        ticket = await self.require_ticket_admin_action(interaction, guild_id, code, allow_closed=False)
+        if ticket is None:
+            return
+        old_status = str(ticket["status"])
+        target_status = new_status or old_status
+        try:
+            validate_ticket_status(target_status)
+        except ValueError as exc:
+            await private_response(interaction, str(exc))
+            return
+        visible = visibility.strip().casefold() in {"usuario", "visible", "user"}
+        dm_sent = None
+        dm_error = None
+        message_type = TICKET_INTERNAL_NOTE
+        if visible:
+            message_type = TICKET_ADMIN_REPLY
+            member = interaction.guild.get_member(int(ticket["user_id"]))
+            if member is not None:
+                dm_sent = await send_dm_safe(self.db, guild_id=guild_id, user=member, action="seguimiento_ticket", content=f"Actualizacion del ticket `{code}`:\n\n{content[:1800]}")
+                if not dm_sent:
+                    dm_error = "No se pudo enviar DM al usuario."
+            else:
+                dm_sent = False
+                dm_error = "Usuario no encontrado en el servidor."
+        assign_ticket(self.db, int(ticket["id"]), interaction.user.id)
+        add_ticket_message(
+            self.db,
+            int(ticket["id"]),
+            author_id=interaction.user.id,
+            message_type=message_type,
+            content=content,
+            dm_sent=dm_sent,
+            dm_error=dm_error,
+            old_status=old_status if target_status != old_status else None,
+            new_status=target_status if target_status != old_status else None,
+        )
+        log_action(self.db, guild_id, admin_id=interaction.user.id, action="Seguimiento de ticket", system="Banco", affected_user_id=int(ticket["user_id"]), observation=f"Ticket {code}; tipo={'visible' if visible else 'interno'}; estado={target_status}.")
+        await self.refresh_ticket_message(interaction, code)
+        warning = " Advertencia: no pude enviar DM." if visible and not dm_sent else ""
+        await private_response(interaction, f"Seguimiento guardado para `{code}`.{warning}")
+
+    async def change_ticket_status_interaction(self, interaction: discord.Interaction, guild_id: int, code: str, status: str) -> None:
+        ticket = await self.require_ticket_admin_action(interaction, guild_id, code, allow_closed=(status == TICKET_IN_PROGRESS))
+        if ticket is None:
+            return
+        change_ticket_status(self.db, int(ticket["id"]), admin_id=interaction.user.id, new_status=status)
+        assign_ticket(self.db, int(ticket["id"]), interaction.user.id)
+        log_action(self.db, guild_id, admin_id=interaction.user.id, action=f"Ticket actualizado a {status}", system="Banco", affected_user_id=int(ticket["user_id"]), observation=f"Ticket {code}.")
+        await self.refresh_ticket_message(interaction, code)
+        await private_response(interaction, f"Ticket `{code}` actualizado a `{status}`.")
+
+    async def require_ticket_admin_action(self, interaction: discord.Interaction, guild_id: int, code: str, *, allow_closed: bool):
+        if interaction.guild is None or interaction.guild.id != guild_id:
+            await private_response(interaction, "Este ticket pertenece a otro servidor.")
+            return None
+        if not is_admin_subject(self.db, interaction):
+            await private_response(interaction, "Solo admins autorizados pueden gestionar tickets.")
+            return None
+        ticket = get_ticket(self.db, guild_id, code)
+        if ticket is None:
+            await private_response(interaction, "No encontre ese ticket.")
+            return None
+        if ticket["status"] == TICKET_CLOSED and not allow_closed:
+            await private_response(interaction, "El ticket esta cerrado. Reabrelo antes de responder o dar seguimiento.")
+            return None
+        return ticket
+
+    async def refresh_ticket_message(self, interaction: discord.Interaction, code: str) -> None:
+        ticket = get_ticket(self.db, interaction.guild.id, code)
+        if ticket is None:
+            return
+        try:
+            if interaction.message is not None:
+                await interaction.message.edit(
+                    embed=self.ticket_admin_embed(interaction.guild, ticket),
+                    view=TicketAdminActionView(self, interaction.guild.id, code),
+                )
+        except (discord.Forbidden, discord.HTTPException, AttributeError):
+            pass
+
+    @commands.Cog.listener()
+    async def on_message(self, message: discord.Message) -> None:
+        if message.author.bot or message.guild is None or not message.attachments:
+            return
+        ticket = find_ticket_for_attachment(
+            self.db,
+            message.guild.id,
+            message.author.id,
+            message.channel.id,
+            message.content,
+        )
+        if ticket is None:
+            return
+        for attachment in message.attachments:
+            add_attachment(
+                self.db,
+                int(ticket["id"]),
+                author_id=message.author.id,
+                url=attachment.url,
+                filename=attachment.filename,
+                content_type=getattr(attachment, "content_type", None),
+                message_id=message.id,
+                channel_id=message.channel.id,
+            )
+        log_action(
+            self.db,
+            message.guild.id,
+            admin_id=message.author.id,
+            action="Archivos adjuntados a ticket",
+            system="Banco",
+            affected_user_id=message.author.id,
+            observation=f"Ticket {ticket['code']}; adjuntos={len(message.attachments)}.",
+        )
+
+    async def send_delegated_withdrawal_dm(self, guild: discord.Guild, code: str, officer: discord.Member, note: str = "") -> None:
+        row = self.db.fetch_one("SELECT * FROM withdrawals WHERE guild_id = ? AND code = ?", (guild.id, code))
+        if row is None:
+            return
+        user = guild.get_member(int(row["user_id"]))
+        embed = discord.Embed(title="Pago delegado", color=discord.Color.gold())
+        embed.add_field(name="Solicitud", value=str(code), inline=True)
+        embed.add_field(name="Usuario", value=f"<@{row['user_id']}> ({row['user_id']})", inline=False)
+        embed.add_field(name="Cantidad pendiente", value=format_amount(int(row["amount_requested"]) - int(row["amount_liquidated"] or 0)), inline=True)
+        embed.add_field(name="Motivo", value=str(row["reason"] or "Sin motivo")[:1024], inline=False)
+        embed.add_field(name="Lugar", value=str(row["payment_place"] or "Sin lugar"), inline=True)
+        embed.add_field(name="Horario", value=str(row["payment_schedule"] or "Sin horario"), inline=True)
+        embed.add_field(name="Admin", value=f"<@{row['delegated_by']}>" if row["delegated_by"] else "Sin admin", inline=True)
+        if note:
+            embed.add_field(name="Nota", value=note[:1024], inline=False)
+        self.bot.add_view(OfficerWithdrawalView(self, guild.id, code))
+        officer_sent = await send_dm_safe(self.db, guild_id=guild.id, user=officer, action="cobro_delegado_oficial", embed=embed, view=OfficerWithdrawalView(self, guild.id, code))
+        if user is not None:
+            user_sent = await send_dm_safe(
+                self.db,
+                guild_id=guild.id,
+                user=user,
+                action="cobro_delegado_usuario",
+                content=(
+                    f"Tu solicitud de cobro `{code}` fue asignada. Tu pago lo realizara {officer.mention} "
+                    f"el dia/horario `{row['payment_schedule']}`, en {row['payment_place']}."
+                    + (f"\nNota: {note}" if note else "")
+                ),
+            )
+            if not user_sent:
+                log_action(self.db, guild.id, admin_id=int(row["delegated_by"] or officer.id), action="Fallo DM usuario cobro delegado", system="Banco", affected_user_id=user.id, observation=code)
+        if not officer_sent:
+            log_action(self.db, guild.id, admin_id=int(row["delegated_by"] or officer.id), action="Fallo DM oficial cobro delegado", system="Banco", affected_user_id=officer.id, observation=code)
 
     def transfer_fee_percent(self, guild_id: int) -> float:
         return parse_percent_setting(
@@ -673,13 +1484,21 @@ class Bank(commands.Cog):
         )
         if row is None:
             return
+        paid = int(row["amount_liquidated"] or 0)
+        requested = int(row["amount_requested"] or 0)
+        pending = max(0, requested - paid)
         embed = discord.Embed(
-            title=f"💳 Solicitud de cobro {code}",
-            description="Estado: Pendiente. Admin debe aprobar antes de liquidar.",
+            title=f"?? Solicitud de cobro {code}",
+            description=f"Estado: {row['status']}",
             color=discord.Color.gold(),
         )
         embed.add_field(name="Usuario", value=f"<@{row['user_id']}>", inline=True)
-        embed.add_field(name="Monto solicitado", value=format_amount(row["amount_requested"]), inline=True)
+        embed.add_field(name="Solicitado", value=format_amount(requested), inline=True)
+        embed.add_field(name="Pagado", value=format_amount(paid), inline=True)
+        embed.add_field(name="Pendiente", value=format_amount(pending), inline=True)
+        embed.add_field(name="Oficial asignado", value=f"<@{row['assigned_officer_id']}>" if row["assigned_officer_id"] else "Sin asignar", inline=True)
+        embed.add_field(name="Lugar", value=row["payment_place"] or "Sin lugar", inline=True)
+        embed.add_field(name="Horario", value=row["payment_schedule"] or "Sin horario", inline=True)
         embed.add_field(name="Nota", value=row["reason"] or "Sin nota", inline=False)
         view = WithdrawalReviewView(self, guild.id, code)
         self.bot.add_view(view)
