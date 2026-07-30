@@ -3,7 +3,7 @@ from __future__ import annotations
 import discord
 from discord.ext import commands
 
-from ..permissions import CALLER_PANEL_ROLE_SETTING_KEY, require_admin_context
+from ..permissions import ALLIANCE_ROLE_SETTING_KEY, CALLER_PANEL_ROLE_SETTING_KEY, require_admin_context
 from ..services.audit import log_action
 from ..services.callers import (
     CallerRemovalNoticeView,
@@ -71,6 +71,8 @@ class Settings(commands.Cog):
                     "`!admin_role_set @rol` - Autoriza rol admin.",
                     "`!pcall_role_set @rol` - Autoriza rol PCALL para Panel de Callers.",
                     "`!pcall_role_remove @rol` - Retira rol PCALL del acceso al panel.",
+                    "`!alianza_role_set @rol` - Autoriza rol de alianza para pings y banco.",
+                    "`!alianza_role_remove @rol` - Retira rol de alianza.",
                     "`!rol_requipador_set @rol` - Autoriza rol requipador.",
                     "`!caller_set @usuario` - Autoriza caller.",
                     "`!caller_remove @usuario` - Quita caller.",
@@ -205,6 +207,50 @@ class Settings(commands.Cog):
             mention_author=False,
         )
 
+    @commands.command(name="alianza_role_set", aliases=["alliance_role_set", "rol_alianza_set"])
+    async def alianza_role_set(self, ctx: commands.Context, role: discord.Role) -> None:
+        if not await require_admin_context(ctx, self.db):
+            return
+        current = split_csv_ids(self.db.get_setting(ctx.guild.id, ALLIANCE_ROLE_SETTING_KEY))
+        current.add(role.id)
+        self.db.set_setting(ctx.guild.id, ALLIANCE_ROLE_SETTING_KEY, join_csv_ids(current))
+        await ctx.reply(
+            f"Rol de alianza autorizado para servicios base: {role.mention}",
+            mention_author=False,
+        )
+
+    @commands.command(name="alianza_role_remove", aliases=["alliance_role_remove", "rol_alianza_remove"])
+    async def alianza_role_remove(self, ctx: commands.Context, role: discord.Role) -> None:
+        if not await require_admin_context(ctx, self.db):
+            return
+        current = split_csv_ids(self.db.get_setting(ctx.guild.id, ALLIANCE_ROLE_SETTING_KEY))
+        if role.id not in current:
+            await ctx.reply(
+                f"{role.mention} no estaba configurado como rol de alianza.",
+                mention_author=False,
+            )
+            return
+        current.remove(role.id)
+        self.db.set_setting(ctx.guild.id, ALLIANCE_ROLE_SETTING_KEY, join_csv_ids(current))
+        await ctx.reply(
+            f"Rol de alianza retirado del acceso base: {role.mention}",
+            mention_author=False,
+        )
+
+    @commands.command(name="alianzas_roles", aliases=["alliance_roles", "roles_alianza"])
+    async def alianzas_roles(self, ctx: commands.Context) -> None:
+        if not await require_admin_context(ctx, self.db):
+            return
+        role_ids = split_csv_ids(self.db.get_setting(ctx.guild.id, ALLIANCE_ROLE_SETTING_KEY))
+        if not role_ids:
+            await ctx.reply("No hay roles de alianza configurados.", mention_author=False)
+            return
+        mentions = []
+        for role_id in sorted(role_ids):
+            role = ctx.guild.get_role(role_id)
+            mentions.append(role.mention if role is not None else f"ID `{role_id}` (no encontrado)")
+        await ctx.reply("Roles de alianza configurados: " + ", ".join(mentions), mention_author=False)
+
     @commands.command(name="caller_set")
     async def caller_set(self, ctx: commands.Context, member: discord.Member) -> None:
         if not await require_admin_context(ctx, self.db):
@@ -321,6 +367,7 @@ class Settings(commands.Cog):
             ("Avisos admin generales", "channel_notify_general_admin_id"),
             ("Roles requipadores", "regear_reviewer_role_ids"),
             ("Roles PCALL", CALLER_PANEL_ROLE_SETTING_KEY),
+            ("Roles alianza", ALLIANCE_ROLE_SETTING_KEY),
             ("Rol miembro", "member_role_name"),
             ("Rol invitado", "guest_role_name"),
             ("Multa inasistencia", "absence_fine_amount"),

@@ -104,6 +104,7 @@ DEFAULT_SETTINGS = {
     "withdrawal_liquidator_role_ids": "",
     "regear_reviewer_role_ids": "",
     "caller_panel_role_ids": "",
+    "alliance_role_ids": "",
     "member_role_name": DEFAULT_MEMBER_ROLE_NAME,
     "guest_role_name": DEFAULT_GUEST_ROLE_NAME,
     "guild_percentage_default": "10",

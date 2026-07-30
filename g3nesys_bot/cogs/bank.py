@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import discord
 from discord.ext import commands
@@ -914,7 +914,7 @@ class Bank(commands.Cog):
             return " Advertencia: la operacion se registro, pero no pude actualizar el mensaje original del cobro."
     async def open_ticket_modal(self, interaction: discord.Interaction) -> None:
         if not isinstance(interaction.user, discord.Member) or not has_bank_access(self.db, interaction.user):
-            await private_response(interaction, "Necesitas rol MIEMBRO G3NESYS o INVITADO.")
+            await private_response(interaction, "Necesitas rol MIEMBRO G3NESYS, INVITADO o alianza configurada.")
             return
         await interaction.response.send_modal(TicketCreateModal(self))
 
@@ -928,7 +928,7 @@ class Bank(commands.Cog):
             await private_response(interaction, "Los tickets se crean desde el servidor.")
             return
         if not has_bank_access(self.db, interaction.user):
-            await private_response(interaction, "Necesitas rol MIEMBRO G3NESYS o INVITADO.")
+            await private_response(interaction, "Necesitas rol MIEMBRO G3NESYS, INVITADO o alianza configurada.")
             return
         try:
             ticket = create_ticket(self.db, interaction.guild.id, interaction.user.id, subject, description)
@@ -1402,13 +1402,13 @@ class Bank(commands.Cog):
     @commands.command(name="cobrar")
     async def cobrar(self, ctx: commands.Context, amount_raw: str, *, reason: str = "") -> None:
         if not isinstance(ctx.author, discord.Member) or not has_bank_access(self.db, ctx.author):
-            await ctx.reply("Necesitas rol MIEMBRO G3NESYS o INVITADO para solicitar cobro.", mention_author=False)
+            await ctx.reply("Necesitas rol MIEMBRO G3NESYS, INVITADO o alianza configurada para solicitar cobro.", mention_author=False)
             return
         await self.create_withdrawal_and_notify(ctx, ctx.author, amount_raw, reason)
 
     async def show_balance_interaction(self, interaction: discord.Interaction) -> None:
         if not isinstance(interaction.user, discord.Member) or not has_bank_access(self.db, interaction.user):
-            await private_response(interaction, "Necesitas rol MIEMBRO G3NESYS o INVITADO.")
+            await private_response(interaction, "Necesitas rol MIEMBRO G3NESYS, INVITADO o alianza configurada.")
             return
         await dm_or_private(
             self,
@@ -1419,7 +1419,7 @@ class Bank(commands.Cog):
 
     async def show_statement_interaction(self, interaction: discord.Interaction) -> None:
         if not isinstance(interaction.user, discord.Member) or not has_bank_access(self.db, interaction.user):
-            await private_response(interaction, "Necesitas rol MIEMBRO G3NESYS o INVITADO.")
+            await private_response(interaction, "Necesitas rol MIEMBRO G3NESYS, INVITADO o alianza configurada.")
             return
         await dm_or_private(
             self,
@@ -1466,7 +1466,7 @@ class Bank(commands.Cog):
 
     async def pay_fine_interaction(self, interaction: discord.Interaction, fine_code: str) -> None:
         if not isinstance(interaction.user, discord.Member) or not has_bank_access(self.db, interaction.user):
-            await private_response(interaction, "Necesitas rol MIEMBRO G3NESYS o INVITADO.")
+            await private_response(interaction, "Necesitas rol MIEMBRO G3NESYS, INVITADO o alianza configurada.")
             return
         fine = self.db.fetch_one(
             "SELECT * FROM fines WHERE guild_id = ? AND code = ?",
@@ -1505,7 +1505,7 @@ class Bank(commands.Cog):
         reason: str,
     ) -> None:
         if not isinstance(interaction.user, discord.Member) or not has_bank_access(self.db, interaction.user):
-            await private_response(interaction, "Necesitas rol MIEMBRO G3NESYS o INVITADO.")
+            await private_response(interaction, "Necesitas rol MIEMBRO G3NESYS, INVITADO o alianza configurada.")
             return
         try:
             amount = parse_int_amount(amount_raw)

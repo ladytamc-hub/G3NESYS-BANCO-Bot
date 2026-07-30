@@ -5254,7 +5254,7 @@ class Activities(commands.Cog):
         ):
             await private_response(
                 interaction,
-                "Necesitas el rol configurado de miembro o invitado para solicitar unirte.",
+                "Necesitas rol de miembro, invitado o alianza configurada para solicitar unirte.",
             )
             return
         penalty = self.ensure_penalty_for_user(interaction.guild.id, interaction.user.id)
@@ -5755,7 +5755,7 @@ class Activities(commands.Cog):
             return
         if not isinstance(interaction.user, discord.Member) or not has_bank_access(self.db, interaction.user):
             await interaction.followup.send(
-                "Necesitas el rol MIEMBRO G3NESYS o INVITADO para anotarte.",
+                "Necesitas rol MIEMBRO G3NESYS, INVITADO o alianza configurada para anotarte.",
                 ephemeral=True,
             )
             return

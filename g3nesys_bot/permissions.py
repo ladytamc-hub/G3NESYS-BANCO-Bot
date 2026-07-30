@@ -17,6 +17,7 @@ ADMIN_ROLE_NAMES = {
     "administrador g3nesys",
 }
 CALLER_PANEL_ROLE_SETTING_KEY = "caller_panel_role_ids"
+ALLIANCE_ROLE_SETTING_KEY = "alliance_role_ids"
 CALLER_PANEL_ROLE_NAMES = {
     "pcall",
     "p call",
@@ -119,15 +120,27 @@ def can_manage_activity(
     return member.id == caller_id and is_caller_panel_subject(db, subject)
 
 
-def has_bank_access(db: Database, member: discord.Member) -> bool:
+def has_configured_alliance_role(db: Database, member: discord.Member) -> bool:
+    configured_roles = db.get_setting(member.guild.id, ALLIANCE_ROLE_SETTING_KEY)
+    return has_any_configured_role(member, configured_roles)
+
+
+def has_service_access(db: Database, member: discord.Member, *, include_guest: bool = True) -> bool:
     member_role = db.get_setting(member.guild.id, "member_role_name")
     guest_role = db.get_setting(member.guild.id, "guest_role_name")
-    return has_named_role(member, member_role) or has_named_role(member, guest_role)
+    if has_named_role(member, member_role):
+        return True
+    if include_guest and has_named_role(member, guest_role):
+        return True
+    return has_configured_alliance_role(db, member)
+
+
+def has_bank_access(db: Database, member: discord.Member) -> bool:
+    return has_service_access(db, member, include_guest=True)
 
 
 def is_full_member(db: Database, member: discord.Member) -> bool:
-    member_role = db.get_setting(member.guild.id, "member_role_name")
-    return has_named_role(member, member_role)
+    return has_service_access(db, member, include_guest=False)
 
 
 async def require_admin_context(ctx: commands.Context, db: Database) -> bool:
