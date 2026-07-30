@@ -24,8 +24,12 @@ def parse_int_amount(raw: str) -> int:
     return amount
 
 
+def format_money(amount: int) -> str:
+    return f"{int(amount):,}"
+
+
 def format_amount(amount: int, currency: str = "plata") -> str:
-    return f"{int(amount):,} {currency}".replace(",", ".")
+    return f"{format_money(amount)} {currency}"
 
 
 def split_csv_ids(value: str | None) -> set[int]:

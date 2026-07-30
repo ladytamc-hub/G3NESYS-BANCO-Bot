@@ -3625,7 +3625,7 @@ class Activities(commands.Cog):
             return
         lines = [f"**Participantes de {code}**"]
         for row in rows:
-            amount = f"{int(row['amount']):,}".replace(",", ".")
+            amount = format_amount(row["amount"])
             lines.append(f"<@{row['user_id']}> - {row['participation_percent']}% - {amount}")
         await ctx.reply("\n".join(lines), mention_author=False)
 
@@ -7229,7 +7229,7 @@ class Activities(commands.Cog):
             return "Ese Split no tiene participantes."
         lines = [f"📋 **Participantes de {code}**"]
         for row in rows:
-            amount = f"{int(row['amount']):,}".replace(",", ".")
+            amount = format_amount(row["amount"])
             lines.append(f"• <@{row['user_id']}> - {row['participation_percent']}% - {amount}")
         return "\n".join(lines)
 
@@ -7691,16 +7691,16 @@ class Activities(commands.Cog):
                 description="Requiere revision y aprobacion admin antes de depositar saldos.",
                 color=discord.Color.gold(),
             )
-            embed.add_field(name="Loot bruto", value=f"{payout['gross_loot']:,}".replace(",", "."))
-            embed.add_field(name="Aporte gremial", value=f"{payout['guild_amount']:,}".replace(",", "."))
+            embed.add_field(name="Loot bruto", value=format_amount(payout["gross_loot"]))
+            embed.add_field(name="Aporte gremial", value=format_amount(payout["guild_amount"]))
             embed.add_field(
                 name="Pago caller",
                 value=(
                     f"{float(payout['caller_percent'] or 0):.1f}% — "
-                    f"{int(payout['caller_amount'] or 0):,}"
-                ).replace(",", "."),
+                    f"{format_amount(payout['caller_amount'] or 0)}"
+                ),
             )
-            embed.add_field(name="Monto repartible", value=f"{payout['distributable']:,}".replace(",", "."))
+            embed.add_field(name="Monto repartible", value=format_amount(payout["distributable"]))
             embed.add_field(
                 name="Participantes confirmados",
                 value=self.payout_participants_text(guild.id, payout["code"])[:1024],
