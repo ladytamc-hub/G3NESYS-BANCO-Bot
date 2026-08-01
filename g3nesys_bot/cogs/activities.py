@@ -1879,7 +1879,6 @@ class ActivityView(discord.ui.View):
             self.add_control_button(
                 "Aviso", "notice", discord.ButtonStyle.primary, 3, status != ACTIVITY_OPEN, "📣"
             )
-            self.add_control_button("Mandar check", "check", discord.ButtonStyle.primary, 3, False, "✅")
             self.add_control_button(
                 "Editar", "edit", discord.ButtonStyle.secondary, 3, False, "✏️"
             )
@@ -1891,7 +1890,6 @@ class ActivityView(discord.ui.View):
                 "Solicitar unirme", "request_join", discord.ButtonStyle.primary, 0, False, "🙋"
             )
             self.add_control_button("Monitorear", "monitor", discord.ButtonStyle.secondary, 0, False, "📡")
-            self.add_control_button("Mandar check", "check", discord.ButtonStyle.primary, 0, False, "✅")
             self.add_control_button("Finalizar", "finish", discord.ButtonStyle.success, 0, False, "🏁")
             self.add_control_button("Ver asistencia", "verify", discord.ButtonStyle.secondary, 0, False, "🔍")
             self.add_control_button(
