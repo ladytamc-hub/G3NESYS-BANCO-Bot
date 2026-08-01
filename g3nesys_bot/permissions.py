@@ -74,6 +74,63 @@ def is_admin_subject(db: Database, subject: commands.Context | discord.Interacti
     return not split_csv_ids(configured_roles) and has_named_admin_role(member)
 
 
+
+def _table_exists(db: Database, table_name: str) -> bool:
+    row = db.fetch_one(
+        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?",
+        (table_name,),
+    )
+    return row is not None
+
+
+def _table_columns(db: Database, table_name: str) -> set[str]:
+    rows = db.fetch_all(f"PRAGMA table_info({table_name})")
+    return {str(row["name"]) for row in rows}
+
+
+def is_authorized_admin(db: Database, guild_id: int, user_id: int) -> bool:
+    """Return True only for admins explicitly stored for this guild/user pair."""
+    for source_table in ("authorized_admins", "admin_access"):
+        if not _table_exists(db, source_table):
+            continue
+        columns = _table_columns(db, source_table)
+        if not {"guild_id", "user_id"}.issubset(columns):
+            continue
+
+        conditions = ["guild_id = ?", "user_id = ?"]
+        params: list[int] = [int(guild_id), int(user_id)]
+        if "authorized" in columns:
+            conditions.append("COALESCE(authorized, 0) = 1")
+        if "active" in columns:
+            conditions.append("COALESCE(active, 1) = 1")
+
+        row = db.fetch_one(
+            f"SELECT 1 FROM {source_table} WHERE {' AND '.join(conditions)} LIMIT 1",
+            tuple(params),
+        )
+        if row is not None:
+            return True
+    return False
+
+
+def is_authorized_admin_subject(db: Database, subject: commands.Context | discord.Interaction) -> bool:
+    guild = _guild_from_subject(subject)
+    user = getattr(subject, "author", None) or getattr(subject, "user", None)
+    if guild is None or user is None:
+        return False
+    return is_authorized_admin(db, guild.id, user.id)
+
+
+def is_split_admin_subject(db: Database, subject: commands.Context | discord.Interaction) -> bool:
+    guild = _guild_from_subject(subject)
+    user = getattr(subject, "author", None) or getattr(subject, "user", None)
+    if guild is None or user is None:
+        return False
+    if getattr(guild, "owner_id", None) == user.id:
+        return True
+    return is_authorized_admin(db, guild.id, user.id)
+
+
 def is_official_caller_subject(db: Database, subject: commands.Context | discord.Interaction) -> bool:
     guild = _guild_from_subject(subject)
     member = _member_from_subject(subject)

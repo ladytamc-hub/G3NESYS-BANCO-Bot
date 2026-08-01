@@ -33,6 +33,7 @@ from ..permissions import (
     can_manage_activity,
     has_bank_access,
     is_admin_subject,
+    is_split_admin_subject,
     is_caller_panel_subject,
     is_official_caller_subject,
     require_admin_context,
@@ -7051,10 +7052,16 @@ class Activities(commands.Cog):
         )
 
     def can_manage_payout(self, ctx: commands.Context, payout) -> bool:
-        return int(payout["caller_id"]) == ctx.author.id or is_admin_subject(self.db, ctx)
+        guild_id = int(payout["guild_id"])
+        if ctx.guild is None or ctx.guild.id != guild_id:
+            return False
+        return int(payout["caller_id"]) == ctx.author.id or is_split_admin_subject(self.db, ctx)
 
     def can_manage_payout_interaction(self, interaction: discord.Interaction, payout) -> bool:
-        return int(payout["caller_id"]) == interaction.user.id or is_admin_subject(self.db, interaction)
+        guild_id = int(payout["guild_id"])
+        if interaction.guild is None or interaction.guild.id != guild_id:
+            return False
+        return int(payout["caller_id"]) == interaction.user.id or is_split_admin_subject(self.db, interaction)
 
     def is_editable_payout(self, payout) -> bool:
         return payout["status"] in {PAYOUT_PENDING, PAYOUT_CORRECTION}

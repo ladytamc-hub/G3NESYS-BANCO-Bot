@@ -32,6 +32,7 @@ from ..permissions import (
     CALLER_PANEL_ROLE_SETTING_KEY,
     has_any_configured_role,
     is_admin_subject,
+    is_split_admin_subject,
     require_admin_context,
 )
 from ..services.audit import log_action
@@ -1408,7 +1409,7 @@ class PayoutReasonModal(discord.ui.Modal):
         self.target_status = target_status
 
     async def on_submit(self, interaction: discord.Interaction) -> None:
-        if not is_admin_subject(self.cog.db, interaction):
+        if not is_split_admin_subject(self.cog.db, interaction):
             await private_response(interaction, "Solo admins autorizados pueden hacer esto.")
             return
         try:
@@ -1472,7 +1473,7 @@ class PayoutReviewView(discord.ui.View):
                 source_message=interaction.message,
             )
             return
-        if not is_admin_subject(self.cog.db, interaction):
+        if not is_split_admin_subject(self.cog.db, interaction):
             await private_response(interaction, "Solo admins autorizados pueden revisar Splits.")
             return
         if action == "approve":
@@ -1550,7 +1551,7 @@ class PendingPayoutSelect(discord.ui.Select):
         if not isinstance(parent, PendingPayoutManagementView):
             await private_response(interaction, "No pude actualizar esta seleccion.")
             return
-        if interaction.user.id != parent.admin_id or not is_admin_subject(self.cog.db, interaction):
+        if interaction.user.id != parent.admin_id or not is_split_admin_subject(self.cog.db, interaction):
             await private_response(interaction, "Solo el admin que abrio este menu puede usarlo.")
             return
         parent.selected_code = self.values[0]
@@ -1570,7 +1571,7 @@ class PendingPayoutManagementView(discord.ui.View):
         self.add_item(PendingPayoutSelect(cog, self.payouts))
 
     async def require_owner_admin(self, interaction: discord.Interaction) -> bool:
-        if interaction.user.id == self.admin_id and is_admin_subject(self.cog.db, interaction):
+        if interaction.user.id == self.admin_id and is_split_admin_subject(self.cog.db, interaction):
             return True
         await private_response(interaction, "Solo el admin que abrio este menu puede usarlo.")
         return False
@@ -1708,7 +1709,7 @@ class SplitsAdminView(discord.ui.View):
         self.cog = cog
 
     async def require_admin(self, interaction: discord.Interaction) -> bool:
-        if is_admin_subject(self.cog.db, interaction):
+        if is_split_admin_subject(self.cog.db, interaction):
             return True
         await private_response(interaction, "Solo admins autorizados pueden revisar Splits.")
         return False
@@ -3579,6 +3580,21 @@ class Admin(commands.Cog):
             raise ValueError("No encontre ese usuario dentro del servidor.")
         if member.bot:
             raise ValueError("No puedes gestionar un bot como administrador.")
+        current_access = self.db.fetch_one(
+            "SELECT authorized FROM admin_access WHERE guild_id = ? AND user_id = ?",
+            (guild.id, user_id),
+        )
+        if authorized and current_access is not None and bool(current_access["authorized"]):
+            log_action(
+                self.db,
+                guild.id,
+                admin_id=changed_by,
+                action="Intento duplicado de admin",
+                affected_user_id=user_id,
+                system="Administracion",
+                observation="Este usuario ya esta autorizado como admin.",
+            )
+            return "Este usuario ya esta autorizado."
         if not authorized and not self.has_admin_after_removal(guild, user_id):
             raise ValueError(
                 "No puedes eliminar al ultimo admin disponible. Agrega otro admin primero."

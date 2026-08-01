@@ -481,9 +481,14 @@ class Database:
             "CREATE UNIQUE INDEX IF NOT EXISTS idx_caller_penalties_one_active "
             "ON caller_penalties(guild_id, user_id) WHERE active = 1"
         )
+        self._ensure_authorized_admin_uniqueness()
         self._conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_admin_access_guild_authorized "
             "ON admin_access(guild_id, authorized)"
+        )
+        self._conn.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_admin_access_guild_user "
+            "ON admin_access(guild_id, user_id)"
         )
         self._conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_payout_participants_liquidation "
@@ -517,6 +522,41 @@ class Database:
             "CREATE INDEX IF NOT EXISTS idx_ticket_attachments_ticket "
             "ON ticket_attachments(ticket_id, created_at)"
         )
+
+    def _table_exists(self, table: str) -> bool:
+        row = self._conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?",
+            (table,),
+        ).fetchone()
+        return row is not None
+
+    def _table_columns(self, table: str) -> set[str]:
+        return {
+            row["name"]
+            for row in self._conn.execute(f"PRAGMA table_info({table})").fetchall()
+        }
+
+    def _ensure_authorized_admin_uniqueness(self) -> None:
+        for table in ("authorized_admins", "admin_access"):
+            if not self._table_exists(table):
+                continue
+            columns = self._table_columns(table)
+            if not {"guild_id", "user_id"}.issubset(columns):
+                continue
+            self._conn.execute(
+                f"""
+                DELETE FROM {table}
+                WHERE rowid NOT IN (
+                    SELECT MIN(rowid)
+                    FROM {table}
+                    GROUP BY guild_id, user_id
+                )
+                """
+            )
+            self._conn.execute(
+                f"CREATE UNIQUE INDEX IF NOT EXISTS idx_{table}_guild_user "
+                f"ON {table}(guild_id, user_id)"
+            )
 
     def _has_unique_index(self, table: str, columns: tuple[str, ...]) -> bool:
         for index in self._conn.execute(f"PRAGMA index_list({table})").fetchall():
