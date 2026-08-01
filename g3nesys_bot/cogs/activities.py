@@ -449,6 +449,33 @@ async def private_response(interaction: discord.Interaction, content: str, **kwa
         await interaction.response.send_message(content, ephemeral=ephemeral, **kwargs)
 
 
+async def defer_private_response(interaction: discord.Interaction) -> None:
+    if not interaction.response.is_done():
+        await interaction.response.defer(ephemeral=interaction.guild is not None)
+
+
+async def split_error_response(
+    interaction: discord.Interaction,
+    *,
+    callback: str,
+    guild_id: int | None = None,
+    split_id: int | None = None,
+    code: str | None = None,
+) -> None:
+    LOGGER.exception(
+        "Split interaction failed callback=%s guild_id=%s user_id=%s split_id=%s code=%s",
+        callback,
+        guild_id or getattr(interaction, "guild_id", None),
+        getattr(getattr(interaction, "user", None), "id", None),
+        split_id,
+        code,
+    )
+    try:
+        await private_response(interaction, "Ocurrió un error al procesar el Split. Revisa los logs.")
+    except Exception:
+        LOGGER.exception("Failed to send split error response callback=%s", callback)
+
+
 async def reject_caller_access(db, interaction: discord.Interaction, action: str) -> None:
     if interaction.guild is not None and is_caller_penalized(
         db,
@@ -1037,7 +1064,16 @@ class PayoutModal(discord.ui.Modal, title="Splitear actividad"):
             )
 
     async def on_submit(self, interaction: discord.Interaction) -> None:
-        await self.cog.create_payout_from_modal(interaction, self.activity_id, self)
+        try:
+            await self.cog.create_payout_from_modal(interaction, self.activity_id, self)
+        except Exception:
+            await split_error_response(
+                interaction,
+                callback="PayoutModal.on_submit",
+                guild_id=getattr(interaction, "guild_id", None),
+                split_id=None,
+                code=None,
+            )
 
 
 class PayoutCorrectionModal(discord.ui.Modal):
@@ -1086,13 +1122,21 @@ class PayoutCorrectionModal(discord.ui.Modal):
         self.add_item(self.caller_percent)
 
     async def on_submit(self, interaction: discord.Interaction) -> None:
-        await self.cog.correct_payout_values_interaction(
-            interaction,
-            self.guild_id,
-            self.payout_code,
-            self,
-            source_message=self.source_message,
-        )
+        try:
+            await self.cog.correct_payout_values_interaction(
+                interaction,
+                self.guild_id,
+                self.payout_code,
+                self,
+                source_message=self.source_message,
+            )
+        except Exception:
+            await split_error_response(
+                interaction,
+                callback="PayoutCorrectionModal.on_submit",
+                guild_id=self.guild_id,
+                code=self.payout_code,
+            )
 
 class EditCompositionModal(discord.ui.Modal, title="Modificar composicion"):
     roles = discord.ui.TextInput(
@@ -1907,6 +1951,7 @@ class ActivityView(discord.ui.View):
             self.add_control_button("Eliminar", "delete", discord.ButtonStyle.danger, 1, False)
         elif status == ACTIVITY_PAYOUT_CREATED:
             self.add_control_button("Ver asistencia", "verify", discord.ButtonStyle.secondary, 0, False, "🔍")
+            self.add_control_button("Volver a splitear", "payout", discord.ButtonStyle.primary, 0, False, "💰")
             self.add_control_button("Liquidación rápida", "quick_liquidation", discord.ButtonStyle.danger, 0, False, "⚡")
             self.add_control_button("Eliminar", "delete", discord.ButtonStyle.danger, 1, False)
 
@@ -2460,14 +2505,22 @@ class PayoutPercentModal(discord.ui.Modal, title="Editar participacion"):
         self.source_message = source_message
 
     async def on_submit(self, interaction: discord.Interaction) -> None:
-        await self.cog.edit_payout_percent_interaction(
-            interaction,
-            self.guild_id,
-            self.payout_code,
-            str(self.user.value),
-            str(self.percent.value),
-            source_message=self.source_message,
-        )
+        try:
+            await self.cog.edit_payout_percent_interaction(
+                interaction,
+                self.guild_id,
+                self.payout_code,
+                str(self.user.value),
+                str(self.percent.value),
+                source_message=self.source_message,
+            )
+        except Exception:
+            await split_error_response(
+                interaction,
+                callback="PayoutPercentModal.on_submit",
+                guild_id=self.guild_id,
+                code=self.payout_code,
+            )
 
 
 class PayoutManualUserIdModal(discord.ui.Modal, title="Agregar participante por ID"):
@@ -2493,19 +2546,27 @@ class PayoutManualUserIdModal(discord.ui.Modal, title="Agregar participante por 
         self.add_item(self.user_id_input)
 
     async def on_submit(self, interaction: discord.Interaction) -> None:
-        raw = str(self.user_id_input.value).strip()
-        if not raw.isdigit():
-            await private_response(interaction, "El ID de Discord debe contener solamente numeros.")
-            return
-        await self.cog.add_payout_member_interaction(
-            interaction,
-            self.guild_id,
-            self.payout_code,
-            int(raw),
-            percent=100,
-            source_message=self.source_message,
-            addition_method="ID",
-        )
+        try:
+            raw = str(self.user_id_input.value).strip()
+            if not raw.isdigit():
+                await private_response(interaction, "El ID de Discord debe contener solamente numeros.")
+                return
+            await self.cog.add_payout_member_interaction(
+                interaction,
+                self.guild_id,
+                self.payout_code,
+                int(raw),
+                percent=100,
+                source_message=self.source_message,
+                addition_method="ID",
+            )
+        except Exception:
+            await split_error_response(
+                interaction,
+                callback="PayoutManualUserIdModal.on_submit",
+                guild_id=self.guild_id,
+                code=self.payout_code,
+            )
 
 
 class PayoutAddUserSelect(discord.ui.UserSelect):
@@ -2529,15 +2590,23 @@ class PayoutAddUserSelect(discord.ui.UserSelect):
         self.source_message = source_message
 
     async def callback(self, interaction: discord.Interaction) -> None:
-        await self.cog.add_payout_member_interaction(
-            interaction,
-            self.guild_id,
-            self.payout_code,
-            int(self.values[0].id),
-            percent=100,
-            source_message=self.source_message,
-            addition_method="selector",
-        )
+        try:
+            await self.cog.add_payout_member_interaction(
+                interaction,
+                self.guild_id,
+                self.payout_code,
+                int(self.values[0].id),
+                percent=100,
+                source_message=self.source_message,
+                addition_method="selector",
+            )
+        except Exception:
+            await split_error_response(
+                interaction,
+                callback="PayoutAddUserSelect.callback",
+                guild_id=self.guild_id,
+                code=self.payout_code,
+            )
 
 
 class PayoutRemoveUserSelect(discord.ui.Select):
@@ -2563,13 +2632,21 @@ class PayoutRemoveUserSelect(discord.ui.Select):
         self.source_message = source_message
 
     async def callback(self, interaction: discord.Interaction) -> None:
-        await self.cog.remove_payout_user_interaction(
-            interaction,
-            self.guild_id,
-            self.payout_code,
-            int(self.values[0]),
-            source_message=self.source_message,
-        )
+        try:
+            await self.cog.remove_payout_user_interaction(
+                interaction,
+                self.guild_id,
+                self.payout_code,
+                int(self.values[0]),
+                source_message=self.source_message,
+            )
+        except Exception:
+            await split_error_response(
+                interaction,
+                callback="PayoutRemoveUserSelect.callback",
+                guild_id=self.guild_id,
+                code=self.payout_code,
+            )
 
 
 class PayoutUserSelectView(discord.ui.View):
@@ -2634,6 +2711,17 @@ class PayoutEditView(discord.ui.View):
         self.guild_id = guild_id
         self.payout_code = payout_code
 
+    async def _handle_error(self, interaction: discord.Interaction, callback: str) -> None:
+        payout = self.cog.get_payout_by_code(self.guild_id, self.payout_code)
+        split_id = int(payout["id"]) if payout is not None else None
+        await split_error_response(
+            interaction,
+            callback=callback,
+            guild_id=self.guild_id,
+            split_id=split_id,
+            code=self.payout_code,
+        )
+
     @discord.ui.button(
         label="Ver lista",
         emoji="📋",
@@ -2642,7 +2730,10 @@ class PayoutEditView(discord.ui.View):
         row=0,
     )
     async def view_list(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
-        await self.cog.send_payout_list_interaction(interaction, self.guild_id, self.payout_code)
+        try:
+            await self.cog.send_payout_list_interaction(interaction, self.guild_id, self.payout_code)
+        except Exception:
+            await self._handle_error(interaction, "PayoutEditView.view_list")
 
     @discord.ui.button(
         label="Editar %",
@@ -2652,24 +2743,27 @@ class PayoutEditView(discord.ui.View):
         row=0,
     )
     async def edit_percent(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
-        payout = self.cog.get_payout_by_code(self.guild_id, self.payout_code)
-        if payout is None:
-            await private_response(interaction, "No encontre ese Split.")
-            return
-        if not self.cog.is_editable_payout(payout):
-            await private_response(interaction, "Solo se pueden modificar Splits preliminares.")
-            return
-        if not self.cog.can_manage_payout_interaction(interaction, payout):
-            await private_response(interaction, "Solo el caller del Split o un admin puede editarlo.")
-            return
-        await interaction.response.send_modal(
-            PayoutPercentModal(
-                self.cog,
-                self.guild_id,
-                self.payout_code,
-                source_message=interaction.message,
+        try:
+            payout = self.cog.get_payout_by_code(self.guild_id, self.payout_code)
+            if payout is None:
+                await private_response(interaction, "No encontre ese Split.")
+                return
+            if not self.cog.is_editable_payout(payout):
+                await private_response(interaction, "Solo se pueden modificar Splits preliminares.")
+                return
+            if not self.cog.can_manage_payout_interaction(interaction, payout):
+                await private_response(interaction, "Solo el caller del Split o un admin puede editarlo.")
+                return
+            await interaction.response.send_modal(
+                PayoutPercentModal(
+                    self.cog,
+                    self.guild_id,
+                    self.payout_code,
+                    source_message=interaction.message,
+                )
             )
-        )
+        except Exception:
+            await self._handle_error(interaction, "PayoutEditView.edit_percent")
 
     @discord.ui.button(
         label="Corregir Split",
@@ -2679,12 +2773,15 @@ class PayoutEditView(discord.ui.View):
         row=0,
     )
     async def correct_split(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
-        await self.cog.prompt_correct_payout_interaction(
-            interaction,
-            self.guild_id,
-            self.payout_code,
-            source_message=interaction.message,
-        )
+        try:
+            await self.cog.prompt_correct_payout_interaction(
+                interaction,
+                self.guild_id,
+                self.payout_code,
+                source_message=interaction.message,
+            )
+        except Exception:
+            await self._handle_error(interaction, "PayoutEditView.correct_split")
 
     @discord.ui.button(
         label="Añadir Usuario",
@@ -2694,12 +2791,15 @@ class PayoutEditView(discord.ui.View):
         row=1,
     )
     async def add_user(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
-        await self.cog.prompt_add_payout_user_interaction(
-            interaction,
-            self.guild_id,
-            self.payout_code,
-            source_message=interaction.message,
-        )
+        try:
+            await self.cog.prompt_add_payout_user_interaction(
+                interaction,
+                self.guild_id,
+                self.payout_code,
+                source_message=interaction.message,
+            )
+        except Exception:
+            await self._handle_error(interaction, "PayoutEditView.add_user")
 
     @discord.ui.button(
         label="Eliminar Usuario",
@@ -2709,12 +2809,15 @@ class PayoutEditView(discord.ui.View):
         row=1,
     )
     async def remove_user(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
-        await self.cog.prompt_remove_payout_user_interaction(
-            interaction,
-            self.guild_id,
-            self.payout_code,
-            source_message=interaction.message,
-        )
+        try:
+            await self.cog.prompt_remove_payout_user_interaction(
+                interaction,
+                self.guild_id,
+                self.payout_code,
+                source_message=interaction.message,
+            )
+        except Exception:
+            await self._handle_error(interaction, "PayoutEditView.remove_user")
 
     @discord.ui.button(
         label="Enviar a revision",
@@ -2724,11 +2827,14 @@ class PayoutEditView(discord.ui.View):
         row=2,
     )
     async def send_review(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
-        await self.cog.send_payout_to_review_interaction(
-            interaction,
-            self.guild_id,
-            self.payout_code,
-        )
+        try:
+            await self.cog.send_payout_to_review_interaction(
+                interaction,
+                self.guild_id,
+                self.payout_code,
+            )
+        except Exception:
+            await self._handle_error(interaction, "PayoutEditView.send_review")
 
 class Activities(commands.Cog):
     def __init__(self, bot: commands.Bot):
@@ -6083,13 +6189,19 @@ class Activities(commands.Cog):
                 return
             await self.prompt_activity_edit_menu(interaction, activity_id)
             return
-        if not await self.require_activity_manager(interaction, activity, action):
-            return
         if action == "payout":
             if is_mandatory_activity(activity):
                 await private_response(interaction, "El Ping Mandatory no usa Split. Registra el Botin.")
                 return
+            if not self.can_manage_split_activity_interaction(interaction, activity):
+                await private_response(interaction, "Solo el caller del Split o un admin puede modificarlo.")
+                return
+            if activity["status"] not in {ACTIVITY_FINISHED, ACTIVITY_PAYOUT_CREATED}:
+                await private_response(interaction, "Solo se puede Splitear una actividad finalizada.")
+                return
             await interaction.response.send_modal(PayoutModal(self, activity_id))
+            return
+        if not await self.require_activity_manager(interaction, activity, action):
             return
         if action == "mandatory_loot":
             if not is_mandatory_activity(activity):
@@ -6911,6 +7023,7 @@ class Activities(commands.Cog):
         activity_id: int,
         modal: PayoutModal,
     ) -> None:
+        await defer_private_response(interaction)
         if interaction.guild is None:
             await private_response(interaction, "Esta accion solo esta disponible en un servidor.")
             return
@@ -6921,9 +7034,10 @@ class Activities(commands.Cog):
         if is_mandatory_activity(activity):
             await private_response(interaction, "El Ping Mandatory no usa Split. Registra el Botin.")
             return
-        if not await self.require_activity_manager(interaction, activity, "generar split"):
+        if not self.can_manage_split_activity_interaction(interaction, activity):
+            await private_response(interaction, "Solo el caller del Split o un admin puede modificarlo.")
             return
-        if activity["status"] != ACTIVITY_FINISHED:
+        if activity["status"] not in {ACTIVITY_FINISHED, ACTIVITY_PAYOUT_CREATED}:
             await private_response(interaction, "Solo se puede Splitear una actividad finalizada.")
             return
         try:
@@ -7062,6 +7176,11 @@ class Activities(commands.Cog):
         if interaction.guild is None or interaction.guild.id != guild_id:
             return False
         return int(payout["caller_id"]) == interaction.user.id or is_split_admin_subject(self.db, interaction)
+
+    def can_manage_split_activity_interaction(self, interaction: discord.Interaction, activity) -> bool:
+        if interaction.guild is None or int(activity["guild_id"]) != interaction.guild.id:
+            return False
+        return int(activity["caller_id"]) == interaction.user.id or is_split_admin_subject(self.db, interaction)
 
     def is_editable_payout(self, payout) -> bool:
         return payout["status"] in {PAYOUT_PENDING, PAYOUT_CORRECTION}
@@ -7256,6 +7375,7 @@ class Activities(commands.Cog):
         *,
         source_message=None,
     ) -> None:
+        await defer_private_response(interaction)
         payout = self.get_payout_by_code(guild_id, code)
         if payout is None:
             await private_response(interaction, "No encontre ese Split.")
@@ -7330,6 +7450,7 @@ class Activities(commands.Cog):
         *,
         source_message=None,
     ) -> None:
+        await defer_private_response(interaction)
         payout = self.get_payout_by_code(guild_id, code)
         if payout is None:
             await private_response(interaction, "No encontre ese Split.")
@@ -7415,6 +7536,7 @@ class Activities(commands.Cog):
         *,
         source_message=None,
     ) -> None:
+        await defer_private_response(interaction)
         payout = self.get_payout_by_code(guild_id, code)
         if payout is None:
             await private_response(interaction, "No encontre ese Split.")
@@ -7451,6 +7573,7 @@ class Activities(commands.Cog):
         source_message=None,
         addition_method: str = "selector",
     ) -> None:
+        await defer_private_response(interaction)
         payout = self.get_payout_by_code(guild_id, code)
         if payout is None:
             await private_response(interaction, "No encontre ese Split.")
@@ -7529,6 +7652,7 @@ class Activities(commands.Cog):
         *,
         source_message=None,
     ) -> None:
+        await defer_private_response(interaction)
         payout = self.get_payout_by_code(guild_id, code)
         if payout is None:
             await private_response(interaction, "No encontre ese Split.")
@@ -7569,6 +7693,7 @@ class Activities(commands.Cog):
         *,
         source_message=None,
     ) -> None:
+        await defer_private_response(interaction)
         payout = self.get_payout_by_code(guild_id, code)
         if payout is None:
             await private_response(interaction, "No encontre ese Split.")
@@ -7647,12 +7772,12 @@ class Activities(commands.Cog):
         guild_id: int,
         code: str,
     ) -> None:
+        await defer_private_response(interaction)
         payout = self.get_payout_by_code(guild_id, code)
         if payout is None:
             await private_response(interaction, "No encontre ese Split.")
             return
-        is_admin = interaction.guild is not None and is_admin_subject(self.db, interaction)
-        if int(payout["caller_id"]) != interaction.user.id and not is_admin:
+        if not self.can_manage_payout_interaction(interaction, payout):
             await private_response(interaction, "Solo el caller del Split o un admin puede enviarlo a revision.")
             return
         if payout["status"] != PAYOUT_PENDING:
