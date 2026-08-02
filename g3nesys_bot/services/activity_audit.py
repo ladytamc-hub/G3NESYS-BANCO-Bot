@@ -26,7 +26,7 @@ AUDIT_STATUS_LABELS = {
 }
 REPORT_MAX_ATTACHMENT_BYTES = 24 * 1024 * 1024
 NameResolver = Callable[[int | None], str]
-_ACTIVITY_CODE_RE = re.compile(r"^ACT-(\d+)$", re.IGNORECASE)
+_ACTIVITY_CODE_RE = re.compile(r"^(ACT|MAND)-(\d+)$", re.IGNORECASE)
 _DIGITS_RE = re.compile(r"^\d+$")
 
 
@@ -137,7 +137,7 @@ def normalize_activity_code(raw: str | int | None) -> str | None:
         return f"ACT-{int(value):06d}"
     match = _ACTIVITY_CODE_RE.fullmatch(value)
     if match:
-        return f"ACT-{int(match.group(1)):06d}"
+        return f"{match.group(1).upper()}-{int(match.group(2)):06d}"
     return None
 
 
@@ -146,12 +146,19 @@ def activity_code_number(code: str | None) -> int | None:
     if normalized is None:
         return None
     match = _ACTIVITY_CODE_RE.fullmatch(normalized)
-    return int(match.group(1)) if match else None
+    return int(match.group(2)) if match else None
 
 
 def activity_in_audit_scope(code: str | None, *, start_number: int = ACTIVITY_AUDIT_START_NUMBER) -> bool:
-    number = activity_code_number(code)
-    return number is not None and number >= start_number
+    normalized = normalize_activity_code(code)
+    if normalized is None:
+        return False
+    match = _ACTIVITY_CODE_RE.fullmatch(normalized)
+    if match is None:
+        return False
+    if match.group(1).upper() == "MAND":
+        return True
+    return int(match.group(2)) >= start_number
 
 
 def movement_mentions_activity_code(text: str | None, code: str) -> bool:
@@ -260,7 +267,7 @@ def _fetch_fallback_movements(db: Database, guild_id: int):
         FROM movements
         WHERE guild_id = ?
           AND type = 'DEPOSITO'
-          AND description LIKE '%ACT-%'
+          AND (description LIKE '%ACT-%' OR description LIKE '%MAND-%')
         ORDER BY created_at ASC, id ASC
         """,
         (guild_id,),
@@ -290,8 +297,12 @@ def get_activity_audit_dataset(
         """
         SELECT *
         FROM activities
-        WHERE guild_id = ? AND UPPER(code) LIKE 'ACT-%'
-        ORDER BY CAST(SUBSTR(code, 5) AS INTEGER) ASC, id ASC
+        WHERE guild_id = ?
+          AND (UPPER(code) LIKE 'ACT-%' OR UPPER(code) LIKE 'MAND-%')
+        ORDER BY
+          CASE WHEN UPPER(code) LIKE 'MAND-%' THEN 0 ELSE 1 END,
+          CAST(SUBSTR(code, INSTR(code, '-') + 1) AS INTEGER) ASC,
+          id ASC
         """,
         (guild_id,),
     )

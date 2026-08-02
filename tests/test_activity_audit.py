@@ -222,6 +222,56 @@ class ActivityAuditTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(normalize_activity_code("ACT-000060"), "ACT-000060")
         self.assertEqual(normalize_activity_code("000060"), "ACT-000060")
         self.assertEqual(normalize_activity_code("60"), "ACT-000060")
+        self.assertEqual(normalize_activity_code("MAND-000013"), "MAND-000013")
+        self.assertEqual(normalize_activity_code("mand-13"), "MAND-000013")
+
+    def test_act_sequence_ignores_historical_mand_counter(self):
+        self.db.execute(
+            "INSERT INTO id_counters (guild_id, prefix, last_value) VALUES (?, ?, ?)",
+            (10, "ACT", 144),
+        )
+        self.db.execute(
+            "INSERT INTO id_counters (guild_id, prefix, last_value) VALUES (?, ?, ?)",
+            (10, "MAND", 13),
+        )
+
+        self.assertEqual(self.db.next_code(10, "ACT"), "ACT-000145")
+        self.assertEqual(self.db.next_code(10, "ACT"), "ACT-000146")
+        mand_counter = self.db.fetch_one(
+            "SELECT last_value FROM id_counters WHERE guild_id = ? AND prefix = ?",
+            (10, "MAND"),
+        )
+        self.assertEqual(int(mand_counter["last_value"]), 13)
+
+    def test_audit_keeps_historical_mand_codes_searchable_and_reported(self):
+        self.create_activity(
+            "MAND-000013",
+            pinged_by_id=106,
+            activity_type=ACTIVITY_TYPE_MANDATORY,
+        )
+        self.create_fallback_deposit(
+            "MAND-000013",
+            amount=400,
+            movement_code="MOV-MAND13",
+            user_id=303,
+        )
+
+        dataset = get_activity_audit_dataset(self.db, 10)
+        record = dataset.get_record("MAND-000013")
+        movements = dataset.movements_for("MAND-000013")
+
+        self.assertIsNotNone(record)
+        self.assertEqual(record.code, "MAND-000013")
+        self.assertEqual(record.activity_type, ACTIVITY_TYPE_MANDATORY)
+        self.assertEqual(record.audit_status, AUDIT_NO_SPLIT)
+        self.assertEqual(len(movements), 1)
+        self.assertTrue(movement_mentions_activity_code("Pago MAND-000013", "MAND-000013"))
+        self.assertFalse(movement_mentions_activity_code("Pago MAND-0000130", "MAND-000013"))
+
+        files = build_activity_audit_report_files(self.db, 10, today="2026-08-02")
+        with zipfile.ZipFile(BytesIO(files[0].data)) as archive:
+            activities_csv = archive.read("actividades_desde_ACT-000050.csv").decode("utf-8-sig")
+        self.assertIn("MAND-000013", activities_csv)
 
     def test_creator_outside_server_label_keeps_id(self):
         self.seed_dataset()

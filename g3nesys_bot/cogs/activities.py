@@ -4234,7 +4234,7 @@ class Activities(commands.Cog):
             )
             activity_id = int(draft_id)
         else:
-            code = self.db.next_code(interaction.guild.id, "MAND")
+            code = self.db.next_code(interaction.guild.id, "ACT")
             activity_id = self.db.execute(
                 """
                 INSERT INTO activities (

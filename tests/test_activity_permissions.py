@@ -4,7 +4,7 @@ import unittest
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from g3nesys_bot.constants import ACTIVITY_OPEN
+from g3nesys_bot.constants import ACTIVITY_OPEN, ACTIVITY_TYPE_MANDATORY
 from g3nesys_bot.cogs.activities import Activities
 from g3nesys_bot.database import Database, SCHEMA
 
@@ -179,5 +179,63 @@ class ActivityPermissionTests(unittest.IsolatedAsyncioTestCase):
             self.assertFalse(self.cog.can_delete_activity_ping(interaction, activity))
 
 
+    async def test_new_regular_and_mandatory_drafts_use_shared_act_sequence(self):
+        field = lambda value: SimpleNamespace(value=value)
+        publish_channel = SimpleNamespace(id=900, send=lambda *args, **kwargs: None)
+        self.guild.get_channel = lambda channel_id: publish_channel if channel_id == 900 else None
+        self.db.set_setting(10, "channel_pings_id", "900")
+        self.db.execute(
+            "INSERT INTO id_counters (guild_id, prefix, last_value) VALUES (?, ?, ?)",
+            (10, "ACT", 144),
+        )
+        self.db.execute(
+            "INSERT INTO id_counters (guild_id, prefix, last_value) VALUES (?, ?, ?)",
+            (10, "MAND", 13),
+        )
+
+        async def no_preview(interaction, activity_id):
+            return None
+
+        self.cog.send_ping_preview = no_preview
+        interaction = FakeInteraction(self.guild, 100)
+        regular_modal = SimpleNamespace(
+            template_id=None,
+            draft_id=None,
+            publish_channel_id=None,
+            roles=field("falce | 1"),
+            activity_name=field("CTA regular"),
+            horario=field("20:00"),
+            notes=field(""),
+            voice_channel=field("700"),
+        )
+        mandatory_modal = SimpleNamespace(
+            draft_id=None,
+            publish_channel_id=None,
+            voice_channel=field("700"),
+            image_url=field(""),
+            description=field("CTA sin split"),
+            horario=field("21:00"),
+        )
+
+        with patch("g3nesys_bot.cogs.activities.is_caller_panel_subject", return_value=True), \
+             patch("g3nesys_bot.cogs.activities.is_official_caller_subject", return_value=True), \
+             patch("g3nesys_bot.cogs.activities.is_admin_subject", return_value=False), \
+             patch("g3nesys_bot.cogs.activities.resolve_voice_channel", return_value=SimpleNamespace(id=700)):
+            await self.cog.save_activity_draft_from_modal(interaction, regular_modal)
+            await self.cog.save_mandatory_draft_from_modal(interaction, mandatory_modal)
+
+        activities = self.db.fetch_all(
+            "SELECT code, activity_type FROM activities WHERE guild_id = ? ORDER BY id ASC",
+            (10,),
+        )
+        self.assertEqual([row["code"] for row in activities], ["ACT-000145", "ACT-000146"])
+        self.assertEqual(activities[1]["activity_type"], ACTIVITY_TYPE_MANDATORY)
+        self.assertEqual(
+            self.db.fetch_one(
+                "SELECT last_value FROM id_counters WHERE guild_id = ? AND prefix = ?",
+                (10, "MAND"),
+            )["last_value"],
+            13,
+        )
 if __name__ == "__main__":
     unittest.main()
