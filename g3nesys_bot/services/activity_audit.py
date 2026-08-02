@@ -60,6 +60,10 @@ class ActivityAuditRecord:
     movement_count: int
     first_deposit_at: str | None
     last_deposit_at: str | None
+    channel_id: int | None = None
+    message_id: int | None = None
+    thread_id: int | None = None
+    thread_panel_message_id: int | None = None
     payout_ids: tuple[int, ...] = field(default_factory=tuple)
     observations: str = ""
 
@@ -409,6 +413,10 @@ def get_activity_audit_dataset(
             movement_count=len(movements),
             first_deposit_at=min(dates) if dates else None,
             last_deposit_at=max(dates) if dates else None,
+            channel_id=_as_int(activity["channel_id"]),
+            message_id=_as_int(activity["message_id"]),
+            thread_id=_as_int(activity["thread_id"]),
+            thread_panel_message_id=_as_int(activity["thread_panel_message_id"]),
             payout_ids=tuple(payout_ids_by_activity.get(activity_id, [])),
             observations=observations,
         )

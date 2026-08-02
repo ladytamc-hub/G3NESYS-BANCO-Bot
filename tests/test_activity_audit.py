@@ -5,7 +5,17 @@ import zipfile
 from io import BytesIO
 from types import SimpleNamespace
 
-from g3nesys_bot.cogs.admin import ActivityAuditHomeView, AdminPanelView, activity_audit_user_label
+from g3nesys_bot.cogs.admin import (
+    ActivityAuditDetailsView,
+    ActivityAuditHomeView,
+    ActivityAuditRecordView,
+    AdminPanelView,
+    build_activity_audit_details_embed,
+    activity_audit_channel_text,
+    activity_audit_ping_url,
+    activity_audit_thread_url,
+    activity_audit_user_label,
+)
 from g3nesys_bot.constants import (
     ACTIVITY_CANCELLED,
     ACTIVITY_FINISHED,
@@ -81,15 +91,24 @@ class ActivityAuditTests(unittest.IsolatedAsyncioTestCase):
         status=ACTIVITY_FINISHED,
         activity_type="regular",
         created_at="2026-08-01T00:00:00+00:00",
+        channel_id=None,
+        message_id=None,
+        thread_id=None,
+        thread_panel_message_id=None,
     ):
         return self.db.execute(
             """
             INSERT INTO activities (
                 code, guild_id, name, caller_id, pinged_by_id, horario,
-                status, created_at, activity_type
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                status, created_at, activity_type, channel_id, message_id,
+                thread_id, thread_panel_message_id
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
-            (code, 10, f"Actividad {code}", caller_id, pinged_by_id, "20:00", status, created_at, activity_type),
+            (
+                code, 10, f"Actividad {code}", caller_id, pinged_by_id, "20:00",
+                status, created_at, activity_type, channel_id, message_id,
+                thread_id, thread_panel_message_id,
+            ),
         )
 
     def create_payout_with_deposit(self, activity_id, *, amount=1000, user_id=300, caller_id=200):
@@ -143,8 +162,8 @@ class ActivityAuditTests(unittest.IsolatedAsyncioTestCase):
 
     def seed_dataset(self):
         self.create_activity("ACT-000049", pinged_by_id=49)
-        pending_id = self.create_activity("ACT-000050", pinged_by_id=100, caller_id=100)
-        split_id = self.create_activity("ACT-000060", pinged_by_id=101, caller_id=202)
+        pending_id = self.create_activity("ACT-000050", pinged_by_id=100, caller_id=100, channel_id=5000, message_id=6000, thread_id=7000, thread_panel_message_id=8000)
+        split_id = self.create_activity("ACT-000060", pinged_by_id=101, caller_id=202, channel_id=5001, message_id=6001)
         self.create_payout_with_deposit(split_id, amount=1000, user_id=300, caller_id=202)
         self.db.execute(
             """
@@ -158,7 +177,7 @@ class ActivityAuditTests(unittest.IsolatedAsyncioTestCase):
         )
         self.create_activity("ACT-000061", pinged_by_id=102, activity_type=ACTIVITY_TYPE_MANDATORY)
         self.create_activity("ACT-000062", pinged_by_id=103, status=ACTIVITY_CANCELLED)
-        fallback_id = self.create_activity("ACT-000063", pinged_by_id=104, caller_id=205)
+        fallback_id = self.create_activity("ACT-000063", pinged_by_id=104, caller_id=205, channel_id=9999)
         self.create_fallback_deposit("ACT-000063", amount=700, movement_code="MOV-FB63", user_id=302)
         outside_id = self.create_activity("ACT-000064", pinged_by_id=999, caller_id=205, status=ACTIVITY_OPEN)
         return pending_id, split_id, fallback_id, outside_id
@@ -212,6 +231,69 @@ class ActivityAuditTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(record.pinged_by_id, 999)
         self.assertIn("Usuario fuera del servidor", activity_audit_user_label(self.guild, record.pinged_by_id))
         self.assertIn("999", activity_audit_user_label(self.guild, record.pinged_by_id))
+
+
+    def test_activity_navigation_links_use_saved_ids(self):
+        self.seed_dataset()
+        dataset = get_activity_audit_dataset(self.db, 10)
+        record = dataset.get_record("ACT-000050")
+
+        self.assertEqual(
+            activity_audit_ping_url(record),
+            "https://discord.com/channels/10/5000/6000",
+        )
+        self.assertEqual(
+            activity_audit_thread_url(record),
+            "https://discord.com/channels/10/7000/8000",
+        )
+        view = ActivityAuditRecordView(self.cog, record.code, has_details=record.has_split_details, record=record)
+        labels = [item.label for item in view.children if getattr(item, "label", None)]
+        urls = [getattr(item, "url", None) for item in view.children]
+
+        self.assertIn("Abrir ping", labels)
+        self.assertIn("Abrir hilo", labels)
+        self.assertIn("https://discord.com/channels/10/5000/6000", urls)
+        self.assertIn("https://discord.com/channels/10/7000/8000", urls)
+
+    def test_activity_without_thread_has_no_thread_button(self):
+        self.seed_dataset()
+        dataset = get_activity_audit_dataset(self.db, 10)
+        record = dataset.get_record("ACT-000060")
+        view = ActivityAuditRecordView(self.cog, record.code, has_details=record.has_split_details, record=record)
+        labels = [item.label for item in view.children if getattr(item, "label", None)]
+
+        self.assertIn("Abrir ping", labels)
+        self.assertNotIn("Abrir hilo", labels)
+
+    def test_historical_activity_without_message_has_no_ping_button(self):
+        self.seed_dataset()
+        dataset = get_activity_audit_dataset(self.db, 10)
+        record = dataset.get_record("ACT-000063")
+        view = ActivityAuditRecordView(self.cog, record.code, has_details=record.has_split_details, record=record)
+        labels = [item.label for item in view.children if getattr(item, "label", None)]
+
+        self.assertIsNone(activity_audit_ping_url(record))
+        self.assertNotIn("Abrir ping", labels)
+        self.assertIn("Canal no disponible", activity_audit_channel_text(self.guild, record.channel_id))
+        self.assertIn("9999", activity_audit_channel_text(self.guild, record.channel_id))
+
+    def test_details_view_keeps_pagination_and_adds_links_without_changing_totals(self):
+        self.seed_dataset()
+        dataset = get_activity_audit_dataset(self.db, 10)
+        record = dataset.get_record("ACT-000060")
+        before_total = record.total_deposited
+        view = ActivityAuditDetailsView(self.cog, record.code, 0, back_mode="split", back_page=0, record=record)
+        labels = [item.label for item in view.children if getattr(item, "label", None)]
+        after = get_activity_audit_dataset(self.db, 10).get_record("ACT-000060")
+        embed, _ = build_activity_audit_details_embed(self.cog, self.guild, record.code, 0)
+        fields = {field.name: field.value for field in embed.fields}
+
+        self.assertIn("Anterior", labels)
+        self.assertIn("Siguiente", labels)
+        self.assertIn("Abrir ping", labels)
+        self.assertIn("Publicaci\u00f3n", fields)
+        self.assertIn("Publicado en", fields["Publicaci\u00f3n"])
+        self.assertEqual(before_total, after.total_deposited)
 
     def test_report_zip_contains_activity_and_detail_csv(self):
         self.seed_dataset()

@@ -3246,8 +3246,8 @@ def activity_audit_user_label(guild: discord.Guild | None, user_id: int | None) 
         return "Sin registro"
     member = guild.get_member(int(user_id)) if guild is not None else None
     if member is None:
-        return f"Usuario fuera del servidor ? ID {int(user_id)}"
-    return f"{member.mention} ? {member.display_name}"
+        return f"Usuario fuera del servidor \u00b7 ID {int(user_id)}"
+    return f"{member.mention} \u00b7 {member.display_name}"
 
 
 def activity_audit_plain_user_name(guild: discord.Guild | None, user_id: int | None) -> str:
@@ -3261,7 +3261,69 @@ def activity_audit_plain_user_name(guild: discord.Guild | None, user_id: int | N
 
 def activity_audit_clip(value: str, limit: int) -> str:
     text = str(value or "")
-    return text if len(text) <= limit else text[: max(0, limit - 1)] + "?"
+    return text if len(text) <= limit else text[: max(0, limit - 1)] + "\u2026"
+
+
+def activity_audit_channel_text(guild: discord.Guild | None, channel_id: int | None) -> str:
+    if channel_id is None:
+        return "Publicado en: Sin canal registrado"
+    get_channel = getattr(guild, "get_channel", None) if guild is not None else None
+    channel = get_channel(int(channel_id)) if callable(get_channel) else None
+    if channel is None:
+        return f"Publicado en: Canal no disponible \u00b7 ID {int(channel_id)}"
+    mention = getattr(channel, "mention", None)
+    if mention:
+        return f"Publicado en: {mention}"
+    name = getattr(channel, "name", None)
+    return f"Publicado en: #{name}" if name else f"Publicado en: Canal ID {int(channel_id)}"
+
+
+def activity_audit_ping_url(record: ActivityAuditRecord) -> str | None:
+    if record.guild_id and record.channel_id and record.message_id:
+        return f"https://discord.com/channels/{record.guild_id}/{record.channel_id}/{record.message_id}"
+    return None
+
+
+def activity_audit_thread_url(record: ActivityAuditRecord) -> str | None:
+    if not (record.guild_id and record.thread_id):
+        return None
+    if record.thread_panel_message_id:
+        return f"https://discord.com/channels/{record.guild_id}/{record.thread_id}/{record.thread_panel_message_id}"
+    return f"https://discord.com/channels/{record.guild_id}/{record.thread_id}"
+
+
+def activity_audit_publication_text(guild: discord.Guild | None, record: ActivityAuditRecord) -> str:
+    lines = [activity_audit_channel_text(guild, record.channel_id)]
+    if activity_audit_ping_url(record) is None:
+        lines.append("Enlace al ping no disponible para esta actividad hist\u00f3rica")
+    return "\n".join(lines)
+
+
+def add_activity_audit_link_buttons(view: discord.ui.View, record: ActivityAuditRecord | None, *, row: int) -> None:
+    if record is None:
+        return
+    ping_url = activity_audit_ping_url(record)
+    if ping_url is not None:
+        view.add_item(
+            discord.ui.Button(
+                label="Abrir ping",
+                emoji="\U0001f517",
+                style=discord.ButtonStyle.link,
+                url=ping_url,
+                row=row,
+            )
+        )
+    thread_url = activity_audit_thread_url(record)
+    if thread_url is not None:
+        view.add_item(
+            discord.ui.Button(
+                label="Abrir hilo",
+                emoji="\U0001f9f5",
+                style=discord.ButtonStyle.link,
+                url=thread_url,
+                row=row,
+            )
+        )
 
 
 async def edit_activity_audit_message(
@@ -3368,6 +3430,7 @@ def build_activity_audit_record_embed(cog: "Admin", guild: discord.Guild, record
         elapsed = pending_days(record.created_at)
         embed.add_field(name="Tiempo pendiente", value=f"{elapsed if elapsed is not None else 'N/D'} días", inline=True)
     embed.add_field(name="Observaciones", value=record.observations or "Sin observaciones", inline=False)
+    embed.add_field(name="Publicaci\u00f3n", value=activity_audit_publication_text(guild, record), inline=False)
     if not record.has_split_details:
         embed.set_footer(text="Esta actividad no tiene depósitos asociados.")
     return embed
@@ -3407,6 +3470,7 @@ def build_activity_audit_details_embed(
     embed.add_field(name="Total movimientos", value=str(len(movements)), inline=True)
     embed.add_field(name="Primer depósito", value=activity_audit_short_date(record.first_deposit_at), inline=True)
     embed.add_field(name="Último depósito", value=activity_audit_short_date(record.last_deposit_at), inline=True)
+    embed.add_field(name="Publicaci\u00f3n", value=activity_audit_publication_text(guild, record), inline=False)
     embed.set_footer(text=f"Página {page + 1} de {total_pages}")
     return embed, total_pages
 
@@ -3435,7 +3499,7 @@ class ActivityAuditSearchModal(discord.ui.Modal, title="Buscar actividad"):
             interaction,
             f"Resultado de búsqueda `{code}`:",
             embed=build_activity_audit_record_embed(self.cog, interaction.guild, record),
-            view=ActivityAuditRecordView(self.cog, code, has_details=record.has_split_details),
+            view=ActivityAuditRecordView(self.cog, code, has_details=record.has_split_details, record=record),
         )
 
 
@@ -3538,9 +3602,12 @@ class ActivityAuditDetailButton(discord.ui.Button):
         self.page = page
 
     async def callback(self, interaction: discord.Interaction) -> None:
-        view = ActivityAuditDetailsView(self.cog, self.code, 0, back_mode=self.mode, back_page=self.page)
-        if not await view.require_admin(interaction):
+        gate = ActivityAuditBaseView(self.cog)
+        if not await gate.require_admin(interaction):
             return
+        dataset = get_activity_audit_dataset(self.cog.db, interaction.guild.id)
+        record = dataset.get_record(self.code)
+        view = ActivityAuditDetailsView(self.cog, self.code, 0, back_mode=self.mode, back_page=self.page, record=record)
         embed, _ = build_activity_audit_details_embed(self.cog, interaction.guild, self.code, 0)
         await edit_activity_audit_message(interaction, content=f"Detalles del split `{self.code}`:", embed=embed, view=view)
 
@@ -3643,11 +3710,19 @@ class ActivityAuditBackHomeButton(discord.ui.Button):
 
 
 class ActivityAuditRecordView(ActivityAuditBaseView):
-    def __init__(self, cog: "Admin", code: str, *, has_details: bool = True):
+    def __init__(
+        self,
+        cog: "Admin",
+        code: str,
+        *,
+        has_details: bool = True,
+        record: ActivityAuditRecord | None = None,
+    ):
         super().__init__(cog)
         self.code = normalize_activity_code(code) or code
         if has_details:
             self.add_item(ActivityAuditRecordDetailsButton(cog, self.code))
+        add_activity_audit_link_buttons(self, record, row=1)
         self.add_item(ActivityAuditBackHomeButton(cog))
 
 
@@ -3658,8 +3733,8 @@ class ActivityAuditRecordDetailsButton(discord.ui.Button):
         self.code = code
 
     async def callback(self, interaction: discord.Interaction) -> None:
-        view = ActivityAuditDetailsView(self.cog, self.code, 0, back_mode="record", back_page=0)
-        if not await view.require_admin(interaction):
+        gate = ActivityAuditBaseView(self.cog)
+        if not await gate.require_admin(interaction):
             return
         dataset = get_activity_audit_dataset(self.cog.db, interaction.guild.id)
         record = dataset.get_record(self.code)
@@ -3667,16 +3742,28 @@ class ActivityAuditRecordDetailsButton(discord.ui.Button):
             await private_response(interaction, "⏳ Esta actividad no tiene depósitos asociados.")
             return
         embed, _ = build_activity_audit_details_embed(self.cog, interaction.guild, self.code, 0)
+        view = ActivityAuditDetailsView(self.cog, self.code, 0, back_mode="record", back_page=0, record=record)
         await edit_activity_audit_message(interaction, content=f"Detalles del split `{self.code}`:", embed=embed, view=view)
 
 
 class ActivityAuditDetailsView(ActivityAuditBaseView):
-    def __init__(self, cog: "Admin", code: str, page: int, *, back_mode: str, back_page: int):
+    def __init__(
+        self,
+        cog: "Admin",
+        code: str,
+        page: int,
+        *,
+        back_mode: str,
+        back_page: int,
+        record: ActivityAuditRecord | None = None,
+    ):
         super().__init__(cog)
         self.code = normalize_activity_code(code) or code
         self.page = page
         self.back_mode = back_mode
         self.back_page = back_page
+        self.record = record
+        add_activity_audit_link_buttons(self, record, row=3)
 
     async def _show_page(self, interaction: discord.Interaction, page: int) -> None:
         embed, _ = build_activity_audit_details_embed(self.cog, interaction.guild, self.code, page)
@@ -3684,7 +3771,7 @@ class ActivityAuditDetailsView(ActivityAuditBaseView):
             interaction,
             content=f"Detalles del split `{self.code}`:",
             embed=embed,
-            view=ActivityAuditDetailsView(self.cog, self.code, page, back_mode=self.back_mode, back_page=self.back_page),
+            view=ActivityAuditDetailsView(self.cog, self.code, page, back_mode=self.back_mode, back_page=self.back_page, record=self.record),
         )
 
     @discord.ui.button(label="Anterior", emoji="⬅️", style=discord.ButtonStyle.secondary, custom_id="g3n:admin:activity_audit:detail_prev", row=4)
@@ -3721,7 +3808,7 @@ class ActivityAuditDetailsView(ActivityAuditBaseView):
                 interaction,
                 content=f"Resultado de búsqueda `{self.code}`:",
                 embed=build_activity_audit_record_embed(self.cog, interaction.guild, record),
-                view=ActivityAuditRecordView(self.cog, self.code, has_details=record.has_split_details),
+                view=ActivityAuditRecordView(self.cog, self.code, has_details=record.has_split_details, record=record),
             )
             return
         embed, page_rows, _ = build_activity_audit_list_embed(self.cog, interaction.guild, self.back_mode, self.back_page)
