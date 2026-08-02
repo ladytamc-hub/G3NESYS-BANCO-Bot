@@ -30,7 +30,6 @@ from ..constants import (
     PINGS_PANEL_IMAGE,
 )
 from ..permissions import (
-    can_manage_activity,
     has_bank_access,
     is_admin_subject,
     is_split_admin_subject,
@@ -2853,6 +2852,81 @@ class Activities(commands.Cog):
     def activity_pinged_by_id(self, activity) -> int:
         return int(self.row_value(activity, "pinged_by_id", activity["caller_id"]) or activity["caller_id"])
 
+    def activity_caller_id(self, activity) -> int | None:
+        try:
+            return int(activity["caller_id"])
+        except (KeyError, TypeError, ValueError):
+            return None
+
+    def activity_creator_id(self, activity) -> int | None:
+        try:
+            return self.activity_pinged_by_id(activity)
+        except (KeyError, TypeError, ValueError):
+            return None
+
+    def is_activity_creator(self, interaction: discord.Interaction, activity) -> bool:
+        creator_id = self.activity_creator_id(activity)
+        return creator_id is not None and interaction.user.id == creator_id
+
+    def is_activity_assigned_caller(self, interaction: discord.Interaction, activity) -> bool:
+        caller_id = self.activity_caller_id(activity)
+        return caller_id is not None and interaction.user.id == caller_id
+
+    def is_activity_authorized_admin(self, interaction: discord.Interaction) -> bool:
+        return is_admin_subject(self.db, interaction) or is_split_admin_subject(self.db, interaction)
+
+    def can_manage_activity_operational(
+        self,
+        interaction: discord.Interaction,
+        activity,
+    ) -> bool:
+        if interaction.guild is None or int(activity["guild_id"]) != interaction.guild.id:
+            return False
+        return (
+            self.is_activity_creator(interaction, activity)
+            or self.is_activity_assigned_caller(interaction, activity)
+            or self.is_activity_authorized_admin(interaction)
+        )
+
+    def activity_permission_denial_reason(
+        self,
+        interaction: discord.Interaction,
+        activity,
+        *,
+        delete: bool = False,
+    ) -> str:
+        creator_id = self.activity_creator_id(activity)
+        caller_id = self.activity_caller_id(activity)
+        is_creator = creator_id is not None and interaction.user.id == creator_id
+        is_assigned_caller = caller_id is not None and interaction.user.id == caller_id
+        if delete:
+            if is_assigned_caller and not is_creator:
+                return "caller asignado sin permiso para eliminar"
+            return "accion reservada al creador o administrador"
+        if creator_id is None:
+            return "actividad sin creador valido"
+        if caller_id is None:
+            return "actividad sin caller valido"
+        return "usuario no es creador ni caller asignado"
+
+    def log_blocked_activity_attempt(
+        self,
+        interaction: discord.Interaction,
+        activity,
+        action: str,
+        reason: str,
+    ) -> None:
+        target_user_id = self.activity_caller_id(activity) or self.activity_creator_id(activity)
+        log_action(
+            self.db,
+            interaction.guild.id,
+            admin_id=interaction.user.id,
+            action="Intento bloqueado de administrar actividad",
+            system="Actividades",
+            affected_user_id=target_user_id,
+            observation=f"{activity['code']} - Accion: {action} - Motivo: {reason}",
+        )
+
     def is_admin_user(self, guild: discord.Guild, user_id: int) -> bool:
         member = guild.get_member(user_id)
         if member is None:
@@ -3881,26 +3955,15 @@ class Activities(commands.Cog):
         if interaction.guild is None or int(activity["guild_id"]) != interaction.guild.id:
             await private_response(interaction, "No encontre esta actividad en este servidor.")
             return False
-        if can_manage_activity(self.db, interaction, int(activity["caller_id"])):
+        if self.can_manage_activity_operational(interaction, activity):
             return True
 
-        is_foreign_activity = interaction.user.id != int(activity["caller_id"])
-        log_action(
-            self.db,
-            interaction.guild.id,
-            admin_id=interaction.user.id,
-            action="Intento bloqueado de administrar actividad",
-            system="Actividades",
-            affected_user_id=int(activity["caller_id"]),
-            observation=(
-                f"{activity['code']} · Accion: {action} · "
-                f"Motivo: {'caller no creador' if is_foreign_activity else 'sin permiso de caller'}"
-            ),
+        reason = self.activity_permission_denial_reason(interaction, activity)
+        self.log_blocked_activity_attempt(interaction, activity, action, reason)
+        await private_response(
+            interaction,
+            "Solo el creador, caller asignado o admin puede administrar esta actividad.",
         )
-        if is_foreign_activity:
-            await private_response(interaction, ACTIVITY_MANAGEMENT_DENIED_MESSAGE)
-            return False
-        await reject_caller_access(self.db, interaction, f"{action} actividades")
         return False
 
     async def require_activity_notes_editor(
@@ -3911,13 +3974,11 @@ class Activities(commands.Cog):
         if interaction.guild is None or int(activity["guild_id"]) != interaction.guild.id:
             await private_response(interaction, "No encontre esta actividad en este servidor.")
             return False
-        if is_admin_subject(self.db, interaction):
-            return True
-        if interaction.user.id == int(activity["caller_id"]):
+        if self.can_manage_activity_operational(interaction, activity):
             return True
         await private_response(
             interaction,
-            "Solo el caller creador o un admin puede editar las observaciones.",
+            "Solo el creador, caller asignado o admin puede editar las observaciones.",
         )
         return False
 
@@ -3927,7 +3988,7 @@ class Activities(commands.Cog):
         activity,
         action: str,
     ) -> None:
-        if interaction.user.id == int(activity["caller_id"]):
+        if self.is_activity_creator(interaction, activity) or self.is_activity_assigned_caller(interaction, activity):
             return
         if not is_admin_subject(self.db, interaction):
             return
@@ -3937,7 +3998,7 @@ class Activities(commands.Cog):
             admin_id=interaction.user.id,
             action=f"Administrar actividad como admin: {action}",
             system="Actividades",
-            affected_user_id=int(activity["caller_id"]),
+            affected_user_id=self.activity_caller_id(activity) or self.activity_creator_id(activity),
             observation=str(activity["code"]),
         )
 
@@ -5264,8 +5325,8 @@ class Activities(commands.Cog):
         if activity["status"] not in {ACTIVITY_OPEN, ACTIVITY_NOTICE, ACTIVITY_IN_PROGRESS}:
             await private_response(interaction, "La composicion ya no se puede modificar en este estado.")
             return
-        if not can_manage_activity(self.db, interaction, int(activity["caller_id"])):
-            await private_response(interaction, "Solo el caller creador o un admin puede modificar la composicion.")
+        if not await self.require_activity_manager(interaction, activity, "modificar composicion"):
+            await private_response(interaction, "Solo el creador, caller asignado o admin puede modificar la composicion.")
             return
         try:
             requested_roles = parse_role_lines(raw_roles)
@@ -5990,12 +6051,9 @@ class Activities(commands.Cog):
         return PayoutModal(self, activity_id)
 
     def can_delete_activity_ping(self, interaction: discord.Interaction, activity) -> bool:
-        if is_admin_subject(self.db, interaction):
-            return True
-        return (
-            interaction.user.id == int(activity["caller_id"])
-            and is_official_caller_subject(self.db, interaction)
-        )
+        if interaction.guild is None or int(activity["guild_id"]) != interaction.guild.id:
+            return False
+        return self.is_activity_creator(interaction, activity) or self.is_activity_authorized_admin(interaction)
 
     async def delete_or_disable_activity_thread_panel(self, activity, guild: discord.Guild) -> bool:
         if not activity["thread_id"] or not activity["thread_panel_message_id"]:
@@ -6062,7 +6120,9 @@ class Activities(commands.Cog):
             await private_response(interaction, "Este ping ya fue eliminado.")
             return
         if not self.can_delete_activity_ping(interaction, activity):
-            await private_response(interaction, "Solo el caller oficial creador o un admin puede eliminar este ping.")
+            reason = self.activity_permission_denial_reason(interaction, activity, delete=True)
+            self.log_blocked_activity_attempt(interaction, activity, "eliminar", reason)
+            await private_response(interaction, "Solo el creador del ping o un admin puede eliminar este ping.")
             return
         await interaction.response.defer(ephemeral=True)
         deleted_at = utc_now_iso()
@@ -7180,7 +7240,7 @@ class Activities(commands.Cog):
     def can_manage_split_activity_interaction(self, interaction: discord.Interaction, activity) -> bool:
         if interaction.guild is None or int(activity["guild_id"]) != interaction.guild.id:
             return False
-        return int(activity["caller_id"]) == interaction.user.id or is_split_admin_subject(self.db, interaction)
+        return self.can_manage_activity_operational(interaction, activity) or is_split_admin_subject(self.db, interaction)
 
     def is_editable_payout(self, payout) -> bool:
         return payout["status"] in {PAYOUT_PENDING, PAYOUT_CORRECTION}
