@@ -1,6 +1,7 @@
 ﻿from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
+import io
 from pathlib import Path
 
 import discord
@@ -35,6 +36,16 @@ from ..permissions import (
     is_caller_panel_subject,
     is_split_admin_subject,
     require_admin_context,
+)
+from ..services.activity_audit import (
+    AUDIT_NO_SPLIT,
+    AUDIT_PENDING,
+    AUDIT_SPLIT,
+    ActivityAuditRecord,
+    build_activity_audit_report_files,
+    get_activity_audit_dataset,
+    normalize_activity_code,
+    pending_days,
 )
 from ..services.audit import log_action
 from ..services.callers import (
@@ -72,7 +83,7 @@ from ..services.quick_liquidations import (
     recent_liquidatable_payouts,
 )
 from ..services.reports import create_admin_report
-from ..utils import format_amount, join_csv_ids, parse_channel_id, parse_int_amount, split_csv_ids, utc_now_iso
+from ..utils import format_amount, format_money, join_csv_ids, parse_channel_id, parse_int_amount, split_csv_ids, utc_now_iso
 
 
 NOTIFICATION_CHANNEL_CATEGORIES = (
@@ -3221,6 +3232,507 @@ class UserManagementAdminView(discord.ui.View):
         )
 
 
+
+ACTIVITY_AUDIT_PAGE_SIZE = 4
+ACTIVITY_AUDIT_DETAIL_PAGE_SIZE = 8
+
+
+def activity_audit_short_date(value: str | None) -> str:
+    return str(value or "Sin fecha")[:10]
+
+
+def activity_audit_user_label(guild: discord.Guild | None, user_id: int | None) -> str:
+    if user_id is None:
+        return "Sin registro"
+    member = guild.get_member(int(user_id)) if guild is not None else None
+    if member is None:
+        return f"Usuario fuera del servidor ? ID {int(user_id)}"
+    return f"{member.mention} ? {member.display_name}"
+
+
+def activity_audit_plain_user_name(guild: discord.Guild | None, user_id: int | None) -> str:
+    if user_id is None:
+        return ""
+    member = guild.get_member(int(user_id)) if guild is not None else None
+    if member is None:
+        return f"Usuario fuera del servidor ID {int(user_id)}"
+    return member.display_name
+
+
+def activity_audit_clip(value: str, limit: int) -> str:
+    text = str(value or "")
+    return text if len(text) <= limit else text[: max(0, limit - 1)] + "?"
+
+
+async def edit_activity_audit_message(
+    interaction: discord.Interaction,
+    *,
+    content: str,
+    embed: discord.Embed | None = None,
+    view: discord.ui.View | None = None,
+) -> None:
+    if interaction.response.is_done():
+        await interaction.followup.send(content, embed=embed, view=view, ephemeral=True)
+    else:
+        await interaction.response.edit_message(content=content, embed=embed, view=view)
+
+
+def build_activity_audit_home_embed(cog: "Admin", guild: discord.Guild) -> discord.Embed:
+    dataset = get_activity_audit_dataset(cog.db, guild.id)
+    summary = dataset.summary
+    embed = discord.Embed(
+        title="📊 Auditoría de actividades",
+        description="Consulta solo lectura de actividades desde `ACT-000050`.",
+        color=discord.Color.blurple(),
+    )
+    embed.add_field(name="Total actividades", value=str(summary.total), inline=True)
+    embed.add_field(name="Spliteadas", value=str(summary.split), inline=True)
+    embed.add_field(name="Pendientes", value=str(summary.pending), inline=True)
+    embed.add_field(name="Sin split por diseño", value=str(summary.no_split), inline=True)
+    embed.add_field(name="Canceladas", value=str(summary.cancelled), inline=True)
+    embed.add_field(name="Plata depositada", value=format_amount(summary.total_deposited), inline=True)
+    embed.add_field(name="Actividad más antigua", value=activity_audit_short_date(summary.oldest_activity_date), inline=True)
+    embed.add_field(name="Actividad más reciente", value=activity_audit_short_date(summary.newest_activity_date), inline=True)
+    return embed
+
+
+def build_activity_audit_list_embed(
+    cog: "Admin",
+    guild: discord.Guild,
+    mode: str,
+    page: int,
+) -> tuple[discord.Embed, list[ActivityAuditRecord], int]:
+    dataset = get_activity_audit_dataset(cog.db, guild.id)
+    rows = dataset.filter_records(mode)
+    title_by_mode = {
+        "all": "📋 Todas las actividades",
+        "split": "✅ Actividades spliteadas",
+        "pending": "⏳ Actividades pendientes",
+    }
+    empty_by_mode = {
+        "all": "No hay actividades desde ACT-000050.",
+        "split": "No hay actividades spliteadas desde ACT-000050.",
+        "pending": "No hay actividades pendientes desde ACT-000050.",
+    }
+    total_pages = max(1, (len(rows) + ACTIVITY_AUDIT_PAGE_SIZE - 1) // ACTIVITY_AUDIT_PAGE_SIZE)
+    page = min(max(page, 0), total_pages - 1)
+    start = page * ACTIVITY_AUDIT_PAGE_SIZE
+    page_rows = rows[start : start + ACTIVITY_AUDIT_PAGE_SIZE]
+    embed = discord.Embed(title=title_by_mode.get(mode, title_by_mode["all"]), color=discord.Color.teal())
+    if not page_rows:
+        embed.description = empty_by_mode.get(mode, empty_by_mode["all"])
+    else:
+        lines: list[str] = []
+        for index, record in enumerate(page_rows, start=start + 1):
+            pinged_by = activity_audit_user_label(guild, record.pinged_by_id)
+            caller = activity_audit_user_label(guild, record.caller_id) if record.caller_id else "Sin caller"
+            elapsed = pending_days(record.created_at) if record.is_pending else None
+            lines.extend(
+                [
+                    f"**{index}. `{record.code}` · {activity_audit_clip(record.name, 42)}**",
+                    f"Fecha: `{activity_audit_short_date(record.created_at)}` · Pingueada por: {pinged_by}",
+                    f"Discord ID: `{record.pinged_by_id or 'Sin registro'}` · Caller asignado: {caller}",
+                    f"Estado real: `{record.real_status}` · Auditoría: **{record.audit_label}**",
+                    f"Depositado: **{format_amount(record.total_deposited)}** · Beneficiarios: `{record.beneficiaries}`",
+                    f"Primer depósito: `{activity_audit_short_date(record.first_deposit_at)}` · Último depósito: `{activity_audit_short_date(record.last_deposit_at)}`",
+                ]
+            )
+            if record.is_pending:
+                lines.append(f"Tiempo transcurrido: `{elapsed if elapsed is not None else 'N/D'} días` · Motivo: {record.observations}")
+            lines.append("")
+        embed.description = "\n".join(lines)[:3900]
+    embed.set_footer(text=f"Página {page + 1} de {total_pages} · {len(rows)} actividades")
+    return embed, page_rows, total_pages
+
+
+def build_activity_audit_record_embed(cog: "Admin", guild: discord.Guild, record: ActivityAuditRecord) -> discord.Embed:
+    embed = discord.Embed(
+        title=f"{record.code} · {record.name}",
+        description="Consulta individual de auditoría de actividad.",
+        color=discord.Color.gold() if record.is_pending else discord.Color.green() if record.is_split else discord.Color.dark_gray(),
+    )
+    embed.add_field(name="Fecha", value=activity_audit_short_date(record.created_at), inline=True)
+    embed.add_field(name="Pingueada por", value=activity_audit_user_label(guild, record.pinged_by_id), inline=False)
+    embed.add_field(name="Discord ID", value=str(record.pinged_by_id or "Sin registro"), inline=True)
+    embed.add_field(name="Caller asignado", value=activity_audit_user_label(guild, record.caller_id) if record.caller_id else "Sin caller", inline=False)
+    embed.add_field(name="Caller Discord ID", value=str(record.caller_id or "Sin caller"), inline=True)
+    embed.add_field(name="Tipo", value=record.activity_type, inline=True)
+    embed.add_field(name="Estado real", value=record.real_status, inline=True)
+    embed.add_field(name="Estado auditoría", value=record.audit_label, inline=True)
+    embed.add_field(name="Total depositado", value=format_amount(record.total_deposited), inline=True)
+    embed.add_field(name="Beneficiarios", value=str(record.beneficiaries), inline=True)
+    embed.add_field(name="Movimientos", value=str(record.movement_count), inline=True)
+    embed.add_field(name="Primer depósito", value=activity_audit_short_date(record.first_deposit_at), inline=True)
+    embed.add_field(name="Último depósito", value=activity_audit_short_date(record.last_deposit_at), inline=True)
+    if record.is_pending:
+        elapsed = pending_days(record.created_at)
+        embed.add_field(name="Tiempo pendiente", value=f"{elapsed if elapsed is not None else 'N/D'} días", inline=True)
+    embed.add_field(name="Observaciones", value=record.observations or "Sin observaciones", inline=False)
+    if not record.has_split_details:
+        embed.set_footer(text="Esta actividad no tiene depósitos asociados.")
+    return embed
+
+
+def build_activity_audit_details_embed(
+    cog: "Admin",
+    guild: discord.Guild,
+    code: str,
+    page: int,
+) -> tuple[discord.Embed, int]:
+    dataset = get_activity_audit_dataset(cog.db, guild.id)
+    record = dataset.get_record(code)
+    movements = list(dataset.movements_for(code))
+    total_pages = max(1, (len(movements) + ACTIVITY_AUDIT_DETAIL_PAGE_SIZE - 1) // ACTIVITY_AUDIT_DETAIL_PAGE_SIZE)
+    page = min(max(page, 0), total_pages - 1)
+    embed = discord.Embed(title=f"📋 Detalles del split · {normalize_activity_code(code) or code}", color=discord.Color.green())
+    if record is None:
+        embed.description = "No encontré esa actividad."
+        return embed, total_pages
+    if not movements:
+        embed.description = "⏳ Esta actividad no tiene depósitos asociados."
+        return embed, total_pages
+    start = page * ACTIVITY_AUDIT_DETAIL_PAGE_SIZE
+    page_movements = movements[start : start + ACTIVITY_AUDIT_DETAIL_PAGE_SIZE]
+    rows = [f"{'FECHA':<10} {'CONCEPTO':<24} {'USUARIO':<18} {'CANTIDAD':>12}"]
+    for movement in page_movements:
+        rows.append(
+            f"{activity_audit_short_date(movement.date):<10} "
+            f"{activity_audit_clip(movement.concept, 24):<24} "
+            f"{activity_audit_clip(activity_audit_plain_user_name(guild, movement.user_id), 18):<18} "
+            f"{format_money(movement.amount):>12}"
+        )
+    embed.description = "```\n" + "\n".join(rows)[:3600] + "\n```"
+    embed.add_field(name="Total general", value=format_amount(sum(item.amount for item in movements)), inline=True)
+    embed.add_field(name="Beneficiarios únicos", value=str(len({item.user_id for item in movements if item.user_id is not None})), inline=True)
+    embed.add_field(name="Total movimientos", value=str(len(movements)), inline=True)
+    embed.add_field(name="Primer depósito", value=activity_audit_short_date(record.first_deposit_at), inline=True)
+    embed.add_field(name="Último depósito", value=activity_audit_short_date(record.last_deposit_at), inline=True)
+    embed.set_footer(text=f"Página {page + 1} de {total_pages}")
+    return embed, total_pages
+
+
+class ActivityAuditSearchModal(discord.ui.Modal, title="Buscar actividad"):
+    activity = discord.ui.TextInput(label="Actividad", placeholder="ACT-000060, 000060 o 60", max_length=20)
+
+    def __init__(self, cog: "Admin"):
+        super().__init__()
+        self.cog = cog
+
+    async def on_submit(self, interaction: discord.Interaction) -> None:
+        if interaction.guild is None or not is_admin_subject(self.cog.db, interaction):
+            await private_response(interaction, "Solo admins autorizados pueden usar este panel.")
+            return
+        code = normalize_activity_code(str(self.activity.value))
+        if code is None:
+            await private_response(interaction, "No pude interpretar ese código de actividad.")
+            return
+        dataset = get_activity_audit_dataset(self.cog.db, interaction.guild.id)
+        record = dataset.get_record(code)
+        if record is None:
+            await private_response(interaction, f"No encontré `{code}` desde ACT-000050.")
+            return
+        await private_response(
+            interaction,
+            f"Resultado de búsqueda `{code}`:",
+            embed=build_activity_audit_record_embed(self.cog, interaction.guild, record),
+            view=ActivityAuditRecordView(self.cog, code, has_details=record.has_split_details),
+        )
+
+
+class ActivityAuditBaseView(discord.ui.View):
+    def __init__(self, cog: "Admin"):
+        super().__init__(timeout=300)
+        self.cog = cog
+
+    async def require_admin(self, interaction: discord.Interaction) -> bool:
+        if interaction.guild is not None and is_admin_subject(self.cog.db, interaction):
+            return True
+        await private_response(interaction, "Solo admins autorizados pueden usar este panel.")
+        return False
+
+
+class ActivityAuditHomeView(ActivityAuditBaseView):
+    @discord.ui.button(label="Todas las actividades", emoji="📋", style=discord.ButtonStyle.primary, custom_id="g3n:admin:activity_audit:all", row=0)
+    async def all_activities(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
+        if not await self.require_admin(interaction):
+            return
+        await edit_activity_audit_message(
+            interaction,
+            content="Todas las actividades desde ACT-000050:",
+            embed=build_activity_audit_list_embed(self.cog, interaction.guild, "all", 0)[0],
+            view=ActivityAuditListView.from_records(self.cog, "all", 0, build_activity_audit_list_embed(self.cog, interaction.guild, "all", 0)[1]),
+        )
+
+    @discord.ui.button(label="Spliteadas", emoji="✅", style=discord.ButtonStyle.success, custom_id="g3n:admin:activity_audit:split", row=0)
+    async def split_activities(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
+        if not await self.require_admin(interaction):
+            return
+        await edit_activity_audit_message(
+            interaction,
+            content="Actividades spliteadas desde ACT-000050:",
+            embed=build_activity_audit_list_embed(self.cog, interaction.guild, "split", 0)[0],
+            view=ActivityAuditListView.from_records(self.cog, "split", 0, build_activity_audit_list_embed(self.cog, interaction.guild, "split", 0)[1]),
+        )
+
+    @discord.ui.button(label="Pendientes", emoji="⏳", style=discord.ButtonStyle.secondary, custom_id="g3n:admin:activity_audit:pending", row=0)
+    async def pending_activities(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
+        if not await self.require_admin(interaction):
+            return
+        await edit_activity_audit_message(
+            interaction,
+            content="Actividades pendientes desde ACT-000050:",
+            embed=build_activity_audit_list_embed(self.cog, interaction.guild, "pending", 0)[0],
+            view=ActivityAuditListView.from_records(self.cog, "pending", 0, build_activity_audit_list_embed(self.cog, interaction.guild, "pending", 0)[1]),
+        )
+
+    @discord.ui.button(label="Buscar actividad", emoji="🔍", style=discord.ButtonStyle.secondary, custom_id="g3n:admin:activity_audit:search", row=1)
+    async def search(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
+        if not await self.require_admin(interaction):
+            return
+        await interaction.response.send_modal(ActivityAuditSearchModal(self.cog))
+
+    @discord.ui.button(label="Descargar reporte", emoji="📥", style=discord.ButtonStyle.primary, custom_id="g3n:admin:activity_audit:download", row=1)
+    async def download(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
+        if not await self.require_admin(interaction):
+            return
+        await interaction.response.defer(ephemeral=True)
+        name_resolver = lambda user_id: activity_audit_plain_user_name(interaction.guild, user_id)
+        report_files = build_activity_audit_report_files(
+            self.cog.db,
+            interaction.guild.id,
+            name_resolver=name_resolver,
+        )
+        for index in range(0, len(report_files), 10):
+            batch = report_files[index : index + 10]
+            files = [discord.File(io.BytesIO(item.data), filename=item.filename) for item in batch]
+            await interaction.followup.send(
+                "Reporte de auditoría de actividades generado." if index == 0 else "Reporte de auditoría de actividades, continuación.",
+                files=files,
+                ephemeral=True,
+            )
+
+    @discord.ui.button(label="Volver", emoji="↩️", style=discord.ButtonStyle.secondary, custom_id="g3n:admin:activity_audit:back_admin", row=1)
+    async def back(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
+        if not await self.require_admin(interaction):
+            return
+        await edit_activity_audit_message(
+            interaction,
+            content="Panel Administrativo G3NESYS",
+            embed=None,
+            view=AdminPanelView(self.cog),
+        )
+
+
+class ActivityAuditDetailButton(discord.ui.Button):
+    def __init__(self, cog: "Admin", code: str, mode: str, page: int, index: int):
+        super().__init__(
+            label=f"Detalles {index}",
+            emoji="📋",
+            style=discord.ButtonStyle.secondary,
+            custom_id=f"g3n:admin:activity_audit:detail:{code}:{mode}:{page}",
+            row=2,
+        )
+        self.cog = cog
+        self.code = code
+        self.mode = mode
+        self.page = page
+
+    async def callback(self, interaction: discord.Interaction) -> None:
+        view = ActivityAuditDetailsView(self.cog, self.code, 0, back_mode=self.mode, back_page=self.page)
+        if not await view.require_admin(interaction):
+            return
+        embed, _ = build_activity_audit_details_embed(self.cog, interaction.guild, self.code, 0)
+        await edit_activity_audit_message(interaction, content=f"Detalles del split `{self.code}`:", embed=embed, view=view)
+
+
+class ActivityAuditListView(ActivityAuditBaseView):
+    def __init__(self, cog: "Admin", mode: str, page: int):
+        super().__init__(cog)
+        self.mode = mode
+        self.page = page
+        self._add_detail_buttons()
+
+    def _page_records(self, guild_id: int) -> list[ActivityAuditRecord]:
+        dataset = get_activity_audit_dataset(self.cog.db, guild_id)
+        rows = dataset.filter_records(self.mode)
+        start = self.page * ACTIVITY_AUDIT_PAGE_SIZE
+        return rows[start : start + ACTIVITY_AUDIT_PAGE_SIZE]
+
+    def _add_detail_buttons(self) -> None:
+        return
+
+    async def _refresh(self, interaction: discord.Interaction, page: int) -> None:
+        embed, page_rows, _ = build_activity_audit_list_embed(self.cog, interaction.guild, self.mode, page)
+        view = ActivityAuditListView.from_records(self.cog, self.mode, page, page_rows)
+        await edit_activity_audit_message(interaction, content="Auditoría de actividades:", embed=embed, view=view)
+
+    @classmethod
+    def from_records(cls, cog: "Admin", mode: str, page: int, records: list[ActivityAuditRecord]) -> "ActivityAuditListView":
+        view = cls.__new__(cls)
+        ActivityAuditBaseView.__init__(view, cog)
+        view.mode = mode
+        view.page = page
+        for offset, record in enumerate(records, start=1 + page * ACTIVITY_AUDIT_PAGE_SIZE):
+            if record.has_split_details:
+                view.add_item(ActivityAuditDetailButton(cog, record.code, mode, page, offset))
+        view.add_item(ActivityAuditPreviousButton(cog, mode, page))
+        view.add_item(ActivityAuditNextButton(cog, mode, page))
+        view.add_item(ActivityAuditBackHomeButton(cog))
+        return view
+
+
+class ActivityAuditPreviousButton(discord.ui.Button):
+    def __init__(self, cog: "Admin", mode: str, page: int):
+        super().__init__(label="Anterior", emoji="⬅️", style=discord.ButtonStyle.secondary, custom_id=f"g3n:admin:activity_audit:prev:{mode}:{page}", row=4, disabled=page <= 0)
+        self.cog = cog
+        self.mode = mode
+        self.page = page
+
+    async def callback(self, interaction: discord.Interaction) -> None:
+        view = ActivityAuditListView.from_records(self.cog, self.mode, max(0, self.page - 1), [])
+        if not await view.require_admin(interaction):
+            return
+        embed, page_rows, _ = build_activity_audit_list_embed(self.cog, interaction.guild, self.mode, max(0, self.page - 1))
+        await edit_activity_audit_message(
+            interaction,
+            content="Auditoría de actividades:",
+            embed=embed,
+            view=ActivityAuditListView.from_records(self.cog, self.mode, max(0, self.page - 1), page_rows),
+        )
+
+
+class ActivityAuditNextButton(discord.ui.Button):
+    def __init__(self, cog: "Admin", mode: str, page: int):
+        super().__init__(label="Siguiente", emoji="➡️", style=discord.ButtonStyle.secondary, custom_id=f"g3n:admin:activity_audit:next:{mode}:{page}", row=4)
+        self.cog = cog
+        self.mode = mode
+        self.page = page
+
+    async def callback(self, interaction: discord.Interaction) -> None:
+        view = ActivityAuditListView.from_records(self.cog, self.mode, self.page, [])
+        if not await view.require_admin(interaction):
+            return
+        dataset = get_activity_audit_dataset(self.cog.db, interaction.guild.id)
+        rows = dataset.filter_records(self.mode)
+        total_pages = max(1, (len(rows) + ACTIVITY_AUDIT_PAGE_SIZE - 1) // ACTIVITY_AUDIT_PAGE_SIZE)
+        next_page = min(total_pages - 1, self.page + 1)
+        embed, page_rows, _ = build_activity_audit_list_embed(self.cog, interaction.guild, self.mode, next_page)
+        await edit_activity_audit_message(
+            interaction,
+            content="Auditoría de actividades:",
+            embed=embed,
+            view=ActivityAuditListView.from_records(self.cog, self.mode, next_page, page_rows),
+        )
+
+
+class ActivityAuditBackHomeButton(discord.ui.Button):
+    def __init__(self, cog: "Admin"):
+        super().__init__(label="Volver", emoji="↩️", style=discord.ButtonStyle.secondary, custom_id="g3n:admin:activity_audit:back_home", row=4)
+        self.cog = cog
+
+    async def callback(self, interaction: discord.Interaction) -> None:
+        view = ActivityAuditHomeView(self.cog)
+        if not await view.require_admin(interaction):
+            return
+        await edit_activity_audit_message(
+            interaction,
+            content="Auditoría de actividades:",
+            embed=build_activity_audit_home_embed(self.cog, interaction.guild),
+            view=view,
+        )
+
+
+class ActivityAuditRecordView(ActivityAuditBaseView):
+    def __init__(self, cog: "Admin", code: str, *, has_details: bool = True):
+        super().__init__(cog)
+        self.code = normalize_activity_code(code) or code
+        if has_details:
+            self.add_item(ActivityAuditRecordDetailsButton(cog, self.code))
+        self.add_item(ActivityAuditBackHomeButton(cog))
+
+
+class ActivityAuditRecordDetailsButton(discord.ui.Button):
+    def __init__(self, cog: "Admin", code: str):
+        super().__init__(label="Detalles del split", emoji="📋", style=discord.ButtonStyle.secondary, custom_id=f"g3n:admin:activity_audit:record_detail:{code}", row=0)
+        self.cog = cog
+        self.code = code
+
+    async def callback(self, interaction: discord.Interaction) -> None:
+        view = ActivityAuditDetailsView(self.cog, self.code, 0, back_mode="record", back_page=0)
+        if not await view.require_admin(interaction):
+            return
+        dataset = get_activity_audit_dataset(self.cog.db, interaction.guild.id)
+        record = dataset.get_record(self.code)
+        if record is None or not record.has_split_details:
+            await private_response(interaction, "⏳ Esta actividad no tiene depósitos asociados.")
+            return
+        embed, _ = build_activity_audit_details_embed(self.cog, interaction.guild, self.code, 0)
+        await edit_activity_audit_message(interaction, content=f"Detalles del split `{self.code}`:", embed=embed, view=view)
+
+
+class ActivityAuditDetailsView(ActivityAuditBaseView):
+    def __init__(self, cog: "Admin", code: str, page: int, *, back_mode: str, back_page: int):
+        super().__init__(cog)
+        self.code = normalize_activity_code(code) or code
+        self.page = page
+        self.back_mode = back_mode
+        self.back_page = back_page
+
+    async def _show_page(self, interaction: discord.Interaction, page: int) -> None:
+        embed, _ = build_activity_audit_details_embed(self.cog, interaction.guild, self.code, page)
+        await edit_activity_audit_message(
+            interaction,
+            content=f"Detalles del split `{self.code}`:",
+            embed=embed,
+            view=ActivityAuditDetailsView(self.cog, self.code, page, back_mode=self.back_mode, back_page=self.back_page),
+        )
+
+    @discord.ui.button(label="Anterior", emoji="⬅️", style=discord.ButtonStyle.secondary, custom_id="g3n:admin:activity_audit:detail_prev", row=4)
+    async def previous(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
+        if not await self.require_admin(interaction):
+            return
+        await self._show_page(interaction, max(0, self.page - 1))
+
+    @discord.ui.button(label="Siguiente", emoji="➡️", style=discord.ButtonStyle.secondary, custom_id="g3n:admin:activity_audit:detail_next", row=4)
+    async def next(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
+        if not await self.require_admin(interaction):
+            return
+        dataset = get_activity_audit_dataset(self.cog.db, interaction.guild.id)
+        movements = dataset.movements_for(self.code)
+        total_pages = max(1, (len(movements) + ACTIVITY_AUDIT_DETAIL_PAGE_SIZE - 1) // ACTIVITY_AUDIT_DETAIL_PAGE_SIZE)
+        await self._show_page(interaction, min(total_pages - 1, self.page + 1))
+
+    @discord.ui.button(label="Volver", emoji="↩️", style=discord.ButtonStyle.secondary, custom_id="g3n:admin:activity_audit:detail_back", row=4)
+    async def back(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
+        if not await self.require_admin(interaction):
+            return
+        if self.back_mode == "record":
+            dataset = get_activity_audit_dataset(self.cog.db, interaction.guild.id)
+            record = dataset.get_record(self.code)
+            if record is None:
+                await edit_activity_audit_message(
+                    interaction,
+                    content="Auditoría de actividades:",
+                    embed=build_activity_audit_home_embed(self.cog, interaction.guild),
+                    view=ActivityAuditHomeView(self.cog),
+                )
+                return
+            await edit_activity_audit_message(
+                interaction,
+                content=f"Resultado de búsqueda `{self.code}`:",
+                embed=build_activity_audit_record_embed(self.cog, interaction.guild, record),
+                view=ActivityAuditRecordView(self.cog, self.code, has_details=record.has_split_details),
+            )
+            return
+        embed, page_rows, _ = build_activity_audit_list_embed(self.cog, interaction.guild, self.back_mode, self.back_page)
+        await edit_activity_audit_message(
+            interaction,
+            content="Auditoría de actividades:",
+            embed=embed,
+            view=ActivityAuditListView.from_records(self.cog, self.back_mode, self.back_page, page_rows),
+        )
+
+
 class AdminPanelView(discord.ui.View):
     def __init__(self, cog: "Admin"):
         super().__init__(timeout=None)
@@ -3386,6 +3898,16 @@ class AdminPanelView(discord.ui.View):
                 interaction,
                 "Panel de multas:",
                 view=FineAdminView(self.cog),
+            )
+
+    @discord.ui.button(label="Auditoría de actividades", emoji="📊", style=discord.ButtonStyle.secondary, custom_id="g3n:admin:activity_audit", row=3)
+    async def activity_audit(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
+        if await self.require_admin(interaction):
+            await private_response(
+                interaction,
+                "Auditoría de actividades:",
+                embed=build_activity_audit_home_embed(self.cog, interaction.guild),
+                view=ActivityAuditHomeView(self.cog),
             )
 
     @discord.ui.button(label="Más", emoji="\U0001F9ED", style=discord.ButtonStyle.secondary, custom_id="g3n:admin:more", row=4)
