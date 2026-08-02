@@ -32,6 +32,7 @@ from ..permissions import (
     CALLER_PANEL_ROLE_SETTING_KEY,
     has_any_configured_role,
     is_admin_subject,
+    is_caller_panel_subject,
     is_split_admin_subject,
     require_admin_context,
 )
@@ -2918,6 +2919,307 @@ class LegacyAdminPanelCallbacksView(discord.ui.View):
                 ),
             )
 
+    @discord.ui.button(label="Callers", custom_id="g3n:admin:callers")
+    async def callers(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
+        await AdminPanelView(self.cog).callers(interaction, button)
+
+    @discord.ui.button(label="Reclutadores", custom_id="g3n:admin:recruiters")
+    async def recruiters(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
+        await AdminPanelView(self.cog).recruiters(interaction, button)
+
+    @discord.ui.button(label="Delegados de pago", custom_id="g3n:admin:payment_delegates")
+    async def payment_delegates(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
+        await AdminPanelView(self.cog).payment_delegates(interaction, button)
+
+    @discord.ui.button(label="Admins", custom_id="g3n:admin:admins")
+    async def admins(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
+        await AdminPanelView(self.cog).admins(interaction, button)
+
+
+class MemberPenaltyUserSelect(discord.ui.UserSelect):
+    def __init__(self, cog: "Admin", *, action: str, admin_id: int):
+        super().__init__(
+            placeholder="Selecciona un miembro",
+            min_values=1,
+            max_values=1,
+            custom_id=f"g3n:admin:members:penalties:{action}:user",
+        )
+        self.cog = cog
+        self.action = action
+        self.admin_id = admin_id
+
+    async def callback(self, interaction: discord.Interaction) -> None:
+        parent = self.view
+        if not isinstance(parent, MemberPenaltyUserSelectView):
+            await private_response(interaction, "No pude procesar esta seleccion.")
+            return
+        if interaction.user.id != self.admin_id or not parent.can_use(interaction):
+            await private_response(interaction, "\u274c No tienes permisos para gestionar penalizaciones.")
+            return
+        member = self.values[0]
+        if self.action == "view":
+            await private_response(
+                interaction,
+                self.cog.activity_penalties_text(interaction.guild.id, member),
+            )
+            return
+        penalties = self.cog.active_activity_penalties(interaction.guild.id, member.id)
+        if not penalties:
+            await private_response(interaction, "\u2705 Este miembro no tiene penalizaciones activas.")
+            return
+        await private_response(
+            interaction,
+            f"Selecciona la penalizacion activa de {member.mention} que deseas eliminar:",
+            view=MemberPenaltyRemoveSelectView(
+                self.cog,
+                admin_id=interaction.user.id,
+                member_id=member.id,
+                member_mention=member.mention,
+                penalties=penalties,
+            ),
+        )
+
+
+class MemberPenaltyUserSelectView(discord.ui.View):
+    def __init__(self, cog: "Admin", *, action: str, admin_id: int):
+        super().__init__(timeout=180)
+        self.cog = cog
+        self.admin_id = admin_id
+        self.add_item(MemberPenaltyUserSelect(cog, action=action, admin_id=admin_id))
+
+    def can_use(self, interaction: discord.Interaction) -> bool:
+        return interaction.guild is not None and (
+            is_admin_subject(self.cog.db, interaction)
+            or is_caller_panel_subject(self.cog.db, interaction)
+        )
+
+
+class MemberPenaltyRemoveSelect(discord.ui.Select):
+    def __init__(self, parent_view: "MemberPenaltyRemoveSelectView"):
+        options = []
+        for row in parent_view.penalties[:25]:
+            penalty_id = int(row["id"])
+            reason = str(row["motivo"])
+            origin = str(row["origen"])
+            date = str(row["fecha_ingreso"])
+            options.append(
+                discord.SelectOption(
+                    label=f"ID {penalty_id} - {reason}"[:100],
+                    value=str(penalty_id),
+                    description=f"{origin} - {date}"[:100],
+                    emoji="\u26a0\ufe0f",
+                )
+            )
+        super().__init__(
+            placeholder="Selecciona una penalizacion activa",
+            min_values=1,
+            max_values=1,
+            options=options,
+            custom_id="g3n:admin:members:penalties:remove:select",
+        )
+        self.parent_view = parent_view
+
+    async def callback(self, interaction: discord.Interaction) -> None:
+        if interaction.user.id != self.parent_view.admin_id or not self.parent_view.can_use(interaction):
+            await private_response(interaction, "\u274c No tienes permisos para gestionar penalizaciones.")
+            return
+        penalty = self.parent_view.penalty_by_id(int(self.values[0]))
+        if penalty is None:
+            await private_response(interaction, "No encontre esa penalizacion activa.")
+            return
+        content = self.parent_view.confirmation_text(penalty)
+        await interaction.response.edit_message(
+            content=content,
+            view=MemberPenaltyConfirmRemovalView(
+                self.parent_view.cog,
+                admin_id=interaction.user.id,
+                member_id=self.parent_view.member_id,
+                member_mention=self.parent_view.member_mention,
+                penalty_id=int(penalty["id"]),
+            ),
+        )
+
+
+class MemberPenaltyRemoveSelectView(discord.ui.View):
+    def __init__(
+        self,
+        cog: "Admin",
+        *,
+        admin_id: int,
+        member_id: int,
+        member_mention: str,
+        penalties,
+    ):
+        super().__init__(timeout=180)
+        self.cog = cog
+        self.admin_id = admin_id
+        self.member_id = member_id
+        self.member_mention = member_mention
+        self.penalties = list(penalties)
+        self.add_item(MemberPenaltyRemoveSelect(self))
+
+    def can_use(self, interaction: discord.Interaction) -> bool:
+        return interaction.guild is not None and (
+            is_admin_subject(self.cog.db, interaction)
+            or is_caller_panel_subject(self.cog.db, interaction)
+        )
+
+    def penalty_by_id(self, penalty_id: int):
+        return next((row for row in self.penalties if int(row["id"]) == penalty_id), None)
+
+    def confirmation_text(self, penalty) -> str:
+        return (
+            "⚠️ ¿Confirmas que deseas eliminar esta penalizacion?\n\n"
+            f"Usuario: {self.member_mention}\n"
+            f"Motivo: {penalty['motivo']}\n"
+            f"Fecha: {penalty['fecha_ingreso']}\n"
+            f"ID: {penalty['id']}"
+        )
+
+class MemberPenaltyConfirmRemovalView(discord.ui.View):
+    def __init__(
+        self,
+        cog: "Admin",
+        *,
+        admin_id: int,
+        member_id: int,
+        member_mention: str,
+        penalty_id: int,
+    ):
+        super().__init__(timeout=180)
+        self.cog = cog
+        self.admin_id = admin_id
+        self.member_id = member_id
+        self.member_mention = member_mention
+        self.penalty_id = penalty_id
+
+    def can_use(self, interaction: discord.Interaction) -> bool:
+        return interaction.guild is not None and interaction.user.id == self.admin_id and (
+            is_admin_subject(self.cog.db, interaction)
+            or is_caller_panel_subject(self.cog.db, interaction)
+        )
+
+    @discord.ui.button(label="Confirmar", emoji="\u2705", style=discord.ButtonStyle.danger, custom_id="g3n:admin:members:penalties:remove:confirm")
+    async def confirm(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
+        if not self.can_use(interaction):
+            await private_response(interaction, "\u274c No tienes permisos para gestionar penalizaciones.")
+            return
+        penalty = self.cog.remove_activity_penalty(
+            interaction.guild.id,
+            penalty_id=self.penalty_id,
+            user_id=self.member_id,
+            removed_by=interaction.user.id,
+            observation="Eliminada desde Panel de Admins > Gestion de usuarios > Miembros",
+        )
+        if penalty is None:
+            await interaction.response.edit_message(
+                content="No encontre esa penalizacion activa o ya fue eliminada.",
+                view=None,
+            )
+            return
+        await interaction.response.edit_message(
+            content=(
+                "✅ Penalizacion eliminada correctamente.\n\n"
+                f"Usuario: {self.member_mention}\n"
+                f"Motivo: {penalty['motivo']}\n"
+                f"Eliminada por: <@{interaction.user.id}>"
+            ),
+            view=None,
+        )
+
+    @discord.ui.button(label="Cancelar", emoji="\u274c", style=discord.ButtonStyle.secondary, custom_id="g3n:admin:members:penalties:remove:cancel")
+    async def cancel(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
+        if interaction.user.id != self.admin_id:
+            await private_response(interaction, "Solo quien abrio esta confirmacion puede cancelarla.")
+            return
+        await interaction.response.edit_message(content="Operacion cancelada.", view=None)
+
+
+class MembersAdminView(discord.ui.View):
+    def __init__(self, cog: "Admin"):
+        super().__init__(timeout=300)
+        self.cog = cog
+
+    async def require_penalty_manager(self, interaction: discord.Interaction) -> bool:
+        if interaction.guild is not None and (
+            is_admin_subject(self.cog.db, interaction)
+            or is_caller_panel_subject(self.cog.db, interaction)
+        ):
+            return True
+        await private_response(interaction, "\u274c No tienes permisos para gestionar penalizaciones.")
+        return False
+
+    @discord.ui.button(label="Ver penalizaciones", emoji="\U0001f50e", style=discord.ButtonStyle.primary, custom_id="g3n:admin:members:penalties:view", row=0)
+    async def view_penalties(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
+        if await self.require_penalty_manager(interaction):
+            await private_response(
+                interaction,
+                "Selecciona el miembro que deseas consultar:",
+                view=MemberPenaltyUserSelectView(self.cog, action="view", admin_id=interaction.user.id),
+            )
+
+    @discord.ui.button(label="Eliminar penalizaci\u00f3n", emoji="\U0001f5d1\ufe0f", style=discord.ButtonStyle.danger, custom_id="g3n:admin:members:penalties:remove", row=0)
+    async def remove_penalty(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
+        if await self.require_penalty_manager(interaction):
+            await private_response(
+                interaction,
+                "Selecciona el miembro al que deseas eliminarle una penalizacion activa:",
+                view=MemberPenaltyUserSelectView(self.cog, action="remove", admin_id=interaction.user.id),
+            )
+
+    @discord.ui.button(label="Volver", emoji="\u21a9\ufe0f", style=discord.ButtonStyle.secondary, custom_id="g3n:admin:members:back", row=1)
+    async def back(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
+        await interaction.response.edit_message(
+            content="Gesti\u00f3n de usuarios:",
+            embed=None,
+            view=UserManagementAdminView(self.cog),
+        )
+
+
+class UserManagementAdminView(discord.ui.View):
+    def __init__(self, cog: "Admin"):
+        super().__init__(timeout=300)
+        self.cog = cog
+
+    async def require_admin(self, interaction: discord.Interaction) -> bool:
+        if is_admin_subject(self.cog.db, interaction):
+            return True
+        await private_response(interaction, "Solo admins autorizados pueden usar este panel.")
+        return False
+
+    @discord.ui.button(label="Callers", emoji="\U0001f4e3", style=discord.ButtonStyle.primary, custom_id="g3n:admin:user_management:callers", row=0)
+    async def callers(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
+        await AdminPanelView(self.cog).callers(interaction, button)
+
+    @discord.ui.button(label="Reclutadores", emoji="\U0001f6e1\ufe0f", style=discord.ButtonStyle.primary, custom_id="g3n:admin:user_management:recruiters", row=0)
+    async def recruiters(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
+        await AdminPanelView(self.cog).recruiters(interaction, button)
+
+    @discord.ui.button(label="Delegados de pago", emoji="\U0001f465", style=discord.ButtonStyle.primary, custom_id="g3n:admin:user_management:payment_delegates", row=0)
+    async def payment_delegates(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
+        await AdminPanelView(self.cog).payment_delegates(interaction, button)
+
+    @discord.ui.button(label="Admins", emoji="\U0001f510", style=discord.ButtonStyle.primary, custom_id="g3n:admin:user_management:admins", row=0)
+    async def admins(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
+        await AdminPanelView(self.cog).admins(interaction, button)
+
+    @discord.ui.button(label="Miembros", emoji="\U0001f464", style=discord.ButtonStyle.secondary, custom_id="g3n:admin:user_management:members", row=1)
+    async def members(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
+        if await self.require_admin(interaction):
+            await interaction.response.edit_message(
+                content="Gesti\u00f3n de miembros:",
+                embed=None,
+                view=MembersAdminView(self.cog),
+            )
+
+    @discord.ui.button(label="Volver", emoji="\u21a9\ufe0f", style=discord.ButtonStyle.secondary, custom_id="g3n:admin:user_management:back", row=1)
+    async def back(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
+        await interaction.response.edit_message(
+            content="Panel administrativo:",
+            embed=None,
+            view=AdminPanelView(self.cog),
+        )
+
 
 class AdminPanelView(discord.ui.View):
     def __init__(self, cog: "Admin"):
@@ -3002,7 +3304,15 @@ class AdminPanelView(discord.ui.View):
         if await self.require_admin(interaction):
             await dm_or_private(self.cog, interaction, self.cog.history_text(interaction.guild.id), "historial_panel")
 
-    @discord.ui.button(label="Callers", emoji="\U0001F4E3", style=discord.ButtonStyle.primary, custom_id="g3n:admin:callers", row=3)
+    @discord.ui.button(label="Gesti\u00f3n de usuarios", emoji="\U0001f465", style=discord.ButtonStyle.primary, custom_id="g3n:admin:user_management", row=3)
+    async def user_management(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
+        if await self.require_admin(interaction):
+            await private_response(
+                interaction,
+                "Gesti\u00f3n de usuarios:",
+                view=UserManagementAdminView(self.cog),
+            )
+
     async def callers(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
         if await self.require_admin(interaction):
             embed = discord.Embed(
@@ -3019,7 +3329,6 @@ class AdminPanelView(discord.ui.View):
             )
             await private_response(interaction, "Menu de callers:", embed=embed, view=CallersAdminView(self.cog))
 
-    @discord.ui.button(label="Reclutadores", emoji="\U0001F6E1\uFE0F", style=discord.ButtonStyle.primary, custom_id="g3n:admin:recruiters", row=3)
     async def recruiters(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
         if await self.require_admin(interaction):
             embed = discord.Embed(
@@ -3038,7 +3347,6 @@ class AdminPanelView(discord.ui.View):
                 view=RecruitersAdminView(self.cog),
             )
 
-    @discord.ui.button(label="Delegados de pago", emoji="\U0001F464", style=discord.ButtonStyle.primary, custom_id="g3n:admin:payment_delegates", row=3)
     async def payment_delegates(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
         if await self.require_admin(interaction):
             await private_response(
@@ -3047,7 +3355,6 @@ class AdminPanelView(discord.ui.View):
                 view=PaymentDelegatesAdminView(self.cog),
             )
 
-    @discord.ui.button(label="Admins", emoji="\U0001F510", style=discord.ButtonStyle.primary, custom_id="g3n:admin:admins", row=3)
     async def admins(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
         if await self.require_admin(interaction):
             await private_response(
@@ -3685,6 +3992,80 @@ class Admin(commands.Cog):
             if authorized
             else f"Se retiro el acceso administrativo de {member.mention}."
         )
+
+    def active_activity_penalties(self, guild_id: int, user_id: int):
+        return self.db.fetch_all(
+            """
+            SELECT id, guild_id, usuario_id, motivo, origen, fecha_ingreso, activo,
+                   removido_por, fecha_remocion, observaciones
+            FROM penalizacion_actividades
+            WHERE guild_id = ? AND usuario_id = ? AND activo = 1
+            ORDER BY id DESC
+            """,
+            (guild_id, user_id),
+        )
+
+    def activity_penalties_text(self, guild_id: int, member: discord.abc.User) -> str:
+        rows = self.active_activity_penalties(guild_id, member.id)
+        if not rows:
+            return "\u2705 Este miembro no tiene penalizaciones activas."
+        lines = [
+            f"\u26a0\ufe0f **Penalizaciones activas de {member.mention}**",
+            f"ID de Discord: `{member.id}`",
+        ]
+        for row in rows:
+            lines.extend(
+                [
+                    "",
+                    f"ID: `{row['id']}`",
+                    f"Motivo: {row['motivo']}",
+                    f"Origen: {row['origen']}",
+                    f"Fecha: `{row['fecha_ingreso']}`",
+                    "Estado: `Activa`",
+                ]
+            )
+        return "\n".join(lines)[:1900]
+
+    def remove_activity_penalty(
+        self,
+        guild_id: int,
+        *,
+        penalty_id: int,
+        user_id: int,
+        removed_by: int,
+        observation: str,
+    ):
+        penalty = self.db.fetch_one(
+            """
+            SELECT * FROM penalizacion_actividades
+            WHERE guild_id = ? AND id = ? AND usuario_id = ? AND activo = 1
+            """,
+            (guild_id, penalty_id, user_id),
+        )
+        if penalty is None:
+            return None
+        removal_note = (
+            f"{observation}; penalty_id={penalty_id}; motivo={penalty['motivo']}; "
+            f"origen={penalty['origen']}"
+        )
+        self.db.execute(
+            """
+            UPDATE penalizacion_actividades
+            SET activo = 0, removido_por = ?, fecha_remocion = ?, observaciones = ?
+            WHERE guild_id = ? AND id = ? AND usuario_id = ? AND activo = 1
+            """,
+            (removed_by, utc_now_iso(), removal_note, guild_id, penalty_id, user_id),
+        )
+        log_action(
+            self.db,
+            guild_id,
+            admin_id=removed_by,
+            action="Quitar penalizacion de actividad",
+            system="Actividades",
+            affected_user_id=user_id,
+            observation=removal_note,
+        )
+        return penalty
 
     def get_activity_payout_for_quick_liquidation(self, guild_id: int, activity_id: int):
         return self.db.fetch_one(
