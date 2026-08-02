@@ -179,6 +179,58 @@ class ActivityPermissionTests(unittest.IsolatedAsyncioTestCase):
             self.assertFalse(self.cog.can_delete_activity_ping(interaction, activity))
 
 
+    def test_join_penalty_validation_only_reads_active_rows(self):
+        self.db.execute(
+            """
+            INSERT INTO penalizacion_actividades (
+                guild_id, usuario_id, motivo, origen, fecha_ingreso, activo,
+                removido_por, fecha_remocion, observaciones
+            ) VALUES (?, ?, ?, ?, ?, 0, ?, ?, ?)
+            """,
+            (
+                10,
+                777,
+                "3 multas pendientes",
+                "Sistema de Multas",
+                "2026-08-02T00:00:00+00:00",
+                999,
+                "2026-08-02T01:00:00+00:00",
+                "retirada desde panel",
+            ),
+        )
+        for index in range(3):
+            self.db.execute(
+                """
+                INSERT INTO fines (
+                    code, guild_id, user_id, amount, reason, status, origin,
+                    created_by, created_at
+                ) VALUES (?, ?, ?, ?, ?, 'Pendiente', ?, ?, ?)
+                """,
+                (
+                    f"FINE-{index}",
+                    10,
+                    777,
+                    1000,
+                    "Prueba",
+                    "Test",
+                    999,
+                    "2026-08-02T00:00:00+00:00",
+                ),
+            )
+
+        penalty = self.cog.active_activity_penalty_reason(10, 777)
+
+        self.assertIsNone(penalty)
+        active = self.db.fetch_one(
+            """
+            SELECT COUNT(*) AS total
+            FROM penalizacion_actividades
+            WHERE guild_id = ? AND usuario_id = ? AND activo = 1
+            """,
+            (10, 777),
+        )
+        self.assertEqual(int(active["total"]), 0)
+
     async def test_new_regular_and_mandatory_drafts_use_shared_act_sequence(self):
         field = lambda value: SimpleNamespace(value=value)
         publish_channel = SimpleNamespace(id=900, send=lambda *args, **kwargs: None)

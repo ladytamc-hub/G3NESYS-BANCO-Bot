@@ -5423,7 +5423,7 @@ class Activities(commands.Cog):
                 "Necesitas rol de miembro, invitado o alianza configurada para solicitar unirte.",
             )
             return
-        penalty = self.ensure_penalty_for_user(interaction.guild.id, interaction.user.id)
+        penalty = self.active_activity_penalty_reason(interaction.guild.id, interaction.user.id)
         if penalty:
             await private_response(
                 interaction,
@@ -5925,7 +5925,7 @@ class Activities(commands.Cog):
                 ephemeral=True,
             )
             return
-        penalty = self.ensure_penalty_for_user(interaction.guild.id, interaction.user.id)
+        penalty = self.active_activity_penalty_reason(interaction.guild.id, interaction.user.id)
         if penalty:
             await interaction.followup.send(
                 "No puedes anotarte porque estas en lista de penalizacion. "
@@ -7907,7 +7907,7 @@ class Activities(commands.Cog):
         )
         return message is not None
 
-    def ensure_penalty_for_user(self, guild_id: int, user_id: int) -> str | None:
+    def active_activity_penalty_reason(self, guild_id: int, user_id: int) -> str | None:
         active = self.db.fetch_one(
             """
             SELECT motivo FROM penalizacion_actividades
@@ -7919,6 +7919,12 @@ class Activities(commands.Cog):
         if active:
             return str(active["motivo"])
 
+        return None
+
+    def ensure_penalty_for_user(self, guild_id: int, user_id: int) -> str | None:
+        active = self.active_activity_penalty_reason(guild_id, user_id)
+        if active:
+            return active
         pending_limit = self.db.get_int_setting(guild_id, "pending_fine_penalty_limit", 3)
         pending = self.db.fetch_one(
             """
