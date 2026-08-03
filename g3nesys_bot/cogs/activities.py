@@ -1587,12 +1587,12 @@ class PingsPanelView(discord.ui.View):
             ("g3n:pings:create_ping", 0),
             ("g3n:pings:create_template", 0),
             ("g3n:pings:edit_template", 0),
-            ("g3n:pings:view_templates", 0),
+            ("g3n:pings:view_templates", 1),
             ("g3n:pings:my_activities", 1),
             ("g3n:pings:my_caller_penalties", 1),
-            ("g3n:pings:my_caller_ranking", 1),
-            ("g3n:pings:my_caller_report", 1),
-            ("g3n:pings:configuration", 1),
+            ("g3n:pings:my_caller_ranking", 2),
+            ("g3n:pings:my_caller_report", 2),
+            ("g3n:pings:configuration", 2),
         ]
         # El flujo CTA sin split queda temporalmente oculto del panel actual,
         # reservado para una posible reactivacion futura.
@@ -1686,9 +1686,9 @@ class PingsPanelView(discord.ui.View):
         )
 
     @discord.ui.button(
-        label="Crear Plantilla de Ping",
+        label="Crear Plantilla",
         emoji="📝",
-        style=discord.ButtonStyle.secondary,
+        style=discord.ButtonStyle.primary,
         custom_id="g3n:pings:create_template",
         row=0,
     )
@@ -1834,7 +1834,7 @@ class PingsPanelView(discord.ui.View):
     @discord.ui.button(
         label="Mis Penalizaciones",
         emoji="⚠️",
-        style=discord.ButtonStyle.secondary,
+        style=discord.ButtonStyle.danger,
         custom_id="g3n:pings:my_caller_penalties",
         row=1,
     )

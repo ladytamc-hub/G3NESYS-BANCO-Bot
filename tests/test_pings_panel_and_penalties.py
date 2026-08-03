@@ -103,14 +103,21 @@ class PingsPanelAndPenaltyTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertNotIn("Ping CTA (Sin Split)", self.labels(view))
         self.assertEqual(
-            self.labels(view)[:4],
-            ["Crear Ping", "Crear Plantilla de Ping", "Editar plantilla", "Ver mis Plantillas"],
+            self.labels(view)[:3],
+            ["Crear Ping", "Crear Plantilla", "Editar plantilla"],
         )
         self.assertEqual(
-            self.labels(view)[4:],
-            ["Mis Actividades", "Mis Penalizaciones", "Mi Ranking", "Mi Reporte", "Config"],
+            self.labels(view)[3:6],
+            ["Ver mis Plantillas", "Mis Actividades", "Mis Penalizaciones"],
         )
-        self.assertEqual(self.rows(view), [0, 0, 0, 0, 1, 1, 1, 1, 1])
+        self.assertEqual(
+            self.labels(view)[6:],
+            ["Mi Ranking", "Mi Reporte", "Config"],
+        )
+        self.assertEqual(self.rows(view), [0, 0, 0, 1, 1, 1, 2, 2, 2])
+        styles = {item.label: item.style for item in view.children if getattr(item, "label", None)}
+        self.assertEqual(styles["Crear Plantilla"].name, "primary")
+        self.assertEqual(styles["Mis Penalizaciones"].name, "danger")
 
     def test_cta_flow_still_exists_for_legacy_persistent_messages(self):
         self.assertTrue(callable(getattr(PingsPanelView, "create_mandatory", None)))
