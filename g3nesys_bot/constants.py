@@ -28,6 +28,9 @@ CALLERS_WELCOME_IMAGE = (
     "hm=81fb1fe926eefbc1453299848aba21dda9730f12c13171536154bbf2dc755568"
 )
 
+# Interruptor central para reactivar penalizaciones automaticas si el flujo vuelve a usarse.
+AUTOMATIC_PENALTIES_ENABLED = False
+
 ACTIVITY_TYPE_REGULAR = "regular"
 ACTIVITY_TYPE_MANDATORY = "mandatory"
 

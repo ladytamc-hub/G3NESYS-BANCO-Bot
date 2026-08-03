@@ -22,6 +22,7 @@ from ..constants import (
     ACTIVITY_OPEN,
     ACTIVITY_PAYOUT_CREATED,
     ADMIN_PANEL_IMAGE,
+    AUTOMATIC_PENALTIES_ENABLED,
     ATTENDANCE_ABSENT,
     ATTENDANCE_CONFIRMED,
     ATTENDANCE_PENDING,
@@ -1552,23 +1553,49 @@ class CallerConfigPanelView(discord.ui.View):
         )
 
 
+class CreatePingOptionsView(discord.ui.View):
+    def __init__(self, panel: "PingsPanelView"):
+        super().__init__(timeout=180)
+        self.panel = panel
+
+    @discord.ui.button(
+        label="Crear Ping Rápido",
+        emoji="\U0001F4CD",
+        style=discord.ButtonStyle.success,
+        custom_id="g3n:pings:create_activity:options",
+        row=0,
+    )
+    async def create_activity(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
+        await self.panel.create_activity(interaction, button)
+
+    @discord.ui.button(
+        label="Crear Ping (Act. Split)",
+        emoji="\U0001F4CD",
+        style=discord.ButtonStyle.secondary,
+        custom_id="g3n:pings:select_template:options",
+        row=0,
+    )
+    async def select_template(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
+        await self.panel.select_template(interaction, button)
+
+
 class PingsPanelView(discord.ui.View):
     def __init__(self, cog: "Activities"):
         super().__init__(timeout=None)
         self.cog = cog
         layout = [
-            ("g3n:pings:create_mandatory", 0),
-            ("g3n:pings:create_activity", 0),
-            ("g3n:pings:select_template", 0),
-            ("g3n:pings:create_template", 1),
-            ("g3n:pings:edit_template", 1),
-            ("g3n:pings:view_templates", 1),
-            ("g3n:pings:my_activities", 3),
-            ("g3n:pings:my_caller_penalties", 3),
-            ("g3n:pings:my_caller_ranking", 3),
-            ("g3n:pings:my_caller_report", 3),
-            ("g3n:pings:configuration", 4),
+            ("g3n:pings:create_ping", 0),
+            ("g3n:pings:create_template", 0),
+            ("g3n:pings:edit_template", 0),
+            ("g3n:pings:view_templates", 0),
+            ("g3n:pings:my_activities", 1),
+            ("g3n:pings:my_caller_penalties", 1),
+            ("g3n:pings:my_caller_ranking", 1),
+            ("g3n:pings:my_caller_report", 1),
+            ("g3n:pings:configuration", 1),
         ]
+        # El flujo CTA sin split queda temporalmente oculto del panel actual,
+        # reservado para una posible reactivacion futura.
         items = {
             item.custom_id: item
             for item in self.children
@@ -1580,6 +1607,20 @@ class PingsPanelView(discord.ui.View):
             if item is not None:
                 item.row = row
                 self.add_item(item)
+
+    @discord.ui.button(
+        label="Crear Ping",
+        emoji="\U0001F4CD",
+        style=discord.ButtonStyle.success,
+        custom_id="g3n:pings:create_ping",
+        row=4,
+    )
+    async def create_ping(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
+        await private_response(
+            interaction,
+            "Selecciona el tipo de ping que quieres crear:",
+            view=CreatePingOptionsView(self),
+        )
 
     @discord.ui.button(
         label="Ping CTA (Sin Split)",
@@ -1609,7 +1650,7 @@ class PingsPanelView(discord.ui.View):
         await self.cog.prompt_activity_creation(interaction, template_id=None)
 
     @discord.ui.button(
-        label="Crear Ping (Act.Split)",
+        label="Crear Ping (Act. Split)",
         emoji="📍",
         style=discord.ButtonStyle.secondary,
         custom_id="g3n:pings:select_template",
@@ -1751,7 +1792,7 @@ class PingsPanelView(discord.ui.View):
         )
 
     @discord.ui.button(
-        label="Ver mis Actividades",
+        label="Mis Actividades",
         emoji="📅",
         style=discord.ButtonStyle.secondary,
         custom_id="g3n:pings:my_activities",
@@ -1856,6 +1897,39 @@ class PingsPanelView(discord.ui.View):
             self.cog.caller_config_text(interaction.guild.id),
             view=CallerConfigPanelView(self.cog),
         )
+
+class PingsLegacyPanelCallbacksView(discord.ui.View):
+    def __init__(self, cog: "Activities"):
+        super().__init__(timeout=None)
+        self.cog = cog
+
+    @discord.ui.button(
+        label="Ping CTA (Sin Split)",
+        emoji="\u2694\ufe0f",
+        style=discord.ButtonStyle.danger,
+        custom_id="g3n:pings:create_mandatory",
+    )
+    async def create_mandatory(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
+        await PingsPanelView(self.cog).create_mandatory(interaction, button)
+
+    @discord.ui.button(
+        label="Crear Ping Rápido",
+        emoji="\U0001F4CD",
+        style=discord.ButtonStyle.success,
+        custom_id="g3n:pings:create_activity",
+    )
+    async def create_activity(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
+        await PingsPanelView(self.cog).create_activity(interaction, button)
+
+    @discord.ui.button(
+        label="Crear Ping (Act. Split)",
+        emoji="\U0001F4CD",
+        style=discord.ButtonStyle.secondary,
+        custom_id="g3n:pings:select_template",
+    )
+    async def select_template(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
+        await PingsPanelView(self.cog).select_template(interaction, button)
+
 
 class ActivityView(discord.ui.View):
     def __init__(self, cog: "Activities", activity_id: int):
@@ -3264,6 +3338,7 @@ class Activities(commands.Cog):
 
     async def cog_load(self) -> None:
         self.bot.add_view(PingsPanelView(self))
+        self.bot.add_view(PingsLegacyPanelCallbacksView(self))
         active_rows = self.db.fetch_all(
             """
             SELECT id, status
@@ -5995,7 +6070,7 @@ class Activities(commands.Cog):
             content=(
                 f"⚔️ Te registraste en **{activity['name']}** como **{role['name']}**.\n"
                 "El check es opcional si el caller lo solicita. Permanece al menos el 50% "
-                "en el canal de voz; de lo contrario puede aplicarse la multa configurada."
+                "en el canal de voz; la asistencia puede ser revisada por el personal autorizado."
             ),
             view=check_view,
         )
@@ -6012,13 +6087,13 @@ class Activities(commands.Cog):
         if current and int(current["role_id"]) != role_id:
             await interaction.followup.send(
                 f"Te movi a **{role['name']}**. Recuerda confirmar el check y permanecer "
-                "al menos el 50% de la actividad en voz para evitar sanciones.",
+                "al menos el 50% de la actividad en voz.",
                 ephemeral=True,
             )
         else:
             await interaction.followup.send(
                 f"Quedaste anotado en **{role['name']}**. Debes confirmar el check y permanecer "
-                "al menos el 50% de la actividad en voz; de lo contrario puede aplicarse multa.",
+                "al menos el 50% de la actividad en voz.",
                 ephemeral=True,
             )
 
@@ -6601,9 +6676,8 @@ class Activities(commands.Cog):
                     action="check_asistencia",
                     content=(
                         f"Confirma tu asistencia a **{activity['name']}**. "
-                        "Si te anotaste y no participas, puedes recibir multa automatica.\n\n"
-                        "El tiempo en el canal de voz define tu porcentaje del Split. "
-                        "Permanecer menos del 50% cuenta como inasistencia y puede generar multa."
+                        "Si te anotaste y no participas, el personal autorizado puede revisar tu asistencia.\n\n"
+                        "El tiempo en el canal de voz define tu porcentaje del Split."
                     ),
                     view=ConfirmAttendanceView(self, activity_id),
                 )
@@ -6778,7 +6852,10 @@ class Activities(commands.Cog):
             (activity_id,),
         )
         known = {int(row["usuario_id"]): row for row in attendance_rows}
-        absence_fine_enabled = self.db.get_int_setting(interaction.guild.id, "absence_fine_enabled", 0) == 1
+        absence_fine_enabled = (
+            AUTOMATIC_PENALTIES_ENABLED
+            and self.db.get_int_setting(interaction.guild.id, "absence_fine_enabled", 0) == 1
+        )
         absence_fine_amount = self.db.get_int_setting(interaction.guild.id, "absence_fine_amount", 0)
         minimum_percent = self.db.get_int_setting(interaction.guild.id, "voice_minimum_percent", 50)
         absences = []
@@ -7922,6 +7999,8 @@ class Activities(commands.Cog):
         return None
 
     def ensure_penalty_for_user(self, guild_id: int, user_id: int) -> str | None:
+        if not AUTOMATIC_PENALTIES_ENABLED:
+            return None
         active = self.active_activity_penalty_reason(guild_id, user_id)
         if active:
             return active

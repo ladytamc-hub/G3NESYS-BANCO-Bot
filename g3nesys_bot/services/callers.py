@@ -7,6 +7,7 @@ from ..constants import (
     ACTIVITY_FINISHED,
     ACTIVITY_PAYOUT_CREATED,
     ACTIVITY_TYPE_MANDATORY,
+    AUTOMATIC_PENALTIES_ENABLED,
     ATTENDANCE_ABSENT,
     ATTENDANCE_CONFIRMED,
     CALLERS_WELCOME_IMAGE,
@@ -413,6 +414,8 @@ def caller_ranking(db: Database, guild_id: int) -> list[dict]:
 
 
 async def evaluate_caller_penalties(db: Database, guild: discord.Guild) -> list[int]:
+    if not AUTOMATIC_PENALTIES_ENABLED:
+        return []
     penalized_users: list[int] = []
     for caller in caller_ranking(db, guild.id):
         user_id = int(caller["user_id"])
