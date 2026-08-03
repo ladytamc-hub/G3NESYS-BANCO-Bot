@@ -49,6 +49,7 @@ from ..services.activity_audit import (
     pending_days,
 )
 from ..services.audit import log_action
+from ..services.voice_monitoring import format_duration, get_persisted_activity_voice_stats, summarize_voice_stats
 from ..services.callers import (
     CallerRemovalNoticeView,
     authorize_caller,
@@ -3410,6 +3411,21 @@ def build_activity_audit_list_embed(
     return embed, page_rows, total_pages
 
 
+def activity_audit_voice_summary(cog: "Admin", record: ActivityAuditRecord) -> str:
+    stats = get_persisted_activity_voice_stats(cog.db, record.guild_id, record.internal_id)
+    if not stats:
+        return "Sin estad\u00edsticas de voz guardadas."
+    summary = summarize_voice_stats(stats)
+    return (
+        f"Duraci\u00f3n: `{format_duration(summary.monitoring_duration_seconds)}` \u00b7 "
+        f"Participantes: **{summary.total_participants}** \u00b7 "
+        f"Promedio: **{summary.average_attendance_percentage:.1f}%**\n"
+        f"Hasta el final: `{summary.stayed_until_end}` \u00b7 "
+        f"Se retiraron: `{summary.left_before_end}` \u00b7 "
+        f"Nunca entraron: `{summary.never_joined}`"
+    )
+
+
 def build_activity_audit_record_embed(cog: "Admin", guild: discord.Guild, record: ActivityAuditRecord) -> discord.Embed:
     embed = discord.Embed(
         title=f"{record.code} · {record.name}",
@@ -3434,6 +3450,7 @@ def build_activity_audit_record_embed(cog: "Admin", guild: discord.Guild, record
         embed.add_field(name="Tiempo pendiente", value=f"{elapsed if elapsed is not None else 'N/D'} días", inline=True)
     embed.add_field(name="Observaciones", value=record.observations or "Sin observaciones", inline=False)
     embed.add_field(name="Publicaci\u00f3n", value=activity_audit_publication_text(guild, record), inline=False)
+    embed.add_field(name="Estad\u00edsticas de voz", value=activity_audit_voice_summary(cog, record), inline=False)
     if not record.has_split_details:
         embed.set_footer(text="Esta actividad no tiene depósitos asociados.")
     return embed
@@ -3474,6 +3491,7 @@ def build_activity_audit_details_embed(
     embed.add_field(name="Primer depósito", value=activity_audit_short_date(record.first_deposit_at), inline=True)
     embed.add_field(name="Último depósito", value=activity_audit_short_date(record.last_deposit_at), inline=True)
     embed.add_field(name="Publicaci\u00f3n", value=activity_audit_publication_text(guild, record), inline=False)
+    embed.add_field(name="Estad\u00edsticas de voz", value=activity_audit_voice_summary(cog, record), inline=False)
     embed.set_footer(text=f"Página {page + 1} de {total_pages}")
     return embed, total_pages
 
@@ -6857,15 +6875,25 @@ class Admin(commands.Cog):
         )
         voice = f"<#{activity['voice_channel_id']}>" if activity["voice_channel_id"] else "Sin canal"
         date = activity["horario"] or activity["ended_at"] or activity["created_at"]
+        stats = get_persisted_activity_voice_stats(self.db, guild.id, activity_id)
+        voice_summary = summarize_voice_stats(stats) if stats else None
         lines = [
             f"🔴 **Actividad pendiente de split:** `{activity['code']}`",
             f"Nombre: **{activity['name']}**",
             f"Caller: <@{activity['caller_id']}>",
             f"Fecha/hora: `{date}`",
             f"Canal de voz: {voice}",
+        ]
+        if voice_summary is not None:
+            lines.append(
+                f"Voz: {format_duration(voice_summary.monitoring_duration_seconds)} \u00b7 "
+                f"promedio {voice_summary.average_attendance_percentage:.1f}% \u00b7 "
+                f"sin entrar {voice_summary.never_joined}"
+            )
+        lines.extend([
             "",
             "**Participantes con asistencia**",
-        ]
+        ])
         if not rows:
             lines.append("Sin participantes registrados.")
         for row in rows:

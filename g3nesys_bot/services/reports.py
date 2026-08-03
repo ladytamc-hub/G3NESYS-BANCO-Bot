@@ -709,6 +709,42 @@ def create_admin_report(db: Database, guild_id: int, guild=None) -> Path:
         date_headers={"Entrada", "Salida"},
     )
 
+    voice_stats = db.fetch_all(
+        """
+        SELECT avs.*, ac.code AS activity_code, ac.name AS activity_name
+        FROM activity_voice_stats avs
+        JOIN activities ac ON ac.id = avs.activity_id
+        WHERE avs.guild_id = ?
+        ORDER BY ac.id DESC, avs.attendance_percentage DESC, avs.display_name ASC
+        """,
+        (guild_id,),
+    )
+    _add_detail_sheet(
+        workbook,
+        name="Estadisticas Voz",
+        title="Resultados permanentes de voz por actividad",
+        subtitle=subtitle,
+        headers=[
+            "Actividad DB ID", "Actividad", "Usuario ID", "Nombre registrado",
+            "Inicio monitoreo", "Fin monitoreo", "Primera entrada", "Ultima salida",
+            "Segundos presente", "Segundos ausente", "Salidas", "Reingresos",
+            "Permanencia", "Estado final",
+        ],
+        rows=[
+            [
+                row["activity_code"], row["activity_name"], _id(row["user_id"]),
+                row["display_name"], row["monitor_started_at"], row["monitor_ended_at"],
+                row["first_join_at"], row["last_leave_at"],
+                int(row["total_present_seconds"] or 0), int(row["total_absent_seconds"] or 0),
+                int(row["leave_count"] or 0), int(row["rejoin_count"] or 0),
+                float(row["attendance_percentage"] or 0), row["final_voice_status"],
+            ]
+            for row in voice_stats
+        ],
+        percent_headers={"Permanencia"},
+        date_headers={"Inicio monitoreo", "Fin monitoreo", "Primera entrada", "Ultima salida"},
+    )
+
     _add_detail_sheet(
         workbook,
         name="Splits",

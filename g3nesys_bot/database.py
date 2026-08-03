@@ -149,6 +149,38 @@ class Database:
                 "ALTER TABLE asistencia_actividades "
                 "ADD COLUMN participation_percent REAL NOT NULL DEFAULT 0"
             )
+        self._conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS activity_voice_stats (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                guild_id INTEGER NOT NULL,
+                activity_id INTEGER NOT NULL REFERENCES activities(id) ON DELETE CASCADE,
+                user_id INTEGER NOT NULL,
+                display_name TEXT NOT NULL,
+                monitor_started_at TEXT NOT NULL,
+                monitor_ended_at TEXT NOT NULL,
+                first_join_at TEXT,
+                last_join_at TEXT,
+                last_leave_at TEXT,
+                total_present_seconds INTEGER NOT NULL DEFAULT 0,
+                total_absent_seconds INTEGER NOT NULL DEFAULT 0,
+                leave_count INTEGER NOT NULL DEFAULT 0,
+                rejoin_count INTEGER NOT NULL DEFAULT 0,
+                attendance_percentage REAL NOT NULL DEFAULT 0,
+                final_voice_status TEXT NOT NULL,
+                monitoring_duration_seconds INTEGER NOT NULL DEFAULT 0,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                UNIQUE(guild_id, activity_id, user_id)
+            )
+            """
+        )
+        self._conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_activity_voice_stats_activity
+            ON activity_voice_stats(guild_id, activity_id)
+            """
+        )
 
         movement_columns = {
             row["name"]
@@ -818,6 +850,29 @@ CREATE TABLE IF NOT EXISTS activity_voice_sessions (
     seconds INTEGER NOT NULL DEFAULT 0
 );
 
+CREATE TABLE IF NOT EXISTS activity_voice_stats (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    guild_id INTEGER NOT NULL,
+    activity_id INTEGER NOT NULL REFERENCES activities(id) ON DELETE CASCADE,
+    user_id INTEGER NOT NULL,
+    display_name TEXT NOT NULL,
+    monitor_started_at TEXT NOT NULL,
+    monitor_ended_at TEXT NOT NULL,
+    first_join_at TEXT,
+    last_join_at TEXT,
+    last_leave_at TEXT,
+    total_present_seconds INTEGER NOT NULL DEFAULT 0,
+    total_absent_seconds INTEGER NOT NULL DEFAULT 0,
+    leave_count INTEGER NOT NULL DEFAULT 0,
+    rejoin_count INTEGER NOT NULL DEFAULT 0,
+    attendance_percentage REAL NOT NULL DEFAULT 0,
+    final_voice_status TEXT NOT NULL,
+    monitoring_duration_seconds INTEGER NOT NULL DEFAULT 0,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    UNIQUE(guild_id, activity_id, user_id)
+);
+
 CREATE TABLE IF NOT EXISTS activity_join_requests (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     guild_id INTEGER NOT NULL,
@@ -1116,6 +1171,9 @@ ON activity_participants(activity_id);
 
 CREATE INDEX IF NOT EXISTS idx_voice_sessions_activity_user
 ON activity_voice_sessions(guild_id, activity_id, user_id, left_at);
+
+CREATE INDEX IF NOT EXISTS idx_activity_voice_stats_activity
+ON activity_voice_stats(guild_id, activity_id);
 
 CREATE INDEX IF NOT EXISTS idx_join_requests_pending
 ON activity_join_requests(guild_id, activity_id, status);

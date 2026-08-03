@@ -11,6 +11,7 @@ from typing import Iterable
 
 from ..constants import ACTIVITY_CANCELLED, ACTIVITY_DELETED, ACTIVITY_TYPE_MANDATORY
 from ..database import Database
+from .voice_monitoring import get_persisted_activity_voice_stats
 
 
 ACTIVITY_AUDIT_START_NUMBER = 50
@@ -560,6 +561,55 @@ def movement_csv(dataset: ActivityAuditDataset, *, name_resolver: NameResolver |
     return _csv_bytes(headers, movement_report_rows(dataset, name_resolver=name_resolver))
 
 
+def voice_stats_csv(db: Database, guild_id: int) -> bytes:
+    headers = [
+        "activity_id",
+        "guild_id",
+        "user_id",
+        "display_name",
+        "monitor_started_at",
+        "monitor_ended_at",
+        "first_join_at",
+        "last_leave_at",
+        "total_present_seconds",
+        "total_absent_seconds",
+        "leave_count",
+        "rejoin_count",
+        "attendance_percentage",
+        "final_voice_status",
+    ]
+    activity_rows = db.fetch_all(
+        """
+        SELECT id
+        FROM activities
+        WHERE guild_id = ?
+          AND (UPPER(code) LIKE 'ACT-%' OR UPPER(code) LIKE 'MAND-%')
+        ORDER BY id ASC
+        """,
+        (guild_id,),
+    )
+    rows: list[list] = []
+    for activity in activity_rows:
+        for stat in get_persisted_activity_voice_stats(db, guild_id, int(activity["id"])):
+            rows.append([
+                stat.activity_id,
+                stat.guild_id,
+                stat.user_id,
+                stat.display_name,
+                stat.monitor_started_at,
+                stat.monitor_ended_at,
+                stat.first_join_at or "",
+                stat.last_leave_at or "",
+                stat.total_present_seconds,
+                stat.total_absent_seconds,
+                stat.leave_count,
+                stat.rejoin_count,
+                stat.attendance_percentage,
+                stat.final_voice_status,
+            ])
+    return _csv_bytes(headers, rows)
+
+
 def _zip_report(files: list[ActivityAuditReportFile], filename: str) -> ActivityAuditReportFile:
     buffer = io.BytesIO()
     with zipfile.ZipFile(buffer, "w", compression=zipfile.ZIP_DEFLATED) as archive:
@@ -609,6 +659,7 @@ def build_activity_audit_report_files(
     base_files = [
         ActivityAuditReportFile(activity_name, activity_csv(dataset, name_resolver=name_resolver)),
         ActivityAuditReportFile(detail_name, movement_csv(dataset, name_resolver=name_resolver)),
+        ActivityAuditReportFile("estadisticas_voz_actividades.csv", voice_stats_csv(db, guild_id)),
     ]
     zip_file = _zip_report(base_files, f"auditoria_actividades_G3NESYS_{stamp}.zip")
     if len(zip_file.data) <= max_bytes:

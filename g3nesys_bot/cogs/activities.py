@@ -50,6 +50,13 @@ from ..services.fines import create_fine
 from ..services.notifications import send_admin_notification, send_dm_safe
 from ..services.payout_audit import log_payout_action
 from ..services.reports import create_caller_report
+from ..services.voice_monitoring import (
+    VOICE_PAGE_SIZE,
+    format_duration,
+    get_activity_voice_stats,
+    persist_activity_voice_stats,
+    summarize_voice_stats,
+)
 from ..utils import (
     format_amount,
     is_custom_emoji_placeholder,
@@ -1936,10 +1943,12 @@ class ActivityView(discord.ui.View):
                 self.add_control_button("Ver participantes", "mandatory_participants", discord.ButtonStyle.secondary, 0, False, "👥")
                 loot_label = "Editar Botin" if activity["mandatory_loot_amount"] is not None else "Botin"
                 self.add_control_button(loot_label, "mandatory_loot", discord.ButtonStyle.primary, 0, False, "💰")
+                self.add_control_button("Estad\u00edsticas voz", "voice_stats", discord.ButtonStyle.secondary, 0, False, "\U0001F4CA")
                 self.add_control_button("Editar caller", "edit_caller", discord.ButtonStyle.secondary, 1, False)
                 self.add_control_button("Eliminar ping", "delete", discord.ButtonStyle.danger, 1, False)
             elif status == ACTIVITY_CANCELLED:
                 self.add_control_button("Ver participantes", "mandatory_participants", discord.ButtonStyle.secondary, 0, False, "👥")
+                self.add_control_button("Estad\u00edsticas voz", "voice_stats", discord.ButtonStyle.secondary, 0, False, "\U0001F4CA")
                 self.add_control_button("Eliminar ping", "delete", discord.ButtonStyle.danger, 1, False)
             return
         if status in {ACTIVITY_OPEN, ACTIVITY_NOTICE}:
@@ -1993,12 +2002,17 @@ class ActivityView(discord.ui.View):
             self.add_control_button("Ver asistencia", "verify", discord.ButtonStyle.secondary, 0, False, "🔍")
             self.add_control_button("Splitear", "payout", discord.ButtonStyle.primary, 0, False, "💰")
             self.add_control_button("Liquidación rápida", "quick_liquidation", discord.ButtonStyle.danger, 0, False, "⚡")
+            self.add_control_button("Estad\u00edsticas voz", "voice_stats", discord.ButtonStyle.secondary, 0, False, "\U0001F4CA")
             self.add_control_button("Editar caller", "edit_caller", discord.ButtonStyle.secondary, 1, False)
             self.add_control_button("Eliminar", "delete", discord.ButtonStyle.danger, 1, False)
         elif status == ACTIVITY_PAYOUT_CREATED:
             self.add_control_button("Ver asistencia", "verify", discord.ButtonStyle.secondary, 0, False, "🔍")
             self.add_control_button("Volver a splitear", "payout", discord.ButtonStyle.primary, 0, False, "💰")
             self.add_control_button("Liquidación rápida", "quick_liquidation", discord.ButtonStyle.danger, 0, False, "⚡")
+            self.add_control_button("Estad\u00edsticas voz", "voice_stats", discord.ButtonStyle.secondary, 0, False, "\U0001F4CA")
+            self.add_control_button("Eliminar", "delete", discord.ButtonStyle.danger, 1, False)
+        elif status == ACTIVITY_CANCELLED:
+            self.add_control_button("Estad\u00edsticas voz", "voice_stats", discord.ButtonStyle.secondary, 0, False, "\U0001F4CA")
             self.add_control_button("Eliminar", "delete", discord.ButtonStyle.danger, 1, False)
 
     def add_control_button(
@@ -2030,6 +2044,30 @@ class ActivityView(discord.ui.View):
         custom_id = interaction.data["custom_id"]
         _, _, action, activity_id = custom_id.split(":")
         await self.cog.handle_activity_action(interaction, action, int(activity_id))
+
+
+class ActivityVoiceStatsView(discord.ui.View):
+    def __init__(self, cog: "Activities", activity_id: int, page: int = 0):
+        super().__init__(timeout=None)
+        self.cog = cog
+        self.activity_id = activity_id
+        self.page = page
+
+    @discord.ui.button(label="Anterior", emoji="\u2b05\ufe0f", style=discord.ButtonStyle.secondary, custom_id="g3n:activity:voice_stats_prev", row=0)
+    async def previous(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
+        await self._show_page(interaction, max(0, self.page - 1))
+
+    @discord.ui.button(label="Siguiente", emoji="\u27a1\ufe0f", style=discord.ButtonStyle.secondary, custom_id="g3n:activity:voice_stats_next", row=0)
+    async def next(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
+        await self._show_page(interaction, self.page + 1)
+
+    async def _show_page(self, interaction: discord.Interaction, page: int) -> None:
+        if interaction.guild is None:
+            await private_response(interaction, "Esta accion solo esta disponible en un servidor.")
+            return
+        embed, total_pages = self.cog.build_voice_stats_embed(interaction.guild, self.activity_id, page=page)
+        safe_page = min(max(page, 0), max(0, total_pages - 1))
+        await interaction.response.edit_message(embed=embed, view=ActivityVoiceStatsView(self.cog, self.activity_id, safe_page))
 
 
 class ActivityThreadRoleSelect(discord.ui.Select):
@@ -3316,9 +3354,9 @@ class Activities(commands.Cog):
             """
             SELECT id, status
             FROM activities
-            WHERE status IN (?, ?, ?, ?) AND message_id IS NOT NULL
+            WHERE status IN (?, ?, ?, ?, ?, ?) AND message_id IS NOT NULL
             """,
-            (ACTIVITY_OPEN, ACTIVITY_NOTICE, ACTIVITY_IN_PROGRESS, ACTIVITY_FINISHED),
+            (ACTIVITY_OPEN, ACTIVITY_NOTICE, ACTIVITY_IN_PROGRESS, ACTIVITY_FINISHED, ACTIVITY_CANCELLED, ACTIVITY_PAYOUT_CREATED),
         )
         for row in active_rows:
             self.bot.add_view(ActivityView(self, int(row["id"])))
@@ -3349,9 +3387,9 @@ class Activities(commands.Cog):
             """
             SELECT id
             FROM activities
-            WHERE status IN (?, ?, ?, ?) AND message_id IS NOT NULL
+            WHERE status IN (?, ?, ?, ?, ?, ?) AND message_id IS NOT NULL
             """,
-            (ACTIVITY_OPEN, ACTIVITY_NOTICE, ACTIVITY_IN_PROGRESS, ACTIVITY_FINISHED),
+            (ACTIVITY_OPEN, ACTIVITY_NOTICE, ACTIVITY_IN_PROGRESS, ACTIVITY_FINISHED, ACTIVITY_CANCELLED, ACTIVITY_PAYOUT_CREATED),
         )
         for row in active_rows:
             await self.update_activity_message(int(row["id"]))
@@ -3387,14 +3425,28 @@ class Activities(commands.Cog):
     def recover_voice_tracking(self, guild: discord.Guild) -> None:
         recovered_at = utc_now_iso()
         recovered_time = parse_iso_datetime(recovered_at)
-        orphaned = self.db.fetch_all(
+        open_sessions = self.db.fetch_all(
             """
-            SELECT id, joined_at FROM activity_voice_sessions
-            WHERE guild_id = ? AND left_at IS NULL
+            SELECT vs.id, vs.activity_id, vs.user_id, vs.joined_at,
+                   ac.status, ac.voice_channel_id
+            FROM activity_voice_sessions vs
+            JOIN activities ac ON ac.id = vs.activity_id
+            WHERE vs.guild_id = ? AND vs.left_at IS NULL
             """,
             (guild.id,),
         )
-        for row in orphaned:
+        for row in open_sessions:
+            member = guild.get_member(int(row["user_id"]))
+            still_in_monitored_channel = (
+                row["status"] == ACTIVITY_IN_PROGRESS
+                and row["voice_channel_id"] is not None
+                and member is not None
+                and member.voice is not None
+                and member.voice.channel is not None
+                and member.voice.channel.id == int(row["voice_channel_id"])
+            )
+            if still_in_monitored_channel:
+                continue
             joined_at = parse_iso_datetime(str(row["joined_at"]))
             seconds = (
                 max(0, int((recovered_time - joined_at).total_seconds()))
@@ -3405,6 +3457,7 @@ class Activities(commands.Cog):
                 "UPDATE activity_voice_sessions SET left_at = ?, seconds = ? WHERE id = ?",
                 (recovered_at, seconds, int(row["id"])),
             )
+            self.persist_voice_statistics(int(row["activity_id"]), guild.id, guild=guild)
         activities = self.db.fetch_all(
             """
             SELECT id, caller_id, voice_channel_id FROM activities
@@ -3431,6 +3484,7 @@ class Activities(commands.Cog):
                     and member.voice.channel.id == int(activity["voice_channel_id"])
                 ):
                     self.start_voice_session(int(activity["id"]), guild.id, member.id)
+            self.persist_voice_statistics(int(activity["id"]), guild.id, guild=guild)
 
     @commands.Cog.listener()
     async def on_voice_state_update(
@@ -5739,6 +5793,86 @@ class Activities(commands.Cog):
             "Solicitud aceptada y usuario notificado." if accepted else "Solicitud rechazada y usuario notificado.",
         )
 
+    def voice_stats_name_resolver(self, guild: discord.Guild | None):
+        def resolve(user_id: int | None) -> str:
+            if user_id is None or guild is None:
+                return ""
+            member = guild.get_member(int(user_id))
+            return str(member.display_name) if member is not None else ""
+        return resolve
+
+    def persist_voice_statistics(
+        self,
+        activity_id: int,
+        guild_id: int,
+        *,
+        ended_at: str | None = None,
+        guild: discord.Guild | None = None,
+    ):
+        guild = guild or self.bot.get_guild(int(guild_id))
+        return persist_activity_voice_stats(
+            self.db,
+            guild_id,
+            activity_id,
+            ended_at=ended_at,
+            name_resolver=self.voice_stats_name_resolver(guild),
+        )
+
+    def build_voice_stats_embed(self, guild: discord.Guild, activity_id: int, *, page: int = 0) -> tuple[discord.Embed, int]:
+        activity = self.get_guild_activity(guild.id, activity_id)
+        if activity is None:
+            embed = discord.Embed(title="\U0001F4CA Estad?sticas de voz", description="No encontre esta actividad.", color=discord.Color.red())
+            return embed, 1
+        stats = get_activity_voice_stats(
+            self.db,
+            guild.id,
+            activity_id,
+            name_resolver=self.voice_stats_name_resolver(guild),
+        )
+        summary = summarize_voice_stats(stats)
+        total_pages = max(1, (len(stats) + VOICE_PAGE_SIZE - 1) // VOICE_PAGE_SIZE)
+        page = min(max(page, 0), total_pages - 1)
+        start = page * VOICE_PAGE_SIZE
+        rows = stats[start : start + VOICE_PAGE_SIZE]
+        embed = discord.Embed(
+            title="\U0001F4CA ESTAD\u00cdSTICAS DE VOZ",
+            description=(
+                f"Actividad: **{activity['name']}** (`{activity['code']}`)\n"
+                f"Duraci\u00f3n del monitoreo: `{format_duration(summary.monitoring_duration_seconds)}`\n"
+                f"Inicio: `{summary.monitor_started_at or 'Sin registro'}`\n"
+                f"Finalizaci\u00f3n: `{summary.monitor_ended_at or 'Sin registro'}`"
+            ),
+            color=discord.Color.blurple(),
+        )
+        embed.add_field(name="Participantes monitoreados", value=str(summary.total_participants), inline=True)
+        embed.add_field(name="Permanecieron hasta el final", value=str(summary.stayed_until_end), inline=True)
+        embed.add_field(name="Se retiraron antes", value=str(summary.left_before_end), inline=True)
+        embed.add_field(name="Nunca ingresaron", value=str(summary.never_joined), inline=True)
+        embed.add_field(name="Permanencia promedio", value=f"{summary.average_attendance_percentage:.1f}%", inline=True)
+        if not rows:
+            embed.add_field(name="Participantes", value="Sin estad\u00edsticas de voz registradas.", inline=False)
+        else:
+            lines = []
+            for index, item in enumerate(rows, start=start + 1):
+                lines.append(
+                    f"**{index}. {item.display_name}** (`{item.user_id}`)\n"
+                    f"Tiempo presente: `{format_duration(item.total_present_seconds)}` \u00b7 "
+                    f"Permanencia: **{item.attendance_percentage:.1f}%** \u00b7 "
+                    f"Salidas: `{item.leave_count}` \u00b7 Reingresos: `{item.rejoin_count}`\n"
+                    f"Estado: **{item.final_voice_status}**"
+                )
+            embed.add_field(name="Participantes", value="\n\n".join(lines)[:3900], inline=False)
+        embed.set_footer(text=f"P\u00e1gina {page + 1}/{total_pages}")
+        return embed, total_pages
+
+    async def show_voice_stats(self, interaction: discord.Interaction, activity_id: int) -> None:
+        if interaction.guild is None:
+            await private_response(interaction, "Esta accion solo esta disponible en un servidor.")
+            return
+        await interaction.response.defer(ephemeral=False)
+        embed, _ = self.build_voice_stats_embed(interaction.guild, activity_id, page=0)
+        await interaction.followup.send(embed=embed, view=ActivityVoiceStatsView(self, activity_id, 0), ephemeral=False)
+
     def start_voice_session(self, activity_id: int, guild_id: int, user_id: int) -> None:
         attendance = self.db.fetch_one(
             """
@@ -5764,6 +5898,7 @@ class Activities(commands.Cog):
                 """,
                 (guild_id, activity_id, user_id, utc_now_iso()),
             )
+            self.persist_voice_statistics(activity_id, guild_id)
 
     def close_voice_session(
         self,
@@ -5788,11 +5923,22 @@ class Activities(commands.Cog):
                 "UPDATE activity_voice_sessions SET left_at = ?, seconds = ? WHERE id = ?",
                 (end_iso, seconds, int(session["id"])),
             )
+        self.persist_voice_statistics(activity_id, guild_id, ended_at=ended_at)
 
     def voice_stats(self, activity_id: int, user_id: int, at: str | None = None) -> tuple[int, float]:
         activity = self.get_activity(activity_id)
         if activity is None or not activity["started_at"]:
             return 0, 0.0
+        persisted = self.db.fetch_one(
+            """
+            SELECT total_present_seconds, attendance_percentage
+            FROM activity_voice_stats
+            WHERE activity_id = ? AND user_id = ?
+            """,
+            (activity_id, user_id),
+        )
+        if persisted is not None and activity["ended_at"]:
+            return int(persisted["total_present_seconds"] or 0), float(persisted["attendance_percentage"] or 0)
         start = parse_iso_datetime(str(activity["started_at"]))
         end = parse_iso_datetime(str(activity["ended_at"] or at or utc_now_iso()))
         duration = max(1, int((end - start).total_seconds())) if start and end else 1
@@ -6326,6 +6472,9 @@ class Activities(commands.Cog):
         if action == "mandatory_participants":
             await private_response(interaction, self.mandatory_participants_text(activity_id))
             return
+        if action == "voice_stats":
+            await self.show_voice_stats(interaction, activity_id)
+            return
         if action == "edit_caller":
             await self.prompt_activity_caller_reassignment(interaction, activity)
             return
@@ -6386,6 +6535,7 @@ class Activities(commands.Cog):
         elif action == "verify":
             await self.verify_attendance(interaction, activity_id)
         elif action == "monitor":
+            self.persist_voice_statistics(activity_id, interaction.guild.id, guild=interaction.guild)
             await interaction.followup.send(
                 self.voice_monitor_text(activity_id),
                 ephemeral=True,
@@ -6489,6 +6639,7 @@ class Activities(commands.Cog):
             )
             if in_voice:
                 self.start_voice_session(activity_id, interaction.guild.id, user_id)
+        self.persist_voice_statistics(activity_id, interaction.guild.id, guild=interaction.guild)
         await self.update_activity_message(activity_id)
         await send_admin_notification(
             self.db,
@@ -6512,6 +6663,7 @@ class Activities(commands.Cog):
             "UPDATE activities SET status = ?, ended_at = ? WHERE guild_id = ? AND id = ?",
             (ACTIVITY_FINISHED, ended_at, interaction.guild.id, activity_id),
         )
+        self.persist_voice_statistics(activity_id, interaction.guild.id, ended_at=ended_at, guild=interaction.guild)
         confirmed = 0
         absent = 0
         for participant in participants:
@@ -6640,6 +6792,7 @@ class Activities(commands.Cog):
         )
         if caller_in_voice:
             self.start_voice_session(activity_id, interaction.guild.id, caller_id)
+        self.persist_voice_statistics(activity_id, interaction.guild.id, guild=interaction.guild)
         self.bot.add_view(ConfirmAttendanceView(self, activity_id))
         await self.update_activity_message(activity_id)
         if caller_member is not None:
@@ -6876,6 +7029,7 @@ class Activities(commands.Cog):
             "UPDATE activities SET status = ?, ended_at = ? WHERE guild_id = ? AND id = ?",
             (ACTIVITY_FINISHED, ended_at, interaction.guild.id, activity_id),
         )
+        self.persist_voice_statistics(activity_id, interaction.guild.id, ended_at=ended_at, guild=interaction.guild)
         attendance_rows = self.db.fetch_all(
             "SELECT * FROM asistencia_actividades WHERE actividad_id = ?",
             (activity_id,),
@@ -7089,6 +7243,7 @@ class Activities(commands.Cog):
                 activity_id,
             ),
         )
+        self.persist_voice_statistics(activity_id, interaction.guild.id, ended_at=cancelled_at, guild=interaction.guild)
         participants = self.get_activity_participants(activity_id)
         for participant in participants:
             member = interaction.guild.get_member(int(participant["user_id"]))
