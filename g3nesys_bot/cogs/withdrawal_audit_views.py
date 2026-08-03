@@ -17,11 +17,18 @@ from ..services.withdrawal_audit import (
     WithdrawalAuditRecord,
     build_withdrawal_audit_report_files,
     get_withdrawal_audit_dataset,
+    normalize_user_search,
     normalize_withdrawal_code,
     search_withdrawal_records,
 )
 from ..utils import format_amount
 
+
+
+
+async def defer_ephemeral(interaction: discord.Interaction) -> None:
+    if not interaction.response.is_done():
+        await interaction.response.defer(ephemeral=True)
 
 async def private_response(interaction: discord.Interaction, content: str, **kwargs) -> None:
     if interaction.response.is_done():
@@ -44,8 +51,8 @@ def user_label(guild: discord.Guild | None, user_id: int | None) -> str:
         return "Sin registro"
     member = guild.get_member(int(user_id)) if guild is not None else None
     if member is None:
-        return f"Usuario fuera del servidor Â· ID {int(user_id)}"
-    return f"{member.mention} Â· {member.display_name}"
+        return f"Usuario fuera del servidor \u00b7 ID {int(user_id)}"
+    return f"{member.mention} \u00b7 {member.display_name}"
 
 
 def plain_user_name(guild: discord.Guild | None, user_id: int | None) -> str:
@@ -67,7 +74,7 @@ def add_message_button(view: discord.ui.View, record: WithdrawalAuditRecord | No
     view.add_item(
         discord.ui.Button(
             label="Mensaje original",
-            emoji="ðŸ”—",
+            emoji="\U0001F517",
             style=discord.ButtonStyle.link,
             url=record.message_url,
             row=row,
@@ -92,7 +99,7 @@ def build_withdrawal_audit_home_embed(cog, guild: discord.Guild) -> discord.Embe
     dataset = get_withdrawal_audit_dataset(cog.db, guild.id)
     summary = dataset.summary
     embed = discord.Embed(
-        title="ðŸ’³ AuditorÃ­a de pagos y cobros",
+        title="\U0001F4B3 Auditor\u00eda de pagos y cobros",
         description="Consulta solo lectura de todas las solicitudes de cobro, abiertas y cerradas.",
         color=discord.Color.blurple(),
     )
@@ -103,21 +110,21 @@ def build_withdrawal_audit_home_embed(cog, guild: discord.Guild) -> discord.Embe
     embed.add_field(name="Cobros abiertos", value=str(summary.open_count), inline=True)
     embed.add_field(name="Pagos parciales", value=str(summary.partial_count), inline=True)
     embed.add_field(name="Total solicitudes", value=str(summary.total_count), inline=True)
-    embed.add_field(name="MÃ¡s reciente", value=short_date(summary.newest_date), inline=True)
+    embed.add_field(name="M\u00e1s reciente", value=short_date(summary.newest_date), inline=True)
     return embed
 
 
 def title_for_mode(mode: str) -> str:
     return {
-        "pending": "ðŸŸ¡ Pendientes",
-        "partial": "ðŸŸ£ Pagadas parcialmente",
-        "paid": "ðŸŸ¢ Pagadas",
-        "rejected": "ðŸ”´ Rechazadas",
-        "returned": "â†©ï¸ Regresadas",
-        "cancelled": "âš« Canceladas",
-        "unpaid": "ðŸŸ  No pagadas",
-        "all": "ðŸ“‹ Todas",
-    }.get(mode, "ðŸ“‹ Todas")
+        "pending": "\U0001F7E1 Pendientes",
+        "partial": "\U0001F7E3 Pagadas parcialmente",
+        "paid": "\U0001F7E2 Pagadas",
+        "rejected": "\U0001F534 Rechazadas",
+        "returned": "\u21a9\ufe0f Regresadas",
+        "cancelled": "\u26ab Canceladas",
+        "unpaid": "\U0001F7E0 No pagadas",
+        "all": "\U0001F4CB Todas",
+    }.get(mode, "\U0001F4CB Todas")
 
 
 def build_withdrawal_audit_list_embed(
@@ -133,10 +140,10 @@ def build_withdrawal_audit_list_embed(
     page = min(max(page, 0), total_pages - 1)
     start = page * WITHDRAWAL_AUDIT_PAGE_SIZE
     page_rows = rows[start : start + WITHDRAWAL_AUDIT_PAGE_SIZE]
-    order_text = "MÃ¡s recientes primero" if order != "asc" else "MÃ¡s antiguas primero"
+    order_text = "M\u00e1s recientes primero" if order != "asc" else "M\u00e1s antiguas primero"
     embed = discord.Embed(title=title_for_mode(mode), color=discord.Color.teal())
     if not page_rows:
-        embed.description = "No hay solicitudes en esta categorÃ­a."
+        embed.description = "No hay solicitudes en esta categor\u00eda."
     else:
         lines: list[str] = []
         for index, record in enumerate(page_rows, start=start + 1):
@@ -147,10 +154,10 @@ def build_withdrawal_audit_list_embed(
             )
             lines.extend(
                 [
-                    f"**{index}. `{record.code}` Â· {user_label(guild, record.user_id)}**",
-                    f"Solicitado: **{format_amount(record.amount_requested)}** Â· Pagado: **{format_amount(record.amount_paid)}** Â· Pendiente: **{format_amount(record.pending_amount)}**",
-                    f"Estado: **{record.audit_label}** Â· Responsable: {responsible}",
-                    f"Creado: `{short_date(record.created_at)}` Â· Ãšltimo pago: `{short_date(record.last_payment_at)}`",
+                    f"**{index}. `{record.code}` \u00b7 {user_label(guild, record.user_id)}**",
+                    f"Solicitado: **{format_amount(record.amount_requested)}** \u00b7 Pagado: **{format_amount(record.amount_paid)}** \u00b7 Pendiente: **{format_amount(record.pending_amount)}**",
+                    f"Estado: **{record.audit_label}** \u00b7 Responsable: {responsible}",
+                    f"Creado: `{short_date(record.created_at)}` \u00b7 \u00daltimo pago: `{short_date(record.last_payment_at)}`",
                 ]
             )
             if record.is_partial or record.is_paid:
@@ -161,7 +168,7 @@ def build_withdrawal_audit_list_embed(
                 lines.append(f"Motivo: {clip(reason, 160)}")
             lines.append("")
         embed.description = "\n".join(lines)[:3900]
-    embed.set_footer(text=f"PÃ¡gina {page + 1} de {total_pages} Â· {len(rows)} solicitudes Â· {order_text}")
+    embed.set_footer(text=f"P\u00e1gina {page + 1} de {total_pages} \u00b7 {len(rows)} solicitudes \u00b7 {order_text}")
     return embed, page_rows, total_pages
 
 
@@ -170,8 +177,8 @@ def build_withdrawal_audit_record_embed(cog, guild: discord.Guild, record: Withd
     if record.audit_status in {AUDIT_REJECTED, AUDIT_CANCELLED}:
         color = discord.Color.red()
     embed = discord.Embed(
-        title=f"ðŸ’³ {record.code}",
-        description="Ficha completa de auditorÃ­a de cobro.",
+        title=f"\U0001F4B3 {record.code}",
+        description="Ficha completa de auditor\u00eda de cobro.",
         color=color,
     )
     embed.add_field(name="Solicitante", value=user_label(guild, record.user_id), inline=False)
@@ -181,11 +188,11 @@ def build_withdrawal_audit_record_embed(cog, guild: discord.Guild, record: Withd
     embed.add_field(name="Estado actual", value=record.audit_label, inline=True)
     embed.add_field(name="Concepto", value=record.reason or "Sin concepto", inline=False)
     embed.add_field(name="Fecha de solicitud", value=record.created_at or "Sin fecha", inline=True)
-    embed.add_field(name="QuiÃ©n aprobÃ³", value=user_label(guild, record.approved_by), inline=True)
-    embed.add_field(name="Ãšltimo pago", value=record.last_payment_at or "Sin pago", inline=True)
+    embed.add_field(name="Qui\u00e9n aprob\u00f3", value=user_label(guild, record.approved_by), inline=True)
+    embed.add_field(name="\u00daltimo pago", value=record.last_payment_at or "Sin pago", inline=True)
     embed.add_field(name="Pagado por", value=", ".join(user_label(guild, user_id) for user_id in record.paid_by_ids) or "Sin pago", inline=False)
     if record.payment_place or record.payment_schedule:
-        embed.add_field(name="Fuente o lugar de pago", value=" Â· ".join(part for part in [record.payment_place, record.payment_schedule] if part), inline=False)
+        embed.add_field(name="Fuente o lugar de pago", value=" \u00b7 ".join(part for part in [record.payment_place, record.payment_schedule] if part), inline=False)
     if record.rejection_reason or record.return_reason:
         embed.add_field(name="Motivo", value=(record.rejection_reason or record.return_reason)[:1024], inline=False)
     embed.add_field(
@@ -193,7 +200,7 @@ def build_withdrawal_audit_record_embed(cog, guild: discord.Guild, record: Withd
         value="Mensaje administrativo original disponible." if record.message_url else "Mensaje administrativo original no disponible.",
         inline=False,
     )
-    embed.set_footer(text=f"Solicitado: {record.amount_requested} Â· Pagado: {record.amount_paid} Â· Pendiente: {record.pending_amount}")
+    embed.set_footer(text=f"Solicitado: {record.amount_requested} \u00b7 Pagado: {record.amount_paid} \u00b7 Pendiente: {record.pending_amount}")
     return embed
 
 
@@ -208,9 +215,9 @@ def build_withdrawal_audit_details_embed(
     movements = list(dataset.movements_for(code))
     total_pages = max(1, (len(movements) + WITHDRAWAL_AUDIT_DETAIL_PAGE_SIZE - 1) // WITHDRAWAL_AUDIT_DETAIL_PAGE_SIZE)
     page = min(max(page, 0), total_pages - 1)
-    embed = discord.Embed(title=f"ðŸ“„ Detalle de {normalize_withdrawal_code(code) or code}", color=discord.Color.green())
+    embed = discord.Embed(title=f"\U0001F4C4 Detalle de {normalize_withdrawal_code(code) or code}", color=discord.Color.green())
     if record is None:
-        embed.description = "No encontrÃ© esa solicitud."
+        embed.description = "No encontr\u00e9 esa solicitud."
         return embed, total_pages
     start = page * WITHDRAWAL_AUDIT_DETAIL_PAGE_SIZE
     page_movements = movements[start : start + WITHDRAWAL_AUDIT_DETAIL_PAGE_SIZE]
@@ -223,7 +230,7 @@ def build_withdrawal_audit_details_embed(
             if movement.amount is not None:
                 lines.append(f"Monto: {format_amount(movement.amount)}")
             if movement.old_status or movement.new_status:
-                lines.append(f"Estado: `{movement.old_status or 'N/D'}` â†’ `{movement.new_status or 'N/D'}`")
+                lines.append(f"Estado: `{movement.old_status or 'N/D'}` \u2192 `{movement.new_status or 'N/D'}`")
             if movement.source:
                 lines.append(f"Fuente: {movement.source}")
             if movement.note:
@@ -238,7 +245,7 @@ def build_withdrawal_audit_details_embed(
     embed.add_field(name="Pagado", value=format_amount(record.amount_paid), inline=True)
     embed.add_field(name="Pendiente", value=format_amount(record.pending_amount), inline=True)
     embed.add_field(name="Estado", value=record.audit_label, inline=True)
-    embed.set_footer(text=f"PÃ¡gina {page + 1} de {total_pages}")
+    embed.set_footer(text=f"P\u00e1gina {page + 1} de {total_pages}")
     return embed, total_pages
 
 
@@ -286,13 +293,14 @@ class WithdrawalAuditModeButton(discord.ui.Button):
         self.order = order
 
     async def callback(self, interaction: discord.Interaction) -> None:
+        await defer_ephemeral(interaction)
         gate = WithdrawalAuditBaseView(self.cog)
         if not await gate.require_admin(interaction):
             return
         embed, page_rows, _ = build_withdrawal_audit_list_embed(self.cog, interaction.guild, self.mode, 0, self.order)
         await edit_audit_message(
             interaction,
-            content="AuditorÃ­a de pagos y cobros:",
+            content="Auditor\u00eda de pagos y cobros:",
             embed=embed,
             view=WithdrawalAuditListView.from_records(self.cog, self.mode, 0, self.order, page_rows),
         )
@@ -317,12 +325,13 @@ class WithdrawalAuditOrderButton(discord.ui.Button):
         self.next_order = next_order
 
     async def callback(self, interaction: discord.Interaction) -> None:
+        await defer_ephemeral(interaction)
         view = WithdrawalAuditHomeView(self.cog, self.next_order)
         if not await view.require_admin(interaction):
             return
         await edit_audit_message(
             interaction,
-            content="AuditorÃ­a de pagos y cobros:",
+            content="Auditor\u00eda de pagos y cobros:",
             embed=build_withdrawal_audit_home_embed(self.cog, interaction.guild),
             view=view,
         )
@@ -334,12 +343,13 @@ class WithdrawalAuditReportMenuButton(discord.ui.Button):
         self.cog = cog
 
     async def callback(self, interaction: discord.Interaction) -> None:
+        await defer_ephemeral(interaction)
         gate = WithdrawalAuditBaseView(self.cog)
         if not await gate.require_admin(interaction):
             return
         await edit_audit_message(
             interaction,
-            content="Elige el reporte de auditorÃ­a de pagos y cobros:",
+            content="Elige el reporte de auditor\u00eda de pagos y cobros:",
             view=WithdrawalAuditReportOptionsView(self.cog),
         )
 
@@ -350,6 +360,7 @@ class WithdrawalAuditBackAdminButton(discord.ui.Button):
         self.cog = cog
 
     async def callback(self, interaction: discord.Interaction) -> None:
+        await defer_ephemeral(interaction)
         gate = WithdrawalAuditBaseView(self.cog)
         if not await gate.require_admin(interaction):
             return
@@ -363,7 +374,7 @@ class WithdrawalAuditBackAdminButton(discord.ui.Button):
 
 class WithdrawalAuditDetailButton(discord.ui.Button):
     def __init__(self, cog, code: str, mode: str, page: int, order: str, index: int):
-        super().__init__(label=f"Detalle {index}", emoji="ðŸ“„", style=discord.ButtonStyle.secondary, custom_id=f"g3n:admin:withdrawal_audit:detail:{code}:{mode}:{page}:{order}", row=3)
+        super().__init__(label=f"Detalle {index}", emoji="\U0001F4C4", style=discord.ButtonStyle.secondary, custom_id=f"g3n:admin:withdrawal_audit:detail:{code}:{mode}:{page}:{order}", row=3)
         self.cog = cog
         self.code = code
         self.mode = mode
@@ -371,6 +382,7 @@ class WithdrawalAuditDetailButton(discord.ui.Button):
         self.order = order
 
     async def callback(self, interaction: discord.Interaction) -> None:
+        await defer_ephemeral(interaction)
         gate = WithdrawalAuditBaseView(self.cog)
         if not await gate.require_admin(interaction):
             return
@@ -400,8 +412,8 @@ class WithdrawalAuditListView(WithdrawalAuditBaseView):
         view.add_item(WithdrawalAuditPreviousButton(cog, mode, page, order))
         view.add_item(WithdrawalAuditNextButton(cog, mode, page, order))
         next_order = "asc" if order != "asc" else "desc"
-        label = "MÃ¡s recientes" if order != "asc" else "MÃ¡s antiguas"
-        emoji = "â¬‡ï¸" if order != "asc" else "â¬†ï¸"
+        label = "M\u00e1s recientes" if order != "asc" else "M\u00e1s antiguas"
+        emoji = "\u2b07\ufe0f" if order != "asc" else "\u2b06\ufe0f"
         view.add_item(WithdrawalAuditListOrderButton(cog, mode, next_order, label, emoji))
         view.add_item(WithdrawalAuditBackHomeButton(cog, order))
         return view
@@ -409,30 +421,32 @@ class WithdrawalAuditListView(WithdrawalAuditBaseView):
 
 class WithdrawalAuditPreviousButton(discord.ui.Button):
     def __init__(self, cog, mode: str, page: int, order: str):
-        super().__init__(label="Anterior", emoji="â¬…ï¸", style=discord.ButtonStyle.secondary, custom_id=f"g3n:admin:withdrawal_audit:prev:{mode}:{page}:{order}", row=4, disabled=page <= 0)
+        super().__init__(label="Anterior", emoji="\u2b05\ufe0f", style=discord.ButtonStyle.secondary, custom_id=f"g3n:admin:withdrawal_audit:prev:{mode}:{page}:{order}", row=4, disabled=page <= 0)
         self.cog = cog
         self.mode = mode
         self.page = page
         self.order = order
 
     async def callback(self, interaction: discord.Interaction) -> None:
+        await defer_ephemeral(interaction)
         gate = WithdrawalAuditBaseView(self.cog)
         if not await gate.require_admin(interaction):
             return
         new_page = max(0, self.page - 1)
         embed, page_rows, _ = build_withdrawal_audit_list_embed(self.cog, interaction.guild, self.mode, new_page, self.order)
-        await edit_audit_message(interaction, content="AuditorÃ­a de pagos y cobros:", embed=embed, view=WithdrawalAuditListView.from_records(self.cog, self.mode, new_page, self.order, page_rows))
+        await edit_audit_message(interaction, content="Auditor\u00eda de pagos y cobros:", embed=embed, view=WithdrawalAuditListView.from_records(self.cog, self.mode, new_page, self.order, page_rows))
 
 
 class WithdrawalAuditNextButton(discord.ui.Button):
     def __init__(self, cog, mode: str, page: int, order: str):
-        super().__init__(label="Siguiente", emoji="âž¡ï¸", style=discord.ButtonStyle.secondary, custom_id=f"g3n:admin:withdrawal_audit:next:{mode}:{page}:{order}", row=4)
+        super().__init__(label="Siguiente", emoji="\u27a1\ufe0f", style=discord.ButtonStyle.secondary, custom_id=f"g3n:admin:withdrawal_audit:next:{mode}:{page}:{order}", row=4)
         self.cog = cog
         self.mode = mode
         self.page = page
         self.order = order
 
     async def callback(self, interaction: discord.Interaction) -> None:
+        await defer_ephemeral(interaction)
         gate = WithdrawalAuditBaseView(self.cog)
         if not await gate.require_admin(interaction):
             return
@@ -441,7 +455,7 @@ class WithdrawalAuditNextButton(discord.ui.Button):
         total_pages = max(1, (len(rows) + WITHDRAWAL_AUDIT_PAGE_SIZE - 1) // WITHDRAWAL_AUDIT_PAGE_SIZE)
         new_page = min(total_pages - 1, self.page + 1)
         embed, page_rows, _ = build_withdrawal_audit_list_embed(self.cog, interaction.guild, self.mode, new_page, self.order)
-        await edit_audit_message(interaction, content="AuditorÃ­a de pagos y cobros:", embed=embed, view=WithdrawalAuditListView.from_records(self.cog, self.mode, new_page, self.order, page_rows))
+        await edit_audit_message(interaction, content="Auditor\u00eda de pagos y cobros:", embed=embed, view=WithdrawalAuditListView.from_records(self.cog, self.mode, new_page, self.order, page_rows))
 
 
 class WithdrawalAuditListOrderButton(discord.ui.Button):
@@ -452,11 +466,12 @@ class WithdrawalAuditListOrderButton(discord.ui.Button):
         self.next_order = next_order
 
     async def callback(self, interaction: discord.Interaction) -> None:
+        await defer_ephemeral(interaction)
         gate = WithdrawalAuditBaseView(self.cog)
         if not await gate.require_admin(interaction):
             return
         embed, page_rows, _ = build_withdrawal_audit_list_embed(self.cog, interaction.guild, self.mode, 0, self.next_order)
-        await edit_audit_message(interaction, content="AuditorÃ­a de pagos y cobros:", embed=embed, view=WithdrawalAuditListView.from_records(self.cog, self.mode, 0, self.next_order, page_rows))
+        await edit_audit_message(interaction, content="Auditor\u00eda de pagos y cobros:", embed=embed, view=WithdrawalAuditListView.from_records(self.cog, self.mode, 0, self.next_order, page_rows))
 
 
 class WithdrawalAuditBackHomeButton(discord.ui.Button):
@@ -466,12 +481,13 @@ class WithdrawalAuditBackHomeButton(discord.ui.Button):
         self.order = order
 
     async def callback(self, interaction: discord.Interaction) -> None:
+        await defer_ephemeral(interaction)
         view = WithdrawalAuditHomeView(self.cog, self.order)
         if not await view.require_admin(interaction):
             return
         await edit_audit_message(
             interaction,
-            content="AuditorÃ­a de pagos y cobros:",
+            content="Auditor\u00eda de pagos y cobros:",
             embed=build_withdrawal_audit_home_embed(self.cog, interaction.guild),
             view=view,
         )
@@ -488,11 +504,12 @@ class WithdrawalAuditRecordView(WithdrawalAuditBaseView):
 
 class WithdrawalAuditRecordDetailsButton(discord.ui.Button):
     def __init__(self, cog, code: str):
-        super().__init__(label="Historial", emoji="ðŸ“„", style=discord.ButtonStyle.secondary, custom_id=f"g3n:admin:withdrawal_audit:record_history:{code}", row=0)
+        super().__init__(label="Historial", emoji="\U0001F4C4", style=discord.ButtonStyle.secondary, custom_id=f"g3n:admin:withdrawal_audit:record_history:{code}", row=0)
         self.cog = cog
         self.code = code
 
     async def callback(self, interaction: discord.Interaction) -> None:
+        await defer_ephemeral(interaction)
         gate = WithdrawalAuditBaseView(self.cog)
         if not await gate.require_admin(interaction):
             return
@@ -538,14 +555,16 @@ class WithdrawalAuditDetailsView(WithdrawalAuditBaseView):
             view=WithdrawalAuditDetailsView(self.cog, self.code, page, back_mode=self.back_mode, back_page=self.back_page, order=self.order, record=record),
         )
 
-    @discord.ui.button(label="Anterior", emoji="â¬…ï¸", style=discord.ButtonStyle.secondary, custom_id="g3n:admin:withdrawal_audit:detail_prev", row=4)
+    @discord.ui.button(label="Anterior", emoji="\u2b05\ufe0f", style=discord.ButtonStyle.secondary, custom_id="g3n:admin:withdrawal_audit:detail_prev", row=4)
     async def previous(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
+        await defer_ephemeral(interaction)
         if not await self.require_admin(interaction):
             return
         await self._show_page(interaction, max(0, self.page - 1))
 
-    @discord.ui.button(label="Siguiente", emoji="âž¡ï¸", style=discord.ButtonStyle.secondary, custom_id="g3n:admin:withdrawal_audit:detail_next", row=4)
+    @discord.ui.button(label="Siguiente", emoji="\u27a1\ufe0f", style=discord.ButtonStyle.secondary, custom_id="g3n:admin:withdrawal_audit:detail_next", row=4)
     async def next(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
+        await defer_ephemeral(interaction)
         if not await self.require_admin(interaction):
             return
         dataset = get_withdrawal_audit_dataset(self.cog.db, interaction.guild.id)
@@ -555,28 +574,30 @@ class WithdrawalAuditDetailsView(WithdrawalAuditBaseView):
 
     @discord.ui.button(label="Volver", emoji="\u21a9\ufe0f", style=discord.ButtonStyle.secondary, custom_id="g3n:admin:withdrawal_audit:detail_back", row=4)
     async def back(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
+        await defer_ephemeral(interaction)
         if not await self.require_admin(interaction):
             return
         if self.back_mode == "record":
             dataset = get_withdrawal_audit_dataset(self.cog.db, interaction.guild.id)
             record = dataset.get_record(self.code)
             if record is None:
-                await edit_audit_message(interaction, content="AuditorÃ­a de pagos y cobros:", embed=build_withdrawal_audit_home_embed(self.cog, interaction.guild), view=WithdrawalAuditHomeView(self.cog, self.order))
+                await edit_audit_message(interaction, content="Auditor\u00eda de pagos y cobros:", embed=build_withdrawal_audit_home_embed(self.cog, interaction.guild), view=WithdrawalAuditHomeView(self.cog, self.order))
                 return
-            await edit_audit_message(interaction, content=f"Resultado de bÃºsqueda `{self.code}`:", embed=build_withdrawal_audit_record_embed(self.cog, interaction.guild, record), view=WithdrawalAuditRecordView(self.cog, self.code, record=record))
+            await edit_audit_message(interaction, content=f"Resultado de b\u00fasqueda `{self.code}`:", embed=build_withdrawal_audit_record_embed(self.cog, interaction.guild, record), view=WithdrawalAuditRecordView(self.cog, self.code, record=record))
             return
         embed, page_rows, _ = build_withdrawal_audit_list_embed(self.cog, interaction.guild, self.back_mode, self.back_page, self.order)
-        await edit_audit_message(interaction, content="AuditorÃ­a de pagos y cobros:", embed=embed, view=WithdrawalAuditListView.from_records(self.cog, self.back_mode, self.back_page, self.order, page_rows))
+        await edit_audit_message(interaction, content="Auditor\u00eda de pagos y cobros:", embed=embed, view=WithdrawalAuditListView.from_records(self.cog, self.back_mode, self.back_page, self.order, page_rows))
 
 
 class WithdrawalAuditSearchModal(discord.ui.Modal, title="Buscar solicitud"):
-    query = discord.ui.TextInput(label="NÃºmero de solicitud o nombre del usuario", placeholder="COBRO-000006, 000006, Cometeelpan", max_length=80)
+    query = discord.ui.TextInput(label="N\u00famero de solicitud o nombre del usuario", placeholder="COBRO-000006, 000006, Cometeelpan", max_length=80)
 
     def __init__(self, cog):
         super().__init__()
         self.cog = cog
 
     async def on_submit(self, interaction: discord.Interaction) -> None:
+        await defer_ephemeral(interaction)
         if interaction.guild is None or not is_admin_subject(self.cog.db, interaction):
             await private_response(interaction, "Solo admins autorizados pueden usar este panel.")
             return
@@ -587,20 +608,20 @@ class WithdrawalAuditSearchModal(discord.ui.Modal, title="Buscar solicitud"):
             name_resolver=lambda user_id: plain_user_name(interaction.guild, user_id),
         )
         if not matches:
-            await private_response(interaction, "No encontrÃ© solicitudes con esa bÃºsqueda.")
+            await private_response(interaction, "No encontr\u00e9 solicitudes con esa b\u00fasqueda.")
             return
         if len(matches) == 1:
             record = matches[0]
             await private_response(
                 interaction,
-                f"Resultado de bÃºsqueda `{record.code}`:",
+                f"Resultado de b\u00fasqueda `{record.code}`:",
                 embed=build_withdrawal_audit_record_embed(self.cog, interaction.guild, record),
                 view=WithdrawalAuditRecordView(self.cog, record.code, record=record),
             )
             return
-        embed = discord.Embed(title="ðŸ”Ž Coincidencias de cobros", color=discord.Color.blurple())
+        embed = discord.Embed(title="\U0001F50E Coincidencias de cobros", color=discord.Color.blurple())
         lines = [
-            f"**{index}. `{record.code}`** Â· {user_label(interaction.guild, record.user_id)} Â· {format_amount(record.amount_requested)} Â· {record.audit_label}"
+            f"**{index}. `{record.code}`** \u00b7 {user_label(interaction.guild, record.user_id)} \u00b7 {format_amount(record.amount_requested)} \u00b7 {record.audit_label}"
             for index, record in enumerate(matches[:WITHDRAWAL_AUDIT_PAGE_SIZE], start=1)
         ]
         embed.description = "\n".join(lines)
@@ -622,20 +643,21 @@ class WithdrawalAuditSearchResultsView(WithdrawalAuditBaseView):
 
 class WithdrawalAuditSearchResultButton(discord.ui.Button):
     def __init__(self, cog, code: str, index: int):
-        super().__init__(label=f"Solicitud {index}", emoji="ðŸ“„", style=discord.ButtonStyle.secondary, custom_id=f"g3n:admin:withdrawal_audit:search_result:{code}", row=0)
+        super().__init__(label=f"Solicitud {index}", emoji="\U0001F4C4", style=discord.ButtonStyle.secondary, custom_id=f"g3n:admin:withdrawal_audit:search_result:{code}", row=0)
         self.cog = cog
         self.code = code
 
     async def callback(self, interaction: discord.Interaction) -> None:
+        await defer_ephemeral(interaction)
         gate = WithdrawalAuditBaseView(self.cog)
         if not await gate.require_admin(interaction):
             return
         dataset = get_withdrawal_audit_dataset(self.cog.db, interaction.guild.id)
         record = dataset.get_record(self.code)
         if record is None:
-            await private_response(interaction, "No encontrÃ© esa solicitud.")
+            await private_response(interaction, "No encontr\u00e9 esa solicitud.")
             return
-        await edit_audit_message(interaction, content=f"Resultado de bÃºsqueda `{self.code}`:", embed=build_withdrawal_audit_record_embed(self.cog, interaction.guild, record), view=WithdrawalAuditRecordView(self.cog, self.code, record=record))
+        await edit_audit_message(interaction, content=f"Resultado de b\u00fasqueda `{self.code}`:", embed=build_withdrawal_audit_record_embed(self.cog, interaction.guild, record), view=WithdrawalAuditRecordView(self.cog, self.code, record=record))
 
 
 
@@ -720,6 +742,7 @@ class WithdrawalAuditFilterModal(discord.ui.Modal, title="Filtrar auditoría"):
         self.cog = cog
 
     async def on_submit(self, interaction: discord.Interaction) -> None:
+        await defer_ephemeral(interaction)
         if interaction.guild is None or not is_admin_subject(self.cog.db, interaction):
             await private_response(interaction, "Solo admins autorizados pueden usar este panel.")
             return
@@ -751,14 +774,14 @@ class WithdrawalAuditReportOptionsView(WithdrawalAuditBaseView):
     def __init__(self, cog):
         super().__init__(cog)
         options = [
-            ("Periodo completo", "all", "ðŸ“‹", 0),
-            ("DÃ­a actual", "today", "ðŸ“…", 0),
-            ("Ãšltimos 7 dÃ­as", "last_7_days", "ðŸ—“ï¸", 0),
-            ("Mes actual", "month", "ðŸ“†", 1),
-            ("Solo pendientes", "pending", "ðŸŸ¡", 1),
-            ("Solo pagadas", "paid", "ðŸŸ¢", 1),
-            ("Pagos parciales", "partial", "ðŸŸ£", 2),
-            ("Rech. o regresadas", "rejected_returned", "ðŸ”´", 2),
+            ("Periodo completo", "all", "\U0001F4CB", 0),
+            ("D\u00eda actual", "today", "\U0001F4C5", 0),
+            ("\u00daltimos 7 d\u00edas", "last_7_days", "\U0001F5D3\ufe0f", 0),
+            ("Mes actual", "month", "\U0001F4C6", 1),
+            ("Solo pendientes", "pending", "\U0001F7E1", 1),
+            ("Solo pagadas", "paid", "\U0001F7E2", 1),
+            ("Pagos parciales", "partial", "\U0001F7E3", 2),
+            ("Rech. o regresadas", "rejected_returned", "\U0001F534", 2),
         ]
         for label, mode, emoji, row in options:
             self.add_item(WithdrawalAuditReportButton(cog, label, mode, emoji, row))
@@ -773,6 +796,7 @@ class WithdrawalAuditReportButton(discord.ui.Button):
         self.mode = mode
 
     async def callback(self, interaction: discord.Interaction) -> None:
+        await defer_ephemeral(interaction)
         gate = WithdrawalAuditBaseView(self.cog)
         if not await gate.require_admin(interaction):
             return
@@ -781,7 +805,7 @@ class WithdrawalAuditReportButton(discord.ui.Button):
 
 class WithdrawalAuditReportRangeButton(discord.ui.Button):
     def __init__(self, cog):
-        super().__init__(label="Rango personalizado", emoji="ðŸ“†", style=discord.ButtonStyle.primary, custom_id="g3n:admin:withdrawal_audit:report_range", row=3)
+        super().__init__(label="Rango personalizado", emoji="\U0001F4C6", style=discord.ButtonStyle.primary, custom_id="g3n:admin:withdrawal_audit:report_range", row=3)
         self.cog = cog
 
     async def callback(self, interaction: discord.Interaction) -> None:
@@ -800,6 +824,7 @@ class WithdrawalAuditReportRangeModal(discord.ui.Modal, title="Rango personaliza
         self.cog = cog
 
     async def on_submit(self, interaction: discord.Interaction) -> None:
+        await defer_ephemeral(interaction)
         if interaction.guild is None or not is_admin_subject(self.cog.db, interaction):
             await private_response(interaction, "Solo admins autorizados pueden usar este panel.")
             return
@@ -820,7 +845,7 @@ async def send_withdrawal_audit_report(
     date_from: str | None = None,
     date_to: str | None = None,
 ) -> None:
-    await interaction.response.defer(ephemeral=True)
+    await defer_ephemeral(interaction)
     try:
         report_files = build_withdrawal_audit_report_files(
             cog.db,
@@ -837,7 +862,7 @@ async def send_withdrawal_audit_report(
         batch = report_files[index : index + 10]
         files = [discord.File(io.BytesIO(item.data), filename=item.filename) for item in batch]
         await interaction.followup.send(
-            "Reporte de auditorÃ­a de pagos y cobros generado." if index == 0 else "Reporte de auditorÃ­a de pagos y cobros, continuaciÃ³n.",
+            "Reporte de auditor\u00eda de pagos y cobros generado." if index == 0 else "Reporte de auditor\u00eda de pagos y cobros, continuaci\u00f3n.",
             files=files,
             ephemeral=True,
         )
