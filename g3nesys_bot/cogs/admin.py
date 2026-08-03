@@ -4004,9 +4004,14 @@ class AdminPanelView(discord.ui.View):
     async def withdrawal_audit(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
         try:
             await interaction.response.defer(ephemeral=True)
-            if not await self.require_admin(interaction):
+            if not is_admin_subject(self.cog.db, interaction):
+                await interaction.followup.send("Solo admins autorizados pueden usar este panel.", ephemeral=True)
                 return
-            embed = build_withdrawal_audit_home_embed(self.cog, interaction.guild)
+            embed = discord.Embed(
+                title="💳 Auditoría de pagos y cobros",
+                description="Selecciona una categoría para consultar las solicitudes de cobro.",
+                color=discord.Color.blurple(),
+            )
             view = WithdrawalAuditHomeView(self.cog, admin_panel_view_cls=AdminPanelView)
             await interaction.followup.send(embed=embed, view=view, ephemeral=True)
         except Exception:
