@@ -3,6 +3,7 @@
 from datetime import datetime, timedelta, timezone
 import io
 from pathlib import Path
+import traceback
 
 import discord
 from discord.ext import commands
@@ -4001,12 +4002,18 @@ class AdminPanelView(discord.ui.View):
 
     @discord.ui.button(label="Auditoría pagos/cobros", emoji="💳", style=discord.ButtonStyle.secondary, custom_id="g3n:admin:withdrawal_audit", row=3)
     async def withdrawal_audit(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
-        if await self.require_admin(interaction):
-            await private_response(
-                interaction,
-                "Auditoría de pagos y cobros:",
-                embed=build_withdrawal_audit_home_embed(self.cog, interaction.guild),
-                view=WithdrawalAuditHomeView(self.cog, admin_panel_view_cls=AdminPanelView),
+        try:
+            await interaction.response.defer(ephemeral=True)
+            if not await self.require_admin(interaction):
+                return
+            embed = build_withdrawal_audit_home_embed(self.cog, interaction.guild)
+            view = WithdrawalAuditHomeView(self.cog, admin_panel_view_cls=AdminPanelView)
+            await interaction.followup.send(embed=embed, view=view, ephemeral=True)
+        except Exception:
+            traceback.print_exc()
+            await interaction.followup.send(
+                "❌ No se pudo abrir la Auditoría de pagos y cobros.",
+                ephemeral=True,
             )
 
     @discord.ui.button(label="Más", emoji="\U0001F9ED", style=discord.ButtonStyle.secondary, custom_id="g3n:admin:more", row=4)
