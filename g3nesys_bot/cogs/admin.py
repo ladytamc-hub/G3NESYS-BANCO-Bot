@@ -84,6 +84,8 @@ from ..services.quick_liquidations import (
 )
 from ..services.reports import create_admin_report
 from ..utils import format_amount, format_money, join_csv_ids, parse_channel_id, parse_int_amount, split_csv_ids, utc_now_iso
+from .withdrawal_audit_views import WithdrawalAuditHomeView, build_withdrawal_audit_home_embed
+
 
 
 NOTIFICATION_CHANNEL_CATEGORIES = (
@@ -3997,6 +3999,16 @@ class AdminPanelView(discord.ui.View):
                 view=ActivityAuditHomeView(self.cog),
             )
 
+    @discord.ui.button(label="Auditoría pagos/cobros", emoji="💳", style=discord.ButtonStyle.secondary, custom_id="g3n:admin:withdrawal_audit", row=3)
+    async def withdrawal_audit(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
+        if await self.require_admin(interaction):
+            await private_response(
+                interaction,
+                "Auditoría de pagos y cobros:",
+                embed=build_withdrawal_audit_home_embed(self.cog, interaction.guild),
+                view=WithdrawalAuditHomeView(self.cog, admin_panel_view_cls=AdminPanelView),
+            )
+
     @discord.ui.button(label="Más", emoji="\U0001F9ED", style=discord.ButtonStyle.secondary, custom_id="g3n:admin:more", row=4)
     async def more(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
         if await self.require_admin(interaction):
@@ -7301,3 +7313,4 @@ class Admin(commands.Cog):
 
 async def setup(bot: commands.Bot) -> None:
     await bot.add_cog(Admin(bot))
+
