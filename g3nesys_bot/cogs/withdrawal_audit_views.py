@@ -263,16 +263,16 @@ class WithdrawalAuditHomeView(WithdrawalAuditBaseView):
         self._add_buttons()
 
     def _add_buttons(self) -> None:
-        self.add_item(WithdrawalAuditModeButton(self.cog, "Pendientes", "ðŸŸ¡", "pending", self.order, discord.ButtonStyle.secondary, 0))
-        self.add_item(WithdrawalAuditModeButton(self.cog, "Pagos parciales", "ðŸŸ£", "partial", self.order, discord.ButtonStyle.secondary, 0))
-        self.add_item(WithdrawalAuditModeButton(self.cog, "Pagadas", "ðŸŸ¢", "paid", self.order, discord.ButtonStyle.success, 0))
-        self.add_item(WithdrawalAuditModeButton(self.cog, "Rechazadas", "ðŸ”´", "rejected", self.order, discord.ButtonStyle.danger, 1))
-        self.add_item(WithdrawalAuditModeButton(self.cog, "Regresadas", "â†©ï¸", "returned", self.order, discord.ButtonStyle.secondary, 1))
-        self.add_item(WithdrawalAuditModeButton(self.cog, "Todas", "ðŸ“‹", "all", self.order, discord.ButtonStyle.primary, 1))
+        self.add_item(WithdrawalAuditModeButton(self.cog, "Pendientes", "\U0001F7E1", "pending", self.order, discord.ButtonStyle.secondary, 0))
+        self.add_item(WithdrawalAuditModeButton(self.cog, "Pagos parciales", "\U0001F7E3", "partial", self.order, discord.ButtonStyle.secondary, 0))
+        self.add_item(WithdrawalAuditModeButton(self.cog, "Pagadas", "\U0001F7E2", "paid", self.order, discord.ButtonStyle.success, 0))
+        self.add_item(WithdrawalAuditModeButton(self.cog, "Rechazadas", "\U0001F534", "rejected", self.order, discord.ButtonStyle.danger, 1))
+        self.add_item(WithdrawalAuditModeButton(self.cog, "Regresadas", "\u21a9\ufe0f", "returned", self.order, discord.ButtonStyle.secondary, 1))
+        self.add_item(WithdrawalAuditModeButton(self.cog, "Todas", "\U0001F4CB", "all", self.order, discord.ButtonStyle.primary, 1))
         self.add_item(WithdrawalAuditSearchButton(self.cog))
         next_order = "asc" if self.order != "asc" else "desc"
-        label = "MÃ¡s recientes" if self.order != "asc" else "MÃ¡s antiguas"
-        emoji = "â¬‡ï¸" if self.order != "asc" else "â¬†ï¸"
+        label = "M\u00e1s recientes" if self.order != "asc" else "M\u00e1s antiguas"
+        emoji = "\u2b07\ufe0f" if self.order != "asc" else "\u2b06\ufe0f"
         self.add_item(WithdrawalAuditOrderButton(self.cog, next_order, label, emoji))
         self.add_item(WithdrawalAuditReportMenuButton(self.cog))
         self.add_item(WithdrawalAuditBackAdminButton(self.cog))
@@ -300,7 +300,7 @@ class WithdrawalAuditModeButton(discord.ui.Button):
 
 class WithdrawalAuditSearchButton(discord.ui.Button):
     def __init__(self, cog):
-        super().__init__(label="Buscar solicitud", emoji="ðŸ”Ž", style=discord.ButtonStyle.secondary, custom_id="g3n:admin:withdrawal_audit:search", row=2)
+        super().__init__(label="Buscar solicitud", emoji="\U0001F50E", style=discord.ButtonStyle.secondary, custom_id="g3n:admin:withdrawal_audit:search", row=2)
         self.cog = cog
 
     async def callback(self, interaction: discord.Interaction) -> None:
@@ -330,7 +330,7 @@ class WithdrawalAuditOrderButton(discord.ui.Button):
 
 class WithdrawalAuditReportMenuButton(discord.ui.Button):
     def __init__(self, cog):
-        super().__init__(label="Descargar reporte", emoji="ðŸ“¥", style=discord.ButtonStyle.primary, custom_id="g3n:admin:withdrawal_audit:report_menu", row=2)
+        super().__init__(label="Descargar reporte", emoji="\U0001F4E5", style=discord.ButtonStyle.primary, custom_id="g3n:admin:withdrawal_audit:report_menu", row=2)
         self.cog = cog
 
     async def callback(self, interaction: discord.Interaction) -> None:
@@ -346,7 +346,7 @@ class WithdrawalAuditReportMenuButton(discord.ui.Button):
 
 class WithdrawalAuditBackAdminButton(discord.ui.Button):
     def __init__(self, cog):
-        super().__init__(label="Volver", emoji="â†©ï¸", style=discord.ButtonStyle.secondary, custom_id="g3n:admin:withdrawal_audit:back_admin", row=3)
+        super().__init__(label="Volver", emoji="\u21a9\ufe0f", style=discord.ButtonStyle.secondary, custom_id="g3n:admin:withdrawal_audit:back_admin", row=3)
         self.cog = cog
 
     async def callback(self, interaction: discord.Interaction) -> None:
@@ -461,7 +461,7 @@ class WithdrawalAuditListOrderButton(discord.ui.Button):
 
 class WithdrawalAuditBackHomeButton(discord.ui.Button):
     def __init__(self, cog, order: str = "desc"):
-        super().__init__(label="Volver", emoji="â†©ï¸", style=discord.ButtonStyle.secondary, custom_id=f"g3n:admin:withdrawal_audit:back_home:{order}", row=4)
+        super().__init__(label="Volver", emoji="\u21a9\ufe0f", style=discord.ButtonStyle.secondary, custom_id=f"g3n:admin:withdrawal_audit:back_home:{order}", row=4)
         self.cog = cog
         self.order = order
 
@@ -553,7 +553,7 @@ class WithdrawalAuditDetailsView(WithdrawalAuditBaseView):
         total_pages = max(1, (len(movements) + WITHDRAWAL_AUDIT_DETAIL_PAGE_SIZE - 1) // WITHDRAWAL_AUDIT_DETAIL_PAGE_SIZE)
         await self._show_page(interaction, min(total_pages - 1, self.page + 1))
 
-    @discord.ui.button(label="Volver", emoji="â†©ï¸", style=discord.ButtonStyle.secondary, custom_id="g3n:admin:withdrawal_audit:detail_back", row=4)
+    @discord.ui.button(label="Volver", emoji="\u21a9\ufe0f", style=discord.ButtonStyle.secondary, custom_id="g3n:admin:withdrawal_audit:detail_back", row=4)
     async def back(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
         if not await self.require_admin(interaction):
             return
@@ -698,7 +698,7 @@ def _advanced_filtered_records(cog, guild: discord.Guild, filters: dict[str, str
 
 class WithdrawalAuditFilterButton(discord.ui.Button):
     def __init__(self, cog):
-        super().__init__(label="Filtros", emoji="⚙️", style=discord.ButtonStyle.secondary, custom_id="g3n:admin:withdrawal_audit:filters", row=3)
+        super().__init__(label="Filtros", emoji="\u2699\ufe0f", style=discord.ButtonStyle.secondary, custom_id="g3n:admin:withdrawal_audit:filters", row=3)
         self.cog = cog
 
     async def callback(self, interaction: discord.Interaction) -> None:
@@ -841,7 +841,4 @@ async def send_withdrawal_audit_report(
             files=files,
             ephemeral=True,
         )
-
-
-
 
