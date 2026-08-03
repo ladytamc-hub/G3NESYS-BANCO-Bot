@@ -1554,9 +1554,9 @@ class CallerConfigPanelView(discord.ui.View):
 
 
 class CreatePingOptionsView(discord.ui.View):
-    def __init__(self, panel: "PingsPanelView"):
+    def __init__(self, cog: "Activities"):
         super().__init__(timeout=180)
-        self.panel = panel
+        self.cog = cog
 
     @discord.ui.button(
         label="Crear Ping Rápido",
@@ -1565,8 +1565,8 @@ class CreatePingOptionsView(discord.ui.View):
         custom_id="g3n:pings:create_activity:options",
         row=0,
     )
-    async def create_activity(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
-        await self.panel.create_activity(interaction, button)
+    async def create_activity(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
+        await self.cog.open_quick_ping_from_panel(interaction)
 
     @discord.ui.button(
         label="Crear Ping (Act. Split)",
@@ -1575,8 +1575,8 @@ class CreatePingOptionsView(discord.ui.View):
         custom_id="g3n:pings:select_template:options",
         row=0,
     )
-    async def select_template(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
-        await self.panel.select_template(interaction, button)
+    async def select_template(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
+        await self.cog.open_split_ping_from_panel(interaction)
 
 
 class PingsPanelView(discord.ui.View):
@@ -1619,7 +1619,7 @@ class PingsPanelView(discord.ui.View):
         await private_response(
             interaction,
             "Selecciona el tipo de ping que quieres crear:",
-            view=CreatePingOptionsView(self),
+            view=CreatePingOptionsView(self.cog),
         )
 
     @discord.ui.button(
@@ -1644,10 +1644,8 @@ class PingsPanelView(discord.ui.View):
         row=0,
     )
     async def create_activity(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
-        if not is_caller_panel_subject(self.cog.db, interaction):
-            await reject_caller_access(self.cog.db, interaction, "crear pings")
-            return
-        await self.cog.prompt_activity_creation(interaction, template_id=None)
+        await self.cog.open_quick_ping_from_panel(interaction)
+
 
     @discord.ui.button(
         label="Crear Ping (Act. Split)",
@@ -1657,33 +1655,8 @@ class PingsPanelView(discord.ui.View):
         row=0,
     )
     async def select_template(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
-        if not is_caller_panel_subject(self.cog.db, interaction):
-            await reject_caller_access(self.cog.db, interaction, "crear pings")
-            return
-        if is_admin_subject(self.cog.db, interaction):
-            templates = self.cog.db.fetch_all(
-                "SELECT * FROM templates WHERE guild_id = ? ORDER BY created_at DESC LIMIT 25",
-                (interaction.guild.id,),
-            )
-        else:
-            templates = self.cog.db.fetch_all(
-                """
-                SELECT *
-                FROM templates
-                WHERE guild_id = ? AND (created_by = ? OR publica = 1)
-                ORDER BY CASE WHEN created_by = ? THEN 0 ELSE 1 END, created_at DESC
-                LIMIT 25
-                """,
-                (interaction.guild.id, interaction.user.id, interaction.user.id),
-            )
-        if not templates:
-            await private_response(interaction, "Aun no hay plantillas disponibles. Crea una con `Crear Plantilla`.")
-            return
-        await private_response(
-            interaction,
-            "Elige la plantilla que quieres usar:",
-            view=TemplateSelectView(self.cog, templates),
-        )
+        await self.cog.open_split_ping_from_panel(interaction)
+
 
     @discord.ui.button(
         label="Crear Plantilla",
@@ -1918,8 +1891,8 @@ class PingsLegacyPanelCallbacksView(discord.ui.View):
         style=discord.ButtonStyle.success,
         custom_id="g3n:pings:create_activity",
     )
-    async def create_activity(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
-        await PingsPanelView(self.cog).create_activity(interaction, button)
+    async def create_activity(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
+        await self.cog.open_quick_ping_from_panel(interaction)
 
     @discord.ui.button(
         label="Crear Ping (Act. Split)",
@@ -1927,8 +1900,8 @@ class PingsLegacyPanelCallbacksView(discord.ui.View):
         style=discord.ButtonStyle.secondary,
         custom_id="g3n:pings:select_template",
     )
-    async def select_template(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
-        await PingsPanelView(self.cog).select_template(interaction, button)
+    async def select_template(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
+        await self.cog.open_split_ping_from_panel(interaction)
 
 
 class ActivityView(discord.ui.View):
@@ -3594,6 +3567,62 @@ class Activities(commands.Cog):
         if channel is None or not callable(getattr(channel, "send", None)):
             raise ValueError("El canal de pings configurado ya no existe o no permite publicar.")
         return channel
+
+    async def _ping_open_error_response(self, interaction: discord.Interaction, content: str) -> None:
+        if interaction.response.is_done():
+            await interaction.followup.send(content, ephemeral=True)
+        else:
+            await interaction.response.send_message(content, ephemeral=True)
+
+    async def open_quick_ping_from_panel(self, interaction: discord.Interaction) -> None:
+        try:
+            if not is_caller_panel_subject(self.db, interaction):
+                await reject_caller_access(self.db, interaction, "crear pings")
+                return
+            await self.prompt_activity_creation(interaction, template_id=None)
+        except Exception:
+            LOGGER.exception("Error al abrir creacion de ping rapido")
+            await self._ping_open_error_response(
+                interaction,
+                "Ocurri? un error al abrir el formulario de ping.",
+            )
+
+    async def open_split_ping_from_panel(self, interaction: discord.Interaction) -> None:
+        try:
+            await defer_private_response(interaction)
+            if not is_caller_panel_subject(self.db, interaction):
+                await reject_caller_access(self.db, interaction, "crear pings")
+                return
+            if is_admin_subject(self.db, interaction):
+                templates = self.db.fetch_all(
+                    "SELECT * FROM templates WHERE guild_id = ? ORDER BY created_at DESC LIMIT 25",
+                    (interaction.guild.id,),
+                )
+            else:
+                templates = self.db.fetch_all(
+                    """
+                    SELECT *
+                    FROM templates
+                    WHERE guild_id = ? AND (created_by = ? OR publica = 1)
+                    ORDER BY CASE WHEN created_by = ? THEN 0 ELSE 1 END, created_at DESC
+                    LIMIT 25
+                    """,
+                    (interaction.guild.id, interaction.user.id, interaction.user.id),
+                )
+            if not templates:
+                await private_response(interaction, "Aun no hay plantillas disponibles. Crea una con `Crear Plantilla`.")
+                return
+            await private_response(
+                interaction,
+                "Elige la plantilla que quieres usar:",
+                view=TemplateSelectView(self, templates),
+            )
+        except Exception:
+            LOGGER.exception("Error al abrir creacion de ping con split")
+            await self._ping_open_error_response(
+                interaction,
+                "Ocurri? un error al abrir el formulario de ping.",
+            )
 
     async def prompt_activity_creation(
         self,

@@ -19,13 +19,29 @@ from g3nesys_bot.services.fines import create_fine
 class FakeResponse:
     def __init__(self):
         self.messages = []
+        self.deferred = None
+        self.modal = None
         self._done = False
 
     def is_done(self):
         return self._done
 
+    async def defer(self, *, ephemeral=False):
+        if self._done:
+            raise AssertionError("response.defer called after response was done")
+        self.deferred = ephemeral
+        self._done = True
+
     async def send_message(self, content, *, ephemeral=False, **kwargs):
+        if self._done:
+            raise AssertionError("response.send_message called after response was done")
         self.messages.append((content, ephemeral, kwargs))
+        self._done = True
+
+    async def send_modal(self, modal):
+        if self._done:
+            raise AssertionError("response.send_modal called after response was done")
+        self.modal = modal
         self._done = True
 
 
@@ -140,22 +156,73 @@ class PingsPanelAndPenaltyTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsInstance(kwargs["view"], CreatePingOptionsView)
 
     def test_secondary_view_shows_existing_ping_options(self):
-        secondary = CreatePingOptionsView(PingsPanelView(self.cog))
+        secondary = CreatePingOptionsView(self.cog)
 
         self.assertEqual(self.labels(secondary), ["Crear Ping Rápido", "Crear Ping (Act. Split)"])
 
-    async def test_secondary_buttons_reuse_existing_panel_callbacks(self):
-        panel = PingsPanelView(self.cog)
-        panel.create_activity = AsyncMock()
-        panel.select_template = AsyncMock()
-        secondary = CreatePingOptionsView(panel)
+    async def test_secondary_quick_ping_opens_modal_without_defer(self):
+        self.db.execute(
+            """
+            INSERT INTO callers (guild_id, user_id, added_by, created_at)
+            VALUES (?, ?, ?, ?)
+            """,
+            (self.guild.id, 100, 200, "2026-08-02T00:00:00+00:00"),
+        )
+        secondary = CreatePingOptionsView(self.cog)
         interaction = FakeInteraction(self.guild)
 
-        await secondary.children[0].callback(interaction)
-        await secondary.children[1].callback(interaction)
+        with patch("g3nesys_bot.cogs.activities.is_caller_panel_subject", return_value=True):
+            await secondary.children[0].callback(interaction)
 
-        panel.create_activity.assert_awaited_once()
-        panel.select_template.assert_awaited_once()
+        self.assertIsNotNone(interaction.response.modal)
+        self.assertIsNone(interaction.response.deferred)
+        self.assertEqual(interaction.response.messages, [])
+        self.assertEqual(interaction.followup.messages, [])
+
+    async def test_secondary_split_ping_defers_and_opens_template_selector(self):
+        self.db.execute(
+            """
+            INSERT INTO callers (guild_id, user_id, added_by, created_at)
+            VALUES (?, ?, ?, ?)
+            """,
+            (self.guild.id, 100, 200, "2026-08-02T00:00:00+00:00"),
+        )
+        self.db.execute(
+            """
+            INSERT INTO templates (
+                guild_id, name, activity_name, default_time, description,
+                publica, created_by, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (self.guild.id, "Plantilla", "Avalon", "20:00", "Desc", 1, 100, "2026-08-02T00:00:00+00:00"),
+        )
+        secondary = CreatePingOptionsView(self.cog)
+        interaction = FakeInteraction(self.guild)
+
+        with patch("g3nesys_bot.cogs.activities.is_caller_panel_subject", return_value=True):
+            await secondary.children[1].callback(interaction)
+
+        self.assertTrue(interaction.response.deferred)
+        self.assertEqual(interaction.response.messages, [])
+        self.assertEqual(len(interaction.followup.messages), 1)
+        content, ephemeral, kwargs = interaction.followup.messages[0]
+        self.assertTrue(ephemeral)
+        self.assertIn("Elige la plantilla", content)
+        self.assertEqual(kwargs["view"].__class__.__name__, "TemplateSelectView")
+
+    async def test_legacy_and_secondary_buttons_share_internal_ping_methods(self):
+        with patch.object(self.cog, "open_quick_ping_from_panel", new_callable=AsyncMock) as quick,              patch.object(self.cog, "open_split_ping_from_panel", new_callable=AsyncMock) as split:
+            legacy = PingsLegacyPanelCallbacksView(self.cog)
+            secondary = CreatePingOptionsView(self.cog)
+            interaction = FakeInteraction(self.guild)
+
+            await next(item for item in legacy.children if item.custom_id == "g3n:pings:create_activity").callback(interaction)
+            await next(item for item in legacy.children if item.custom_id == "g3n:pings:select_template").callback(interaction)
+            await secondary.children[0].callback(interaction)
+            await secondary.children[1].callback(interaction)
+
+        self.assertEqual(quick.await_count, 2)
+        self.assertEqual(split.await_count, 2)
 
     async def test_manual_fines_still_work_when_automatic_penalties_are_disabled(self):
         self.assertFalse(AUTOMATIC_PENALTIES_ENABLED)
