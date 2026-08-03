@@ -283,6 +283,44 @@ class ApproveWithdrawalReviewModal(discord.ui.Modal, title="Aprobar cobro"):
         )
 
 
+class RejectWithdrawalReviewModal(discord.ui.Modal, title="No aprobar cobro"):
+    reason = discord.ui.TextInput(
+        label="Motivo del rechazo",
+        required=False,
+        style=discord.TextStyle.paragraph,
+        max_length=600,
+    )
+
+    def __init__(self, cog: "Bank", guild_id: int, code: str):
+        super().__init__(timeout=180)
+        self.cog = cog
+        self.guild_id = guild_id
+        self.code = code
+
+    async def on_submit(self, interaction: discord.Interaction) -> None:
+        if interaction.guild is None or interaction.guild.id != self.guild_id:
+            await private_response(interaction, "Este cobro pertenece a otro servidor.")
+            return
+        if not is_admin_subject(self.cog.db, interaction):
+            await private_response(interaction, "Solo admins autorizados pueden rechazar cobros.")
+            return
+        admin_cog = self.cog.bot.get_cog("Admin")
+        if admin_cog is None:
+            await private_response(interaction, "El panel administrativo no esta disponible.")
+            return
+        try:
+            result = await admin_cog.reject_withdrawal(
+                interaction.guild,
+                self.code,
+                interaction.user.id,
+                str(self.reason.value).strip(),
+            )
+        except ValueError as exc:
+            await private_response(interaction, str(exc))
+            return
+        await private_response(interaction, result)
+
+
 class LiquidateWithdrawalReviewModal(discord.ui.Modal, title="Liquidar cobro"):
     amount = discord.ui.TextInput(label="Monto a liquidar", placeholder="1000000")
     admin_message = discord.ui.TextInput(
@@ -502,6 +540,7 @@ class WithdrawalReviewView(discord.ui.View):
         status = withdrawal["status"] if withdrawal is not None else WITHDRAWAL_PENDING
         if status == WITHDRAWAL_PENDING:
             self._add_button("Aprobar cobro", "approve", "✅", discord.ButtonStyle.success, row=0)
+            self._add_button("Rechazar", "reject", "\U0000274C", discord.ButtonStyle.danger, row=0)
             self._add_button("Delegar pago", "delegate", "👤", discord.ButtonStyle.secondary, row=0)
         elif status in {WITHDRAWAL_APPROVED, WITHDRAWAL_PARTIAL, WITHDRAWAL_DELEGATED, WITHDRAWAL_REASSIGNMENT}:
             self._add_button("Pagado", "paid", "✅", discord.ButtonStyle.success, row=0)
@@ -525,7 +564,7 @@ class WithdrawalReviewView(discord.ui.View):
             await private_response(interaction, "Este cobro pertenece a otro servidor.")
             return
         action = str(interaction.data.get("custom_id", "")).split(":")[2]
-        if action in {"approve", "delegate"} and not is_admin_subject(self.cog.db, interaction):
+        if action in {"approve", "reject", "delegate"} and not is_admin_subject(self.cog.db, interaction):
             await private_response(interaction, "Solo admins autorizados pueden gestionar cobros.")
             return
         admin_cog = self.cog.bot.get_cog("Admin")
@@ -534,6 +573,9 @@ class WithdrawalReviewView(discord.ui.View):
             return
         if action == "approve":
             await interaction.response.send_modal(ApproveWithdrawalReviewModal(self.cog, self.guild_id, self.code))
+            return
+        if action == "reject":
+            await interaction.response.send_modal(RejectWithdrawalReviewModal(self.cog, self.guild_id, self.code))
             return
         if action == "liquidate":
             await interaction.response.send_modal(LiquidateWithdrawalReviewModal(self.cog, self.guild_id, self.code))
@@ -828,7 +870,7 @@ class Bank(commands.Cog):
     def withdrawal_admin_embed(self, guild: discord.Guild, withdrawal) -> discord.Embed:
         paid = int(withdrawal["amount_liquidated"] or 0)
         requested = int(withdrawal["amount_requested"] or 0)
-        pending = max(0, requested - paid)
+        pending = 0 if withdrawal["status"] == WITHDRAWAL_REJECTED else max(0, requested - paid)
         embed = discord.Embed(
             title=f"💳 Solicitud de cobro {withdrawal['code']}",
             description=f"Estado: {withdrawal['status']}",
@@ -856,6 +898,12 @@ class Bank(commands.Cog):
             embed.add_field(name="Aprobado por", value=f"<@{withdrawal['approved_by']}>", inline=True)
         if withdrawal["approved_at"]:
             embed.add_field(name="Fecha de aprobacion", value=withdrawal["approved_at"], inline=True)
+        if withdrawal["rejected_by"]:
+            embed.add_field(name="No aprobada por", value=f"<@{withdrawal['rejected_by']}>", inline=True)
+        if withdrawal["rejected_at"]:
+            embed.add_field(name="Fecha de rechazo", value=withdrawal["rejected_at"], inline=True)
+        if withdrawal["rejection_reason"]:
+            embed.add_field(name="Motivo del rechazo", value=str(withdrawal["rejection_reason"])[:1024], inline=False)
         embed.add_field(name="Nota", value=withdrawal["reason"] or "Sin nota", inline=False)
         if withdrawal["approval_admin_message"]:
             embed.add_field(name="Indicaciones de aprobacion", value=str(withdrawal["approval_admin_message"])[:1024], inline=False)

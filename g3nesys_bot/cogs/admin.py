@@ -5300,44 +5300,21 @@ class Admin(commands.Cog):
             return
         await ctx.reply(f"Solicitud `{code}` aprobada. Queda pendiente por liquidar.", mention_author=False)
 
-    @commands.command(name="rechazar_cobro")
-    async def rechazar_cobro(self, ctx: commands.Context, code: str, *, reason: str) -> None:
+    @commands.command(name="rechazar_cobro", aliases=["no_aprobar_cobro", "noaprobar_cobro"])
+    async def rechazar_cobro(self, ctx: commands.Context, code: str, *, reason: str = "") -> None:
         if not await require_admin_context(ctx, self.db):
             return
-        withdrawal = self.db.fetch_one(
-            "SELECT * FROM withdrawals WHERE guild_id = ? AND code = ?",
-            (ctx.guild.id, code),
-        )
-        if withdrawal is None or withdrawal["status"] != WITHDRAWAL_PENDING:
-            await ctx.reply("Solo se pueden rechazar solicitudes pendientes.", mention_author=False)
-            return
-        self.db.execute(
-            """
-            UPDATE withdrawals
-            SET status = ?, rejected_by = ?, rejected_at = ?, rejection_reason = ?
-            WHERE id = ?
-            """,
-            (WITHDRAWAL_REJECTED, ctx.author.id, utc_now_iso(), reason, int(withdrawal["id"])),
-        )
-        user = ctx.guild.get_member(int(withdrawal["user_id"]))
-        if user:
-            await send_dm_safe(
-                self.db,
-                guild_id=ctx.guild.id,
-                user=user,
-                action="rechazar_cobro",
-                content=f"Tu solicitud de cobro `{code}` fue rechazada. Motivo: {reason}",
+        try:
+            result = await self.reject_withdrawal(
+                ctx.guild,
+                code,
+                ctx.author.id,
+                reason.strip(),
             )
-        await send_admin_notification(
-            self.db,
-            guild=ctx.guild,
-            category="withdrawals",
-            content=(
-                f"❌ Cobro `{code}` rechazado por <@{ctx.author.id}> para "
-                f"<@{withdrawal['user_id']}>. Motivo: {reason}"
-            ),
-        )
-        await ctx.reply(f"Solicitud `{code}` rechazada.", mention_author=False)
+        except ValueError as exc:
+            await ctx.reply(str(exc), mention_author=False)
+            return
+        await ctx.reply(result, mention_author=False)
 
     @commands.command(name="liquidar_cobro")
     async def liquidar_cobro(
@@ -5815,6 +5792,144 @@ class Admin(commands.Cog):
         if bank_cog is None or not hasattr(bank_cog, "refresh_withdrawal_admin_message"):
             return ""
         return await bank_cog.refresh_withdrawal_admin_message(guild, code, actor_id=admin_id)
+
+    async def reject_withdrawal(
+        self,
+        guild: discord.Guild,
+        code: str,
+        admin_id: int,
+        reason: str = "",
+    ) -> str:
+        code = code.strip().upper()
+        reason = str(reason or "").strip()[:600]
+        key = (guild.id, code)
+        if key in self._withdrawal_processing:
+            raise ValueError("Esta solicitud ya se esta procesando. Espera unos segundos antes de reintentar.")
+        self._withdrawal_processing.add(key)
+        try:
+            return await self._reject_withdrawal_locked(guild, code, admin_id, reason)
+        finally:
+            self._withdrawal_processing.discard(key)
+
+    async def _reject_withdrawal_locked(
+        self,
+        guild: discord.Guild,
+        code: str,
+        admin_id: int,
+        reason: str = "",
+    ) -> str:
+        now = utc_now_iso()
+        with self.db.transaction() as cursor:
+            withdrawal = cursor.execute(
+                "SELECT * FROM withdrawals WHERE guild_id = ? AND code = ?",
+                (guild.id, code),
+            ).fetchone()
+            if withdrawal is None:
+                raise ValueError("No encontre esa solicitud.")
+            if withdrawal["status"] != WITHDRAWAL_PENDING:
+                raise ValueError("La solicitud ya no esta pendiente.")
+
+            cursor.execute(
+                """
+                UPDATE withdrawals
+                SET status = ?, rejected_by = ?, rejected_at = ?, rejection_reason = ?,
+                    amount_liquidated = NULL,
+                    approved_by = NULL, approved_at = NULL,
+                    liquidated_by = NULL, liquidated_at = NULL,
+                    assigned_officer_id = NULL, delegated_by = NULL,
+                    payment_place = NULL, payment_schedule = NULL,
+                    delegated_at = NULL, returned_at = NULL,
+                    closed_at = ?, updated_at = ?
+                WHERE guild_id = ? AND id = ? AND status = ?
+                """,
+                (
+                    WITHDRAWAL_REJECTED,
+                    admin_id,
+                    now,
+                    reason or None,
+                    now,
+                    now,
+                    guild.id,
+                    int(withdrawal["id"]),
+                    WITHDRAWAL_PENDING,
+                ),
+            )
+            if cursor.rowcount != 1:
+                raise ValueError("La solicitud ya no esta pendiente.")
+            cursor.execute(
+                """
+                INSERT INTO withdrawal_action_logs (
+                    withdrawal_id, action_type, author_id, amount,
+                    old_status, new_status, note, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    int(withdrawal["id"]),
+                    "no_aprobada",
+                    admin_id,
+                    int(withdrawal["amount_requested"]),
+                    str(withdrawal["status"]),
+                    WITHDRAWAL_REJECTED,
+                    reason or None,
+                    now,
+                ),
+            )
+            cursor.execute(
+                """
+                INSERT INTO audit_logs (
+                    guild_id, admin_id, action, affected_user_id, amount,
+                    system, observation, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    guild.id,
+                    admin_id,
+                    "Solicitud de cobro no aprobada",
+                    int(withdrawal["user_id"]),
+                    int(withdrawal["amount_requested"]),
+                    "Banco",
+                    f"{code}; motivo={reason}" if reason else code,
+                    now,
+                ),
+            )
+            user_id = int(withdrawal["user_id"])
+
+        warning = ""
+        user = guild.get_member(user_id)
+        if user:
+            dm_sent = await send_dm_safe(
+                self.db,
+                guild_id=guild.id,
+                user=user,
+                action="rechazar_cobro",
+                content=(
+                    f"Tu solicitud de cobro {code} no fue aprobada."
+                    + (f"\nMotivo: {reason}" if reason else "")
+                ),
+            )
+            if not dm_sent:
+                log_action(
+                    self.db,
+                    guild.id,
+                    admin_id=admin_id,
+                    action="Fallo DM cobro no aprobado",
+                    system="Banco",
+                    affected_user_id=user_id,
+                    observation=code,
+                )
+                warning = " Advertencia: no pude enviar DM al usuario."
+        await send_admin_notification(
+            self.db,
+            guild=guild,
+            category="withdrawals",
+            content=(
+                f"\U0000274C Cobro `{code}` no aprobado por <@{admin_id}> para <@{user_id}>."
+                + (f" Motivo: {reason}" if reason else "")
+            ),
+        )
+        warning += await self.refresh_withdrawal_admin_message(guild, code, admin_id)
+        return f"Solicitud `{code}` no aprobada.{warning}"
+
     async def approve_withdrawal(
         self,
         guild: discord.Guild,
@@ -6539,7 +6654,7 @@ class Admin(commands.Cog):
             lines.append(
                 f"`{row['code']}` <@{row['user_id']}> {format_amount(row['amount_requested'])} - {row['status']}"
             )
-        lines.append("Comandos: `!aprobar_cobro CODIGO`, `!liquidar_cobro CODIGO monto`. Botones: Pagado, Pago parcial, No pagado, Delegar.")
+        lines.append("Comandos: `!aprobar_cobro CODIGO`, `!rechazar_cobro CODIGO [motivo opcional]`, `!liquidar_cobro CODIGO monto`. Botones: Aprobar, Rechazar, Pagado, Pago parcial, No pagado, Delegar.")
         return "\n".join(lines)
 
     def liquidation_history_text(self, guild_id: int) -> str:

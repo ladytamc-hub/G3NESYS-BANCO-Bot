@@ -154,7 +154,7 @@ Cada comando se ejecuta en el canal que quieres configurar.
 !registrar_egreso monto categoria descripcion
 !depositar_usuario @usuario monto disponible motivo
 !aprobar_cobro COBRO-000001
-!rechazar_cobro COBRO-000001 motivo
+!rechazar_cobro COBRO-000001 [motivo opcional]
 !liquidar_cobro COBRO-000001 monto
 !aprobar_reparto REP-000001
 !rechazar_reparto REP-000001 motivo

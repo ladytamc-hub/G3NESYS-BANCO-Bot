@@ -119,7 +119,7 @@ class Settings(commands.Cog):
                     "`!registrar_egreso monto categoria descripcion` - Egreso gremial.",
                     "`!depositar_usuario @usuario monto disponible motivo` - Deposito admin.",
                     "`!aprobar_cobro COBRO-000001` - Aprueba cobro.",
-                    "`!rechazar_cobro COBRO-000001 motivo` - Rechaza cobro.",
+                    "`!rechazar_cobro COBRO-000001 [motivo opcional]` - Rechaza cobro.",
                     "`!liquidar_cobro COBRO-000001 monto` - Liquida cobro.",
                     "`!aprobar_split SPLIT-000001` - Aprueba Split.",
                     "`!rechazar_split SPLIT-000001 motivo` - Rechaza Split.",
