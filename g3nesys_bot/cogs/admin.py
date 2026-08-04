@@ -49,6 +49,12 @@ from ..services.activity_audit import (
     pending_days,
 )
 from ..services.audit import log_action
+from ..services.liquidation_expedient import (
+    ActivityNotFoundError,
+    ActivityWithoutLiquidationError,
+    build_liquidation_expedient_file,
+    liquidation_expedient_tempfile,
+)
 from ..services.voice_monitoring import format_duration, get_persisted_activity_voice_stats, summarize_voice_stats
 from ..services.callers import (
     CallerRemovalNoticeView,
@@ -3743,6 +3749,7 @@ class ActivityAuditRecordView(ActivityAuditBaseView):
         self.code = normalize_activity_code(code) or code
         if has_details:
             self.add_item(ActivityAuditRecordDetailsButton(cog, self.code))
+            self.add_item(ActivityLiquidationExpedientButton(cog, self.code, row=0))
         add_activity_audit_link_buttons(self, record, row=1)
         self.add_item(ActivityAuditBackHomeButton(cog))
 
@@ -3766,6 +3773,64 @@ class ActivityAuditRecordDetailsButton(discord.ui.Button):
         view = ActivityAuditDetailsView(self.cog, self.code, 0, back_mode="record", back_page=0, record=record)
         await edit_activity_audit_message(interaction, content=f"Detalles del split `{self.code}`:", embed=embed, view=view)
 
+class ActivityLiquidationExpedientButton(discord.ui.Button):
+    def __init__(self, cog: "Admin", code: str, *, row: int):
+        super().__init__(
+            label="Expediente de Liquidacion",
+            emoji="\U0001F4C1",
+            style=discord.ButtonStyle.primary,
+            custom_id=f"g3n:admin:activity_audit:expedient:{code}",
+            row=row,
+        )
+        self.cog = cog
+        self.code = normalize_activity_code(code) or code
+
+    async def callback(self, interaction: discord.Interaction) -> None:
+        if not interaction.response.is_done():
+            await interaction.response.defer(ephemeral=True)
+        gate = ActivityAuditBaseView(self.cog)
+        if not await gate.require_admin(interaction):
+            return
+        name_resolver = lambda user_id: activity_audit_plain_user_name(interaction.guild, user_id)
+        try:
+            expedient = build_liquidation_expedient_file(
+                self.cog.db,
+                interaction.guild.id,
+                self.code,
+                name_resolver=name_resolver,
+            )
+        except ActivityNotFoundError:
+            await interaction.followup.send("No encontre esa actividad.", ephemeral=True)
+            return
+        except ActivityWithoutLiquidationError:
+            await interaction.followup.send(
+                "Esta actividad todavia no tiene una liquidacion registrada.",
+                ephemeral=True,
+            )
+            return
+        content = (
+            "\U0001F4C1 Expediente de liquidacion generado\n\n"
+            f"Actividad: {expedient.activity_code}\n"
+            f"Participantes: {expedient.participant_count:02d}\n"
+            f"Solicitudes relacionadas: {expedient.request_count:02d}\n"
+            f"Estado: {expedient.liquidation_status}"
+        )
+        with liquidation_expedient_tempfile(expedient) as path:
+            file = discord.File(path, filename=expedient.filename)
+            try:
+                await interaction.followup.send(content, file=file, ephemeral=True)
+            finally:
+                close = getattr(file, "close", None)
+                if callable(close):
+                    close()
+        log_action(
+            self.cog.db,
+            interaction.guild.id,
+            admin_id=interaction.user.id,
+            action="Descargar expediente de liquidacion",
+            system="Auditoria",
+            observation=f"{expedient.activity_code}; tipo=EXPEDIENTE_LIQUIDACION",
+        )
 
 class ActivityAuditDetailsView(ActivityAuditBaseView):
     def __init__(
@@ -3784,6 +3849,8 @@ class ActivityAuditDetailsView(ActivityAuditBaseView):
         self.back_mode = back_mode
         self.back_page = back_page
         self.record = record
+        if record is not None and (record.has_split_details or record.payout_ids):
+            self.add_item(ActivityLiquidationExpedientButton(cog, self.code, row=3))
         add_activity_audit_link_buttons(self, record, row=3)
 
     async def _show_page(self, interaction: discord.Interaction, page: int) -> None:

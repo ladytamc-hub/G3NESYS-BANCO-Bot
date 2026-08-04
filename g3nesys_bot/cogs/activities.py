@@ -48,6 +48,14 @@ from ..services.callers import (
     is_caller_penalized,
 )
 from ..services.fines import create_fine
+from ..services.liquidation_expedient import (
+    ActivityNotFoundError,
+    ActivityWithoutLiquidationError,
+    activity_has_liquidation_record,
+    build_liquidation_expedient_file,
+    liquidation_expedient_tempfile,
+    NameResolver,
+)
 from ..services.notifications import send_admin_notification, send_dm_safe
 from ..services.payout_audit import log_payout_action
 from ..services.reports import create_caller_report
@@ -1948,11 +1956,15 @@ class ActivityView(discord.ui.View):
                 loot_label = "Editar Botin" if activity["mandatory_loot_amount"] is not None else "Botin"
                 self.add_control_button(loot_label, "mandatory_loot", discord.ButtonStyle.primary, 0, False, "💰")
                 self.add_control_button("Estad\u00edsticas voz", "voice_stats", discord.ButtonStyle.secondary, 0, False, "\U0001F4CA")
+                if activity_has_liquidation_record(cog.db, int(activity["guild_id"]), activity_id):
+                    self.add_control_button("Expediente de Liquidacion", "liquidation_expedient", discord.ButtonStyle.primary, 1, False, "\U0001F4C1")
                 self.add_control_button("Editar caller", "edit_caller", discord.ButtonStyle.secondary, 1, False)
                 self.add_control_button("Eliminar ping", "delete", discord.ButtonStyle.danger, 1, False)
             elif status == ACTIVITY_CANCELLED:
                 self.add_control_button("Ver participantes", "mandatory_participants", discord.ButtonStyle.secondary, 0, False, "👥")
                 self.add_control_button("Estad\u00edsticas voz", "voice_stats", discord.ButtonStyle.secondary, 0, False, "\U0001F4CA")
+                if activity_has_liquidation_record(cog.db, int(activity["guild_id"]), activity_id):
+                    self.add_control_button("Expediente de Liquidacion", "liquidation_expedient", discord.ButtonStyle.primary, 1, False, "\U0001F4C1")
                 self.add_control_button("Eliminar ping", "delete", discord.ButtonStyle.danger, 1, False)
             return
         if status in {ACTIVITY_OPEN, ACTIVITY_NOTICE}:
@@ -2007,6 +2019,8 @@ class ActivityView(discord.ui.View):
             self.add_control_button("Splitear", "payout", discord.ButtonStyle.primary, 0, False, "💰")
             self.add_control_button("Liquidación rápida", "quick_liquidation", discord.ButtonStyle.danger, 0, False, "⚡")
             self.add_control_button("Estad\u00edsticas voz", "voice_stats", discord.ButtonStyle.secondary, 0, False, "\U0001F4CA")
+            if activity_has_liquidation_record(cog.db, int(activity["guild_id"]), activity_id):
+                self.add_control_button("Expediente de Liquidacion", "liquidation_expedient", discord.ButtonStyle.primary, 1, False, "\U0001F4C1")
             self.add_control_button("Editar caller", "edit_caller", discord.ButtonStyle.secondary, 1, False)
             self.add_control_button("Eliminar", "delete", discord.ButtonStyle.danger, 1, False)
         elif status == ACTIVITY_PAYOUT_CREATED:
@@ -2014,9 +2028,13 @@ class ActivityView(discord.ui.View):
             self.add_control_button("Volver a splitear", "payout", discord.ButtonStyle.primary, 0, False, "💰")
             self.add_control_button("Liquidación rápida", "quick_liquidation", discord.ButtonStyle.danger, 0, False, "⚡")
             self.add_control_button("Estad\u00edsticas voz", "voice_stats", discord.ButtonStyle.secondary, 0, False, "\U0001F4CA")
+            if activity_has_liquidation_record(cog.db, int(activity["guild_id"]), activity_id):
+                self.add_control_button("Expediente de Liquidacion", "liquidation_expedient", discord.ButtonStyle.primary, 1, False, "\U0001F4C1")
             self.add_control_button("Eliminar", "delete", discord.ButtonStyle.danger, 1, False)
         elif status == ACTIVITY_CANCELLED:
             self.add_control_button("Estad\u00edsticas voz", "voice_stats", discord.ButtonStyle.secondary, 0, False, "\U0001F4CA")
+            if activity_has_liquidation_record(cog.db, int(activity["guild_id"]), activity_id):
+                self.add_control_button("Expediente de Liquidacion", "liquidation_expedient", discord.ButtonStyle.primary, 1, False, "\U0001F4C1")
             self.add_control_button("Eliminar", "delete", discord.ButtonStyle.danger, 1, False)
 
     def add_control_button(
@@ -3059,6 +3077,65 @@ class Activities(commands.Cog):
     ) -> None:
         discord_files = [discord.File(io.BytesIO(item.data), filename=item.filename) for item in files]
         await interaction.followup.send(content, files=discord_files, ephemeral=True)
+
+    async def send_activity_liquidation_expedient(self, interaction: discord.Interaction, activity) -> None:
+        if not interaction.response.is_done():
+            await interaction.response.defer(ephemeral=True)
+        if interaction.guild is None or int(activity["guild_id"]) != interaction.guild.id:
+            await interaction.followup.send("No encontre esta actividad en este servidor.", ephemeral=True)
+            return
+        if not is_admin_subject(self.db, interaction):
+            await interaction.followup.send("Solo admins autorizados pueden descargar expedientes de liquidacion.", ephemeral=True)
+            return
+        name_resolver = self.activity_member_name_resolver(interaction.guild)
+        try:
+            expedient = build_liquidation_expedient_file(
+                self.db,
+                interaction.guild.id,
+                str(activity["code"]),
+                name_resolver=name_resolver,
+            )
+        except ActivityNotFoundError:
+            await interaction.followup.send("No encontre esa actividad.", ephemeral=True)
+            return
+        except ActivityWithoutLiquidationError:
+            await interaction.followup.send(
+                "Esta actividad todavia no tiene una liquidacion registrada.",
+                ephemeral=True,
+            )
+            return
+        content = (
+            "\U0001F4C1 Expediente de liquidacion generado\n\n"
+            f"Actividad: {expedient.activity_code}\n"
+            f"Participantes: {expedient.participant_count:02d}\n"
+            f"Solicitudes relacionadas: {expedient.request_count:02d}\n"
+            f"Estado: {expedient.liquidation_status}"
+        )
+        with liquidation_expedient_tempfile(expedient) as path:
+            file = discord.File(path, filename=expedient.filename)
+            try:
+                await interaction.followup.send(content, file=file, ephemeral=True)
+            finally:
+                close = getattr(file, "close", None)
+                if callable(close):
+                    close()
+        log_action(
+            self.db,
+            interaction.guild.id,
+            admin_id=interaction.user.id,
+            action="Descargar expediente de liquidacion",
+            system="Auditoria",
+            observation=f"{expedient.activity_code}; tipo=EXPEDIENTE_LIQUIDACION",
+        )
+
+    def activity_member_name_resolver(self, guild: discord.Guild) -> NameResolver:
+        def resolve(user_id: int | None) -> str:
+            if user_id is None:
+                return ""
+            member = guild.get_member(int(user_id))
+            return member.display_name if member is not None else f"Usuario fuera del servidor ID {int(user_id)}"
+
+        return resolve
 
     def activity_permission_denial_reason(
         self,
@@ -6573,6 +6650,9 @@ class Activities(commands.Cog):
                 await private_response(interaction, "Las solicitudes solo estan disponibles durante la actividad.")
                 return
             await interaction.response.send_modal(JoinActivityRequestModal(self, activity_id))
+            return
+        if action == "liquidation_expedient":
+            await self.send_activity_liquidation_expedient(interaction, activity)
             return
         if action == "quick_liquidation":
             if not is_admin_subject(self.db, interaction):
