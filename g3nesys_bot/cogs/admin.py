@@ -78,6 +78,12 @@ from ..services.economy import (
     register_guild_income,
 )
 from ..services.fines import cancel_fine, create_fine
+from ..services.guild_economy import (
+    GuildEconomySummary,
+    build_guild_economy_csv_report,
+    get_guild_economy_summary,
+    guild_economy_report_tempfile,
+)
 from ..services.notifications import (
     ADMIN_CHANNEL_SETTINGS,
     send_admin_notification,
@@ -3908,6 +3914,144 @@ class ActivityAuditDetailsView(ActivityAuditBaseView):
         )
 
 
+def guild_economy_name_resolver(guild: discord.Guild):
+    def resolve(user_id: int | None) -> str:
+        if user_id is None:
+            return ""
+        member = guild.get_member(int(user_id)) if guild is not None else None
+        return member.display_name if member is not None else ""
+
+    return resolve
+
+
+def build_guild_economy_embed(summary: GuildEconomySummary) -> discord.Embed:
+    embed = discord.Embed(
+        title="\U0001F4B0 Econom\u00eda Gremial",
+        color=discord.Color.gold(),
+    )
+    embed.description = (
+        f"\U0001F4B0 Total depositado en balances: {format_amount(summary.total_deposited)}\n"
+        f"\u2705 Total ya pagado: {format_amount(summary.total_paid)}\n"
+        f"\U0001F7E1 Total pendiente por pagar: {format_amount(summary.total_pending)}\n\n"
+        f"\U0001F465 Usuarios con saldo pendiente: {summary.users_with_pending_balance}\n"
+        f"\U0001F552 \u00daltima actualizaci\u00f3n: {summary.generated_at}"
+    )
+    return embed
+
+
+async def edit_guild_economy_message(interaction: discord.Interaction, **kwargs) -> None:
+    edit_original = getattr(interaction, "edit_original_response", None)
+    if callable(edit_original):
+        await edit_original(**kwargs)
+        return
+    if not interaction.response.is_done() and hasattr(interaction.response, "edit_message"):
+        await interaction.response.edit_message(**kwargs)
+        return
+    content = kwargs.pop("content", "") or ""
+    await interaction.followup.send(content, ephemeral=True, **kwargs)
+
+
+class GuildEconomyView(discord.ui.View):
+    def __init__(self, cog: "Admin"):
+        super().__init__(timeout=300)
+        self.cog = cog
+
+    async def _defer(self, interaction: discord.Interaction) -> None:
+        if not interaction.response.is_done():
+            await interaction.response.defer(ephemeral=True)
+
+    async def require_admin(self, interaction: discord.Interaction) -> bool:
+        if interaction.guild is not None and is_admin_subject(self.cog.db, interaction):
+            return True
+        await interaction.followup.send("\u26d4 No tienes permisos para consultar Econom\u00eda Gremial.", ephemeral=True)
+        return False
+
+    async def send_summary(self, interaction: discord.Interaction) -> None:
+        await self._defer(interaction)
+        if not await self.require_admin(interaction):
+            return
+        try:
+            summary = get_guild_economy_summary(self.cog.db, interaction.guild.id)
+            await interaction.followup.send(
+                embed=build_guild_economy_embed(summary),
+                view=GuildEconomyView(self.cog),
+                ephemeral=True,
+            )
+        except Exception:
+            traceback.print_exc()
+            await interaction.followup.send("No fue posible consultar la Econom\u00eda Gremial.", ephemeral=True)
+
+    @discord.ui.button(label="Descargar reporte", emoji="\U0001F4E5", style=discord.ButtonStyle.primary, custom_id="g3n:admin:guild_economy:download", row=0)
+    async def download(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
+        await self._defer(interaction)
+        if not await self.require_admin(interaction):
+            return
+        try:
+            report = build_guild_economy_csv_report(
+                self.cog.db,
+                interaction.guild.id,
+                guild_name=getattr(interaction.guild, "name", "G3NESYS"),
+                name_resolver=guild_economy_name_resolver(interaction.guild),
+            )
+            with guild_economy_report_tempfile(report) as path:
+                file = discord.File(path, filename=report.filename)
+                try:
+                    await interaction.followup.send(
+                        "Reporte de Econom\u00eda Gremial generado.",
+                        file=file,
+                        ephemeral=True,
+                    )
+                finally:
+                    close = getattr(file, "close", None)
+                    if callable(close):
+                        close()
+            try:
+                log_action(
+                    self.cog.db,
+                    interaction.guild.id,
+                    admin_id=interaction.user.id,
+                    action="Descargar reporte Economia Gremial",
+                    system="Banco",
+                    observation="ECONOMIA_GREMIAL",
+                )
+            except Exception:
+                traceback.print_exc()
+        except Exception:
+            traceback.print_exc()
+            try:
+                await interaction.followup.send("No fue posible generar el reporte de Econom\u00eda Gremial.", ephemeral=True)
+            except Exception:
+                pass
+
+    @discord.ui.button(label="Actualizar", emoji="\U0001F504", style=discord.ButtonStyle.secondary, custom_id="g3n:admin:guild_economy:refresh", row=0)
+    async def refresh(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
+        await self._defer(interaction)
+        if not await self.require_admin(interaction):
+            return
+        try:
+            summary = get_guild_economy_summary(self.cog.db, interaction.guild.id)
+            await edit_guild_economy_message(
+                interaction,
+                embed=build_guild_economy_embed(summary),
+                view=GuildEconomyView(self.cog),
+            )
+        except Exception:
+            traceback.print_exc()
+            await interaction.followup.send("No fue posible consultar la Econom\u00eda Gremial.", ephemeral=True)
+
+    @discord.ui.button(label="Volver", emoji="\u21a9\ufe0f", style=discord.ButtonStyle.secondary, custom_id="g3n:admin:guild_economy:back", row=0)
+    async def back(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
+        await self._defer(interaction)
+        if not await self.require_admin(interaction):
+            return
+        await edit_guild_economy_message(
+            interaction,
+            content="Panel Administrativo G3NESYS",
+            embed=None,
+            view=AdminPanelView(self.cog),
+        )
+
+
 class AdminPanelView(discord.ui.View):
     def __init__(self, cog: "Admin"):
         super().__init__(timeout=None)
@@ -4084,6 +4228,10 @@ class AdminPanelView(discord.ui.View):
                 embed=build_activity_audit_home_embed(self.cog, interaction.guild),
                 view=ActivityAuditHomeView(self.cog),
             )
+
+    @discord.ui.button(label="Econom\u00eda Gremial", emoji="\U0001F4B0", style=discord.ButtonStyle.primary, custom_id="g3n:admin:guild_economy", row=3)
+    async def guild_economy(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
+        await GuildEconomyView(self.cog).send_summary(interaction)
 
     @discord.ui.button(label="Auditoría pagos/cobros", emoji="💳", style=discord.ButtonStyle.secondary, custom_id="g3n:admin:withdrawal_audit", row=3)
     async def withdrawal_audit(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
