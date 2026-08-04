@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import io
 import logging
 import re
 from collections import defaultdict
@@ -52,6 +53,9 @@ from ..services.payout_audit import log_payout_action
 from ..services.reports import create_caller_report
 from ..services.voice_monitoring import (
     VOICE_PAGE_SIZE,
+    VoiceStatsReportFile,
+    build_full_voice_stats_report_files,
+    build_short_voice_stats_report_files,
     format_duration,
     get_activity_voice_stats,
     persist_activity_voice_stats,
@@ -2061,6 +2065,32 @@ class ActivityVoiceStatsView(discord.ui.View):
     async def next(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
         await self._show_page(interaction, self.page + 1)
 
+    @discord.ui.button(label="Descargar estad\u00edsticas", emoji="\U0001F4E5", style=discord.ButtonStyle.primary, custom_id="g3n:activity:voice_stats_download", row=1)
+    async def download(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
+        await interaction.response.defer(ephemeral=True)
+        if interaction.guild is None:
+            await interaction.followup.send("Esta accion solo esta disponible en un servidor.", ephemeral=True)
+            return
+        activity = self.cog.get_guild_activity(interaction.guild.id, self.activity_id)
+        if activity is None:
+            await interaction.followup.send("No encontre esta actividad.", ephemeral=True)
+            return
+        if not self.cog.can_download_voice_stats_short(interaction, activity):
+            await interaction.followup.send("No tienes permiso para descargar estas estadisticas.", ephemeral=True)
+            return
+        content = (
+            "Selecciona el reporte que deseas descargar:\n\n"
+            "\U0001F4C4 Versi\u00f3n corta\n"
+            "Nombre y porcentaje de participaci\u00f3n.\n\n"
+            "\U0001F4D1 Versi\u00f3n completa\n"
+            "Toda la informaci\u00f3n de asistencia y auditor\u00eda."
+        )
+        await interaction.followup.send(
+            content,
+            view=ActivityVoiceStatsDownloadView(self.cog, self.activity_id),
+            ephemeral=True,
+        )
+
     async def _show_page(self, interaction: discord.Interaction, page: int) -> None:
         if interaction.guild is None:
             await private_response(interaction, "Esta accion solo esta disponible en un servidor.")
@@ -2069,6 +2099,44 @@ class ActivityVoiceStatsView(discord.ui.View):
         safe_page = min(max(page, 0), max(0, total_pages - 1))
         await interaction.response.edit_message(embed=embed, view=ActivityVoiceStatsView(self.cog, self.activity_id, safe_page))
 
+
+class ActivityVoiceStatsDownloadView(discord.ui.View):
+    def __init__(self, cog: "Activities", activity_id: int):
+        super().__init__(timeout=180)
+        self.cog = cog
+        self.activity_id = activity_id
+
+    @discord.ui.button(label="Descargar corta", emoji="\U0001F4C4", style=discord.ButtonStyle.primary, custom_id="g3n:activity:voice_stats_download_short", row=0)
+    async def short_report(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
+        await interaction.response.defer(ephemeral=True)
+        await self._send_report(interaction, full=False)
+
+    @discord.ui.button(label="Descargar completa", emoji="\U0001F4D1", style=discord.ButtonStyle.secondary, custom_id="g3n:activity:voice_stats_download_full", row=0)
+    async def full_report(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
+        await interaction.response.defer(ephemeral=True)
+        await self._send_report(interaction, full=True)
+
+    async def _send_report(self, interaction: discord.Interaction, *, full: bool) -> None:
+        if interaction.guild is None:
+            await interaction.followup.send("Esta accion solo esta disponible en un servidor.", ephemeral=True)
+            return
+        activity = self.cog.get_guild_activity(interaction.guild.id, self.activity_id)
+        if activity is None:
+            await interaction.followup.send("No encontre esta actividad.", ephemeral=True)
+            return
+        if full:
+            if not self.cog.can_download_voice_stats_full(interaction, activity):
+                await interaction.followup.send("No tienes permiso para descargar la version completa.", ephemeral=True)
+                return
+            files = build_full_voice_stats_report_files(self.cog.db, interaction.guild.id, self.activity_id)
+            label = "Reporte completo de estadisticas de voz."
+        else:
+            if not self.cog.can_download_voice_stats_short(interaction, activity):
+                await interaction.followup.send("No tienes permiso para descargar estas estadisticas.", ephemeral=True)
+                return
+            files = build_short_voice_stats_report_files(self.cog.db, interaction.guild.id, self.activity_id)
+            label = "Reporte corto de participacion."
+        await self.cog.send_voice_stats_report_files(interaction, files, label)
 
 class ActivityThreadRoleSelect(discord.ui.Select):
     def __init__(self, cog: "Activities", activity_id: int):
@@ -2972,6 +3040,25 @@ class Activities(commands.Cog):
             or self.is_activity_assigned_caller(interaction, activity)
             or self.is_activity_authorized_admin(interaction)
         )
+
+    def can_download_voice_stats_short(self, interaction: discord.Interaction, activity) -> bool:
+        if interaction.guild is None or int(activity["guild_id"]) != interaction.guild.id:
+            return False
+        return self.can_manage_activity_operational(interaction, activity) or is_caller_panel_subject(self.db, interaction)
+
+    def can_download_voice_stats_full(self, interaction: discord.Interaction, activity) -> bool:
+        if interaction.guild is None or int(activity["guild_id"]) != interaction.guild.id:
+            return False
+        return is_admin_subject(self.db, interaction)
+
+    async def send_voice_stats_report_files(
+        self,
+        interaction: discord.Interaction,
+        files: list[VoiceStatsReportFile],
+        content: str,
+    ) -> None:
+        discord_files = [discord.File(io.BytesIO(item.data), filename=item.filename) for item in files]
+        await interaction.followup.send(content, files=discord_files, ephemeral=True)
 
     def activity_permission_denial_reason(
         self,

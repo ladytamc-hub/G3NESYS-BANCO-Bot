@@ -1,5 +1,9 @@
 from __future__ import annotations
 
+import csv
+import io
+import re
+import unicodedata
 from dataclasses import dataclass
 from datetime import datetime, timezone
 
@@ -47,6 +51,12 @@ class VoiceStatsSummary:
     left_before_end: int
     never_joined: int
     average_attendance_percentage: float
+
+
+@dataclass(frozen=True)
+class VoiceStatsReportFile:
+    filename: str
+    data: bytes
 
 
 def parse_voice_datetime(value: str | None) -> datetime | None:
@@ -362,3 +372,160 @@ def summarize_voice_stats(stats: list[VoiceParticipantStat]) -> VoiceStatsSummar
         never_joined=sum(1 for item in stats if item.final_voice_status == VOICE_STATUS_NEVER),
         average_attendance_percentage=round(sum(item.attendance_percentage for item in stats) / len(stats), 2),
     )
+
+
+_SAFE_FILENAME_RE = re.compile(r"[^A-Za-z0-9._-]+")
+_DANGEROUS_CSV_PREFIXES = ("=", "+", "-", "@")
+
+
+def _csv_safe(value) -> str:
+    text = str(value or "")
+    if text.startswith(_DANGEROUS_CSV_PREFIXES):
+        return "'" + text
+    return text
+
+
+def _csv_bytes(headers: list[str], rows: list[list]) -> bytes:
+    output = io.StringIO(newline="")
+    writer = csv.writer(output)
+    writer.writerow(headers)
+    writer.writerows(rows)
+    return output.getvalue().encode("utf-8-sig")
+
+
+def safe_stats_filename_part(value: str | None, *, fallback: str = "actividad") -> str:
+    normalized = unicodedata.normalize("NFKD", str(value or fallback))
+    ascii_text = normalized.encode("ascii", "ignore").decode("ascii")
+    cleaned = _SAFE_FILENAME_RE.sub("_", ascii_text).strip("._-")
+    cleaned = re.sub(r"_+", "_", cleaned)
+    return (cleaned or fallback)[:60]
+
+
+def _date_part(activity) -> str:
+    raw = None
+    if activity is not None:
+        raw = activity["started_at"] or activity["ended_at"] or activity["created_at"]
+    text = str(raw or datetime.now(timezone.utc).date().isoformat())[:10]
+    return safe_stats_filename_part(text, fallback="sin_fecha")
+
+
+def _activity_display_date(activity) -> str:
+    if activity is None:
+        return "Sin fecha"
+    return str(activity["started_at"] or activity["ended_at"] or activity["created_at"] or "Sin fecha")
+
+
+def _activity_voice_channel(activity) -> str:
+    if activity is None or activity["voice_channel_id"] is None:
+        return "Sin canal"
+    return str(activity["voice_channel_id"])
+
+
+def build_short_voice_stats_report_files(db: Database, guild_id: int, activity_id: int) -> list[VoiceStatsReportFile]:
+    activity = db.fetch_one("SELECT * FROM activities WHERE guild_id = ? AND id = ?", (guild_id, activity_id))
+    stats = get_persisted_activity_voice_stats(db, guild_id, activity_id)
+    summary = summarize_voice_stats(stats)
+    safe_name = safe_stats_filename_part(activity["name"] if activity is not None else None)
+    date_name = _date_part(activity)
+    txt_lines = [
+        "ESTADISTICAS DE PARTICIPACION",
+        "",
+        f"Actividad: {activity['name'] if activity is not None else activity_id}",
+        f"Fecha: {_activity_display_date(activity)}",
+        f"Duracion del monitoreo: {format_duration(summary.monitoring_duration_seconds)}",
+        "",
+    ]
+    for item in stats:
+        txt_lines.append(f"{item.display_name} \u2014 {item.attendance_percentage:.2f} %")
+    txt_data = ("\n".join(txt_lines) + "\n").encode("utf-8")
+    csv_data = _csv_bytes(
+        ["nombre", "porcentaje_participacion"],
+        [[_csv_safe(item.display_name), f"{item.attendance_percentage:.2f}"] for item in stats],
+    )
+    return [
+        VoiceStatsReportFile(f"stats_cortas_{safe_name}_{date_name}_{activity_id}.txt", txt_data),
+        VoiceStatsReportFile(f"stats_cortas_{safe_name}_{date_name}_{activity_id}.csv", csv_data),
+    ]
+
+
+def build_full_voice_stats_report_files(db: Database, guild_id: int, activity_id: int) -> list[VoiceStatsReportFile]:
+    activity = db.fetch_one("SELECT * FROM activities WHERE guild_id = ? AND id = ?", (guild_id, activity_id))
+    stats = get_persisted_activity_voice_stats(db, guild_id, activity_id)
+    summary = summarize_voice_stats(stats)
+    safe_name = safe_stats_filename_part(activity["name"] if activity is not None else None)
+    date_name = _date_part(activity)
+    late_count = sum(1 for item in stats if item.final_voice_status == VOICE_STATUS_LATE)
+    txt_lines = [
+        "ESTADISTICAS COMPLETAS DE VOZ",
+        "",
+        f"ID de actividad: {activity_id}",
+        f"Nombre: {activity['name'] if activity is not None else activity_id}",
+        f"Servidor: {guild_id}",
+        f"Caller: {activity['caller_id'] if activity is not None else 'Sin registro'}",
+        f"Canal de voz monitoreado: {_activity_voice_channel(activity)}",
+        f"Fecha de actividad: {_activity_display_date(activity)}",
+        f"Inicio del monitoreo: {summary.monitor_started_at or 'Sin registro'}",
+        f"Finalizacion del monitoreo: {summary.monitor_ended_at or 'Sin registro'}",
+        f"Duracion total: {format_duration(summary.monitoring_duration_seconds)}",
+        f"Estado de actividad: {activity['status'] if activity is not None else 'Sin registro'}",
+        f"Total de participantes: {summary.total_participants}",
+        f"Permanencia promedio: {summary.average_attendance_percentage:.2f} %",
+        f"Permanecieron hasta el final: {summary.stayed_until_end}",
+        f"Abandonaron antes: {summary.left_before_end}",
+        f"Entraron tarde: {late_count}",
+        f"Nunca ingresaron: {summary.never_joined}",
+        "",
+        "PARTICIPANTES",
+    ]
+    for item in stats:
+        txt_lines.extend([
+            "",
+            f"Nombre guardado: {item.display_name}",
+            f"Discord ID: {item.user_id}",
+            f"Primera entrada: {item.first_join_at or 'Sin entrada'}",
+            f"Ultima salida: {item.last_leave_at or 'Sin salida'}",
+            f"Tiempo presente: {format_duration(item.total_present_seconds)}",
+            f"Tiempo ausente: {format_duration(item.total_absent_seconds)}",
+            f"Salidas: {item.leave_count}",
+            f"Reingresos: {item.rejoin_count}",
+            f"Porcentaje: {item.attendance_percentage:.2f} %",
+            f"Estado final: {item.final_voice_status}",
+        ])
+    txt_data = ("\n".join(txt_lines) + "\n").encode("utf-8")
+    rows = []
+    for item in stats:
+        entered_late = item.final_voice_status == VOICE_STATUS_LATE
+        stayed = item.final_voice_status == VOICE_STATUS_STAYED
+        never = item.final_voice_status == VOICE_STATUS_NEVER
+        rows.append([
+            item.activity_id,
+            item.guild_id,
+            item.user_id,
+            _csv_safe(item.display_name),
+            item.monitor_started_at,
+            item.monitor_ended_at,
+            item.first_join_at or "",
+            item.last_leave_at or "",
+            format_duration(item.total_present_seconds),
+            format_duration(item.total_absent_seconds),
+            item.leave_count,
+            item.rejoin_count,
+            f"{item.attendance_percentage:.2f}",
+            "si" if entered_late else "no",
+            "si" if stayed else "no",
+            "si" if never else "no",
+            item.final_voice_status,
+        ])
+    csv_data = _csv_bytes(
+        [
+            "activity_id", "guild_id", "user_id", "nombre", "monitor_inicio", "monitor_final",
+            "primera_entrada", "ultima_salida", "tiempo_presente", "tiempo_ausente", "salidas",
+            "reingresos", "porcentaje_permanencia", "entro_tarde", "permanecio_hasta_final",
+            "nunca_ingreso", "estado_final",
+        ],
+        rows,
+    )
+    return [
+        VoiceStatsReportFile(f"stats_completas_{safe_name}_{date_name}_{activity_id}.csv", csv_data),
+        VoiceStatsReportFile(f"stats_completas_{safe_name}_{date_name}_{activity_id}.txt", txt_data),
+    ]

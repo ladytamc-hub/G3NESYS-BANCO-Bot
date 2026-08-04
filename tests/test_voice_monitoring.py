@@ -1,12 +1,15 @@
+import asyncio
+import csv
 import sqlite3
 import threading
 import unittest
 import zipfile
 from datetime import datetime
-from io import BytesIO
+from io import BytesIO, StringIO
 from types import SimpleNamespace
+from unittest.mock import patch
 
-from g3nesys_bot.cogs.activities import Activities
+from g3nesys_bot.cogs.activities import Activities, ActivityVoiceStatsDownloadView
 from g3nesys_bot.constants import ACTIVITY_CANCELLED, ACTIVITY_FINISHED, ACTIVITY_IN_PROGRESS
 from g3nesys_bot.database import Database, SCHEMA
 from g3nesys_bot.services.activity_audit import build_activity_audit_report_files
@@ -16,6 +19,8 @@ from g3nesys_bot.services.voice_monitoring import (
     VOICE_STATUS_MULTIPLE,
     VOICE_STATUS_NEVER,
     VOICE_STATUS_STAYED,
+    build_full_voice_stats_report_files,
+    build_short_voice_stats_report_files,
     get_persisted_activity_voice_stats,
     persist_activity_voice_stats,
 )
@@ -64,7 +69,7 @@ class VoiceMonitoringTests(unittest.TestCase):
     def tearDown(self):
         self.db.close()
 
-    def create_activity(self, *, guild_id=10, status=ACTIVITY_FINISHED, started_at=START, ended_at=END, code="ACT-000100", channel_id=700, caller_id=900):
+    def create_activity(self, *, guild_id=10, status=ACTIVITY_FINISHED, started_at=START, ended_at=END, code="ACT-000100", channel_id=700, caller_id=900, name="CTA"):
         activity_id = self.db.execute(
             """
             INSERT INTO activities (
@@ -72,7 +77,7 @@ class VoiceMonitoringTests(unittest.TestCase):
                 voice_channel_id, created_at, started_at, ended_at
             ) VALUES (?, ?, ?, ?, '20:00', ?, ?, ?, ?, ?)
             """,
-            (code, guild_id, "CTA", caller_id, status, channel_id, START, started_at, ended_at),
+            (code, guild_id, name, caller_id, status, channel_id, START, started_at, ended_at),
         )
         role_id = self.db.execute(
             """
@@ -233,3 +238,143 @@ class VoiceMonitoringTests(unittest.TestCase):
         self.assertIn("OldNick", stats_csv)
         self.assertIn("activity_id", stats_csv)
 
+    def test_short_voice_stats_report_orders_percentages_and_includes_zero(self):
+        activity_id, role_id = self.create_activity()
+        self.add_participant(activity_id, role_id, 801, name="FullUser")
+        self.add_participant(activity_id, role_id, 802, name="HalfUser")
+        self.add_participant(activity_id, role_id, 803, name="NeverUser")
+        self.add_session(10, activity_id, 801, START, END)
+        self.add_session(10, activity_id, 802, START, "2026-08-03T00:05:00+00:00")
+        persist_activity_voice_stats(self.db, 10, activity_id, ended_at=END)
+
+        files = build_short_voice_stats_report_files(self.db, 10, activity_id)
+        txt = next(item for item in files if item.filename.endswith(".txt")).data.decode("utf-8")
+        csv_text = next(item for item in files if item.filename.endswith(".csv")).data.decode("utf-8-sig")
+        rows = list(csv.DictReader(StringIO(csv_text)))
+
+        self.assertLess(txt.index("FullUser"), txt.index("HalfUser"))
+        self.assertLess(txt.index("HalfUser"), txt.index("NeverUser"))
+        self.assertIn("FullUser \u2014 100.00 %", txt)
+        self.assertIn("NeverUser \u2014 0.00 %", txt)
+        self.assertEqual(rows[0], {"nombre": "FullUser", "porcentaje_participacion": "100.00"})
+        self.assertEqual(rows[-1], {"nombre": "NeverUser", "porcentaje_participacion": "0.00"})
+
+    def test_full_voice_stats_report_includes_audit_fields_late_multiple_and_cancelled(self):
+        activity_id, role_id = self.create_activity(status=ACTIVITY_CANCELLED)
+        self.add_participant(activity_id, role_id, 901, name="LateUser")
+        self.add_participant(activity_id, role_id, 902, name="MultiUser")
+        self.add_session(10, activity_id, 901, "2026-08-03T00:03:00+00:00", END)
+        self.add_session(10, activity_id, 902, START, "2026-08-03T00:02:00+00:00")
+        self.add_session(10, activity_id, 902, "2026-08-03T00:04:00+00:00", END)
+        persist_activity_voice_stats(self.db, 10, activity_id, ended_at=END)
+
+        files = build_full_voice_stats_report_files(self.db, 10, activity_id)
+        csv_text = next(item for item in files if item.filename.endswith(".csv")).data.decode("utf-8-sig")
+        txt = next(item for item in files if item.filename.endswith(".txt")).data.decode("utf-8")
+        rows = {int(row["user_id"]): row for row in csv.DictReader(StringIO(csv_text))}
+
+        self.assertIn("Estado de actividad", txt)
+        self.assertEqual(rows[901]["entro_tarde"], "si")
+        self.assertEqual(rows[901]["estado_final"], VOICE_STATUS_LATE)
+        self.assertEqual(rows[902]["salidas"], "1")
+        self.assertEqual(rows[902]["reingresos"], "1")
+        self.assertEqual(rows[902]["estado_final"], VOICE_STATUS_MULTIPLE)
+
+    def test_voice_stats_report_uses_historical_names_safe_filenames_and_csv_formula_guard(self):
+        activity_id, role_id = self.create_activity(name="\U0001F525 CTA / Raid, \"Test\" =SUM")
+        self.add_participant(activity_id, role_id, 1001, name="=SUM(A1:A2)")
+        self.add_session(10, activity_id, 1001, START, END)
+        persist_activity_voice_stats(self.db, 10, activity_id, ended_at=END, name_resolver=lambda user_id: "ChangedNick")
+
+        files = build_short_voice_stats_report_files(self.db, 10, activity_id)
+        csv_text = next(item for item in files if item.filename.endswith(".csv")).data.decode("utf-8-sig")
+        rows = list(csv.DictReader(StringIO(csv_text)))
+
+        for item in files:
+            self.assertNotIn("/", item.filename)
+            self.assertNotIn(" ", item.filename)
+            self.assertTrue(item.filename.startswith("stats_cortas_CTA_Raid_Test_SUM_2026-08-03_"))
+        self.assertEqual(rows[0]["nombre"], "'=SUM(A1:A2)")
+
+    def test_voice_stats_download_view_sends_short_files_ephemerally(self):
+        activity_id, role_id = self.create_activity(caller_id=900)
+        self.add_participant(activity_id, role_id, 1101, name="CallerStat")
+        self.add_session(10, activity_id, 1101, START, END)
+        persist_activity_voice_stats(self.db, 10, activity_id, ended_at=END)
+        cog = Activities(SimpleNamespace(db=self.db, get_guild=lambda guild_id: None, guilds=[]))
+        interaction = self.fake_interaction(user_id=900)
+        view = ActivityVoiceStatsDownloadView(cog, activity_id)
+        button = next(child for child in view.children if child.custom_id == "g3n:activity:voice_stats_download_short")
+
+        asyncio.run(button.callback(interaction))
+
+        self.assertTrue(interaction.response.deferred_ephemeral)
+        self.assertEqual(len(interaction.followup.messages), 1)
+        sent = interaction.followup.messages[0]
+        self.assertTrue(sent["ephemeral"])
+        self.assertEqual(len(sent["files"]), 2)
+        self.assertTrue(sent["files"][0].filename.startswith("stats_cortas_"))
+
+    def test_voice_stats_download_view_blocks_full_report_without_admin_permission(self):
+        activity_id, role_id = self.create_activity(caller_id=900)
+        self.add_participant(activity_id, role_id, 1201, name="DeniedUser")
+        self.add_session(10, activity_id, 1201, START, END)
+        persist_activity_voice_stats(self.db, 10, activity_id, ended_at=END)
+        cog = Activities(SimpleNamespace(db=self.db, get_guild=lambda guild_id: None, guilds=[]))
+        interaction = self.fake_interaction(user_id=900)
+        view = ActivityVoiceStatsDownloadView(cog, activity_id)
+        button = next(child for child in view.children if child.custom_id == "g3n:activity:voice_stats_download_full")
+
+        with patch("g3nesys_bot.cogs.activities.is_admin_subject", return_value=False):
+            asyncio.run(button.callback(interaction))
+
+        self.assertTrue(interaction.response.deferred_ephemeral)
+        self.assertEqual(len(interaction.followup.messages), 1)
+        sent = interaction.followup.messages[0]
+        self.assertTrue(sent["ephemeral"])
+        self.assertIn("No tienes permiso", sent["content"])
+        self.assertNotIn("files", sent)
+
+    def test_voice_stats_download_view_sends_full_report_for_admin(self):
+        activity_id, role_id = self.create_activity(caller_id=900)
+        self.add_participant(activity_id, role_id, 1301, name="AdminFile")
+        self.add_session(10, activity_id, 1301, START, END)
+        persist_activity_voice_stats(self.db, 10, activity_id, ended_at=END)
+        cog = Activities(SimpleNamespace(db=self.db, get_guild=lambda guild_id: None, guilds=[]))
+        interaction = self.fake_interaction(user_id=777)
+        view = ActivityVoiceStatsDownloadView(cog, activity_id)
+        button = next(child for child in view.children if child.custom_id == "g3n:activity:voice_stats_download_full")
+
+        with patch("g3nesys_bot.cogs.activities.is_admin_subject", return_value=True):
+            asyncio.run(button.callback(interaction))
+
+        self.assertTrue(interaction.response.deferred_ephemeral)
+        self.assertEqual(len(interaction.followup.messages), 1)
+        sent = interaction.followup.messages[0]
+        self.assertTrue(sent["ephemeral"])
+        self.assertEqual(len(sent["files"]), 2)
+        self.assertTrue(sent["files"][0].filename.startswith("stats_completas_"))
+
+    def fake_interaction(self, *, user_id=900, guild_id=10):
+        class FakeResponse:
+            def __init__(self):
+                self.deferred_ephemeral = None
+
+            async def defer(self, *, ephemeral=False):
+                self.deferred_ephemeral = ephemeral
+
+        class FakeFollowup:
+            def __init__(self):
+                self.messages = []
+
+            async def send(self, content=None, **kwargs):
+                payload = {"content": content, **kwargs}
+                self.messages.append(payload)
+
+        return SimpleNamespace(
+            guild=SimpleNamespace(id=guild_id),
+            guild_id=guild_id,
+            user=SimpleNamespace(id=user_id),
+            response=FakeResponse(),
+            followup=FakeFollowup(),
+        )
