@@ -1084,8 +1084,12 @@ class Bank(commands.Cog):
             thread = await channel.create_thread(
                 name=f"{code}-evidencias",
                 type=discord.ChannelType.private_thread,
+                invitable=False,
+                auto_archive_duration=1440,
                 reason="Ticket Banco G3NESYS",
             )
+            await thread.add_user(interaction.user)
+
             if callable(getattr(thread, "send", None)):
                 await thread.send(
                     f"Ticket `{code}` creado por {interaction.user.mention}. "
@@ -1096,63 +1100,64 @@ class Bank(commands.Cog):
             return None
 
     def ticket_user_confirmation_embed(
-    self,
-    guild: discord.Guild,
-    ticket,
-) -> discord.Embed:
-    embed = discord.Embed(
-        title=f"🎫 Ticket {ticket['code']}",
-        color=discord.Color.gold(),
-    )
-
-    thread_id = ticket["thread_id"]
-
-    if thread_id:
-        thread_link = f"https://discord.com/channels/{guild.id}/{thread_id}"
-
-        embed.description = (
-            "Hemos recibido correctamente tu solicitud.\n\n"
-            "Si deseas agregar evidencia, imágenes, videos o cualquier "
-            "información adicional, puedes hacerlo directamente en el hilo "
-            "de atención de tu ticket.\n\n"
-            f"🔗 **[Abrir el hilo de mi ticket]({thread_link})**\n\n"
-            "Nuestro equipo administrativo dará seguimiento a tu solicitud "
-            "lo antes posible."
-        )
-    else:
-        embed.description = (
-            "Hemos recibido correctamente tu solicitud.\n\n"
-            "Nuestro equipo administrativo dará seguimiento a tu solicitud "
-            "lo antes posible.\n\n"
-            "En este momento no fue posible generar el enlace directo al hilo."
+        self,
+        guild: discord.Guild,
+        ticket,
+    ) -> discord.Embed:
+        embed = discord.Embed(
+            title=f"🎫 Ticket {ticket['code']}",
+            color=discord.Color.gold(),
         )
 
-    embed.add_field(
-        name="Asunto",
-        value=str(ticket["subject"])[:1024],
-        inline=False,
-    )
+        thread_id = ticket["thread_id"]
 
-    embed.add_field(
-        name="Estado inicial",
-        value=str(ticket["status"]),
-        inline=True,
-    )
+        if thread_id:
+            thread_link = f"https://discord.com/channels/{guild.id}/{thread_id}"
 
-    embed.add_field(
-        name="Fecha de creación",
-        value=str(ticket["created_at"]),
-        inline=True,
-    )
+            embed.description = (
+                "Hemos recibido correctamente tu solicitud.\n\n"
+                "Si deseas agregar evidencia, imágenes, videos o cualquier "
+                "información adicional, puedes hacerlo directamente en el hilo "
+                "de atención de tu ticket.\n\n"
+                f"🔗 **[Abrir el hilo de mi ticket]({thread_link})**\n\n"
+                "Nuestro equipo administrativo dará seguimiento a tu solicitud "
+                "lo antes posible."
+            )
+        else:
+            embed.description = (
+                "Hemos recibido correctamente tu solicitud.\n\n"
+                "Nuestro equipo administrativo dará seguimiento a tu solicitud "
+                "lo antes posible.\n\n"
+                "En este momento no fue posible generar el enlace directo al hilo."
+            )
 
-    embed.set_footer(
-        text=(
-            "No es necesario crear otro ticket por el mismo asunto. "
-            "Agrega toda la información dentro del hilo."
+        embed.add_field(
+            name="Asunto",
+            value=str(ticket["subject"])[:1024],
+            inline=False,
         )
-    )
 
-    return embed
+        embed.add_field(
+            name="Estado inicial",
+            value=str(ticket["status"]),
+            inline=True,
+        )
+
+        embed.add_field(
+            name="Fecha de creación",
+            value=str(ticket["created_at"]),
+            inline=True,
+        )
+
+        embed.set_footer(
+            text=(
+                "No es necesario crear otro ticket por el mismo asunto. "
+                "Agrega toda la información dentro del hilo."
+            )
+        )
+
+        return embed
+
     async def notify_ticket_created(self, guild: discord.Guild, ticket, ticket_channel) -> None:
         view = TicketAdminActionView(self, guild.id, str(ticket["code"]))
         self.bot.add_view(view)
