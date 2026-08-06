@@ -1083,7 +1083,7 @@ class Bank(commands.Cog):
                 return thread
             thread = await channel.create_thread(
                 name=f"{code}-evidencias",
-                type=discord.ChannelType.public_thread,
+                type=discord.ChannelType.private_thread,
                 reason="Ticket Banco G3NESYS",
             )
             if callable(getattr(thread, "send", None)):
@@ -1095,49 +1095,64 @@ class Bank(commands.Cog):
         except (discord.Forbidden, discord.HTTPException):
             return None
 
-    def ticket_user_confirmation_embed(self, guild: discord.Guild, ticket) -> discord.Embed:
-        embed = discord.Embed(
-            title=f"Ticket {ticket['code']}",
-            color=discord.Color.gold(),
-        )
-        embed.add_field(name="Asunto", value=str(ticket["subject"])[:1024], inline=False)
-        embed.add_field(name="Estado inicial", value=str(ticket["status"]), inline=True)
-        embed.add_field(name="Fecha de creacion", value=str(ticket["created_at"]), inline=True)
-        embed.description = "El equipo administrativo dara seguimiento a tu solicitud."
-        return embed
+    def ticket_user_confirmation_embed(
+    self,
+    guild: discord.Guild,
+    ticket,
+) -> discord.Embed:
+    embed = discord.Embed(
+        title=f"🎫 Ticket {ticket['code']}",
+        color=discord.Color.gold(),
+    )
 
-    def ticket_admin_embed(self, guild: discord.Guild, ticket) -> discord.Embed:
-        attachments = ticket_attachments(self.db, int(ticket["id"]), limit=5)
-        messages = list(reversed(ticket_messages(self.db, int(ticket["id"]), limit=8)))
-        embed = discord.Embed(
-            title=f"Ticket {ticket['code']}",
-            description=str(ticket["description"])[:1800],
-            color=discord.Color.orange() if ticket["status"] in OPEN_TICKET_STATUSES else discord.Color.green(),
-        )
-        embed.add_field(name="Usuario", value=f"<@{ticket['user_id']}>", inline=True)
-        embed.add_field(name="Discord ID", value=str(ticket["user_id"]), inline=True)
-        embed.add_field(name="Estado", value=str(ticket["status"]), inline=True)
-        embed.add_field(name="Asunto", value=str(ticket["subject"])[:1024], inline=False)
-        embed.add_field(name="Creado", value=str(ticket["created_at"]), inline=True)
-        embed.add_field(name="Actualizado", value=str(ticket["updated_at"]), inline=True)
-        assigned = f"<@{ticket['assigned_admin_id']}>" if ticket["assigned_admin_id"] else "Sin asignar"
-        embed.add_field(name="Admin asignado", value=assigned, inline=True)
-        embed.add_field(name="Imagenes adjuntas", value=str(len(attachments)), inline=True)
-        if ticket["thread_id"]:
-            embed.add_field(name="Espacio de evidencias", value=f"<#{ticket['thread_id']}>", inline=True)
-        if messages:
-            lines = []
-            for row in messages:
-                marker = "Usuario" if row["message_type"] == "respuesta_usuario" else "Admin" if row["message_type"] == TICKET_ADMIN_REPLY else "Interna"
-                status = f" ({row['old_status']} -> {row['new_status']})" if row["new_status"] else ""
-                lines.append(f"{marker}{status}: {str(row['content'])[:160]}")
-            embed.add_field(name="Historial reciente", value="\n".join(lines)[:1024], inline=False)
-        if attachments:
-            links = [f"[{row['filename']}]({row['url']})" for row in attachments]
-            embed.add_field(name="Evidencias", value="\n".join(links)[:1024], inline=False)
-            embed.set_image(url=str(attachments[0]["url"]))
-        return embed
+    thread_id = ticket["thread_id"]
 
+    if thread_id:
+        thread_link = f"https://discord.com/channels/{guild.id}/{thread_id}"
+
+        embed.description = (
+            "Hemos recibido correctamente tu solicitud.\n\n"
+            "Si deseas agregar evidencia, imágenes, videos o cualquier "
+            "información adicional, puedes hacerlo directamente en el hilo "
+            "de atención de tu ticket.\n\n"
+            f"🔗 **[Abrir el hilo de mi ticket]({thread_link})**\n\n"
+            "Nuestro equipo administrativo dará seguimiento a tu solicitud "
+            "lo antes posible."
+        )
+    else:
+        embed.description = (
+            "Hemos recibido correctamente tu solicitud.\n\n"
+            "Nuestro equipo administrativo dará seguimiento a tu solicitud "
+            "lo antes posible.\n\n"
+            "En este momento no fue posible generar el enlace directo al hilo."
+        )
+
+    embed.add_field(
+        name="Asunto",
+        value=str(ticket["subject"])[:1024],
+        inline=False,
+    )
+
+    embed.add_field(
+        name="Estado inicial",
+        value=str(ticket["status"]),
+        inline=True,
+    )
+
+    embed.add_field(
+        name="Fecha de creación",
+        value=str(ticket["created_at"]),
+        inline=True,
+    )
+
+    embed.set_footer(
+        text=(
+            "No es necesario crear otro ticket por el mismo asunto. "
+            "Agrega toda la información dentro del hilo."
+        )
+    )
+
+    return embed
     async def notify_ticket_created(self, guild: discord.Guild, ticket, ticket_channel) -> None:
         view = TicketAdminActionView(self, guild.id, str(ticket["code"]))
         self.bot.add_view(view)
