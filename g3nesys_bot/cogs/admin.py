@@ -89,6 +89,12 @@ from ..services.notifications import (
     send_admin_notification,
     send_dm_safe,
 )
+from ..services.ticket_channels import (
+    TICKET_CHANNEL_LABEL,
+    TICKET_CHANNEL_SETTING_KEY,
+    is_text_ticket_channel,
+    ticket_channel_permission_errors,
+)
 from ..services.payout_audit import log_payout_action, payout_audit_text
 from ..services.quick_liquidations import (
     get_liquidatable_participants,
@@ -2477,6 +2483,98 @@ class RegearNotificationChannelConfigView(discord.ui.View):
             ),
         )
 
+class TicketChannelConfigView(discord.ui.View):
+    def __init__(self, cog: "Admin"):
+        super().__init__(timeout=300)
+        self.cog = cog
+        self.channel_select = discord.ui.ChannelSelect(
+            placeholder="Selecciona el canal de tickets"[:150],
+            channel_types=[discord.ChannelType.text, discord.ChannelType.news],
+            min_values=1,
+            max_values=1,
+            row=0,
+        )
+        self.channel_select.callback = self.select_channel
+        self.add_item(self.channel_select)
+
+    async def require_admin(self, interaction: discord.Interaction) -> bool:
+        if interaction.guild is not None and is_admin_subject(self.cog.db, interaction):
+            return True
+        await private_response(
+            interaction,
+            "Solo admins autorizados pueden configurar el canal de tickets.",
+        )
+        return False
+
+    async def save_channel(self, interaction: discord.Interaction, channel) -> None:
+        if interaction.guild is None:
+            await private_response(interaction, "Esta configuracion solo aplica dentro de un servidor.")
+            return
+        if not is_text_ticket_channel(channel):
+            await private_response(interaction, "Selecciona un canal de texto valido para tickets.")
+            return
+        missing = ticket_channel_permission_errors(channel, interaction.guild)
+        if missing:
+            await private_response(
+                interaction,
+                "No puedo usar ese canal para tickets. Faltan permisos: " + ", ".join(missing) + ".",
+            )
+            return
+        channel_id = int(channel.id)
+        self.cog.db.set_setting(interaction.guild.id, TICKET_CHANNEL_SETTING_KEY, str(channel_id))
+        log_action(
+            self.cog.db,
+            interaction.guild.id,
+            admin_id=interaction.user.id,
+            action="Configurar canal de tickets",
+            system="Configuracion",
+            observation=str(channel_id),
+        )
+        mention = getattr(channel, "mention", f"<#{channel_id}>")
+        await private_response(
+            interaction,
+            f"✅ Canal de tickets configurado correctamente: {mention}",
+        )
+
+    async def select_channel(self, interaction: discord.Interaction) -> None:
+        if not await self.require_admin(interaction):
+            return
+        await self.save_channel(interaction, self.channel_select.values[0])
+
+    @discord.ui.button(
+        label="Usar canal actual",
+        emoji="📍",
+        style=discord.ButtonStyle.primary,
+        row=1,
+    )
+    async def use_current(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
+        if not await self.require_admin(interaction):
+            return
+        channel = interaction.channel
+        if channel is None:
+            await private_response(interaction, "No pude identificar el canal actual.")
+            return
+        await self.save_channel(interaction, channel)
+
+    @discord.ui.button(
+        label="Quitar canal",
+        emoji="↩️",
+        style=discord.ButtonStyle.secondary,
+        row=1,
+    )
+    async def clear_channel(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
+        if not await self.require_admin(interaction):
+            return
+        self.cog.db.set_setting(interaction.guild.id, TICKET_CHANNEL_SETTING_KEY, "")
+        log_action(
+            self.cog.db,
+            interaction.guild.id,
+            admin_id=interaction.user.id,
+            action="Quitar canal de tickets",
+            system="Configuracion",
+            observation=TICKET_CHANNEL_SETTING_KEY,
+        )
+        await private_response(interaction, "🎫 Canal de tickets\nNo configurado")
 
 class NotificationCategorySelect(discord.ui.Select):
     def __init__(self, cog: "Admin"):
@@ -2611,6 +2709,28 @@ class NotificationsAdminView(discord.ui.View):
                 "Selecciona un canal, usa el canal actual o quita el canal configurado."
             ),
             view=RegearNotificationChannelConfigView(self.cog),
+        )
+
+    @discord.ui.button(
+        label="ESTABLECER CANAL DE TICKETS",
+        emoji="🎫",
+        style=discord.ButtonStyle.primary,
+        row=2,
+    )
+    async def ticket_channel(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
+        if interaction.guild is None or not is_admin_subject(self.cog.db, interaction):
+            await private_response(
+                interaction,
+                "Solo admins autorizados pueden configurar el canal de tickets.",
+            )
+            return
+        await private_response(
+            interaction,
+            (
+                f"{self.cog.ticket_channel_status_text(interaction.guild.id)}\n\n"
+                "Selecciona un canal de texto para recibir los tickets nuevos."
+            ),
+            view=TicketChannelConfigView(self.cog),
         )
 
     @discord.ui.button(
@@ -6832,6 +6952,31 @@ class Admin(commands.Cog):
             else:
                 lines.append(f"- <#{channel_id}>")
         return "\n".join(lines)
+
+    def ticket_channel_status_text(self, guild_id: int) -> str:
+        raw_channel_id = self.db.get_setting(guild_id, TICKET_CHANNEL_SETTING_KEY)
+        lines = [f"🎫 **{TICKET_CHANNEL_LABEL}**"]
+        if not raw_channel_id:
+            lines.append("No configurado")
+            lines.append("Advertencia: los tickets nuevos usaran temporalmente el canal del Panel de Banco.")
+            return "\n".join(lines)
+        if not raw_channel_id.isdigit():
+            lines.append(f"Configurado: ID invalido `{raw_channel_id}`")
+            lines.append("Advertencia: selecciona un canal de tickets valido.")
+            return "\n".join(lines)
+        guild = self.bot.get_guild(guild_id)
+        channel = guild.get_channel(int(raw_channel_id)) if guild is not None else None
+        if channel is None:
+            lines.append(f"Configurado: canal no disponible · ID `{raw_channel_id}`")
+            lines.append("Advertencia: el canal configurado no existe o el bot no puede verlo.")
+            return "\n".join(lines)
+        mention = getattr(channel, "mention", f"<#{raw_channel_id}>")
+        lines.append(f"Configurado: {mention}")
+        missing = ticket_channel_permission_errors(channel, guild)
+        if missing:
+            lines.append("Advertencia: faltan permisos del bot: " + ", ".join(missing) + ".")
+        return "\n".join(lines)
+
     def default_rates_text(self, guild_id: int) -> str:
         lines = [
             "**Tasas predeterminadas**",
@@ -6887,9 +7032,10 @@ class Admin(commands.Cog):
                 f"   Aprobados para callers: {self.approved_ping_channels_summary(guild_id)}",
                 f"🛡️ **{REGEAR_CHANNEL_LABEL}:** {channel_setting_text(regear_channel)}",
                 f"🛡️ **{REGEAR_NOTIFICATION_CHANNEL_LABEL}:** {channel_setting_text(regear_notification_channel)}",
+                self.ticket_channel_status_text(guild_id),
                 "",
                 "Selecciona una categoría para establecer o cambiar su canal.",
-                "Usa los botones de pings, Requips y Notificaciones de Requips para elegir sus canales de trabajo.",
+                "Usa los botones de pings, Requips, Notificaciones de Requips y Tickets para elegir sus canales de trabajo.",
             ]
         )
         return "\n".join(lines)

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import logging
+
 import discord
 from discord.ext import commands
 
@@ -52,7 +54,15 @@ from ..services.tickets import (
     ticket_messages,
     validate_ticket_status,
 )
+from ..services.ticket_channels import (
+    TICKET_CHANNEL_SETTING_KEY,
+    is_text_ticket_channel,
+    ticket_channel_permission_errors,
+)
 from ..utils import format_amount, parse_channel_id, parse_int_amount, utc_now_iso
+
+
+logger = logging.getLogger(__name__)
 
 
 async def private_response(interaction: discord.Interaction, content: str, **kwargs) -> None:
@@ -983,7 +993,8 @@ class Bank(commands.Cog):
         except ValueError as exc:
             await private_response(interaction, str(exc))
             return
-        thread = await self.try_create_ticket_thread(interaction, str(ticket["code"]))
+        ticket_channel = await self.resolve_ticket_destination_channel(interaction.guild, interaction.channel)
+        thread = await self.try_create_ticket_thread(interaction, str(ticket["code"]), ticket_channel)
         if thread is not None:
             set_ticket_thread(self.db, int(ticket["id"]), thread.id)
             ticket = get_ticket(self.db, interaction.guild.id, str(ticket["code"]))
@@ -1003,8 +1014,8 @@ class Bank(commands.Cog):
             affected_user_id=interaction.user.id,
             observation=f"Ticket {ticket['code']} creado. DM={'ok' if dm_sent else 'fallo'}.",
         )
-        await self.notify_ticket_created(interaction.guild, ticket)
-        evidence_target = thread.mention if thread is not None else "este canal mencionando el ID del ticket"
+        await self.notify_ticket_created(interaction.guild, ticket, ticket_channel)
+        evidence_target = thread.mention if thread is not None else getattr(ticket_channel, "mention", "este canal mencionando el ID del ticket")
         dm_note = "" if dm_sent else " No pude enviarte la confirmacion por DM, pero el ticket fue creado."
         await private_response(
             interaction,
@@ -1014,9 +1025,50 @@ class Bank(commands.Cog):
             ),
         )
 
-    async def try_create_ticket_thread(self, interaction: discord.Interaction, code: str):
-        channel = interaction.channel
-        if not isinstance(channel, (discord.TextChannel, discord.ForumChannel)):
+    def log_ticket_channel_warning(self, guild_id: int, reason: str) -> None:
+        logger.warning("Canal de tickets no configurado o invalido en guild %s: %s", guild_id, reason)
+        log_action(
+            self.db,
+            guild_id,
+            admin_id=None,
+            action="Advertencia canal de tickets",
+            system="Banco",
+            observation=reason[:1800],
+        )
+
+    async def resolve_ticket_destination_channel(self, guild: discord.Guild, fallback_channel):
+        raw_channel_id = self.db.get_setting(guild.id, TICKET_CHANNEL_SETTING_KEY)
+        if not raw_channel_id:
+            self.log_ticket_channel_warning(guild.id, "ticket_channel_id no configurado; usando canal del Panel de Banco")
+            return fallback_channel
+        try:
+            channel_id = int(raw_channel_id)
+        except (TypeError, ValueError):
+            self.log_ticket_channel_warning(guild.id, f"ticket_channel_id invalido: {raw_channel_id}; usando canal del Panel de Banco")
+            return fallback_channel
+        channel = guild.get_channel(channel_id) or self.bot.get_channel(channel_id)
+        if channel is None:
+            try:
+                channel = await self.bot.fetch_channel(channel_id)
+            except (discord.Forbidden, discord.NotFound, discord.HTTPException, AttributeError):
+                channel = None
+        if channel is None:
+            self.log_ticket_channel_warning(guild.id, f"canal de tickets {channel_id} no existe; usando canal del Panel de Banco")
+            return fallback_channel
+        if not is_text_ticket_channel(channel):
+            self.log_ticket_channel_warning(guild.id, f"canal de tickets {channel_id} no es un canal de texto; usando canal del Panel de Banco")
+            return fallback_channel
+        missing = ticket_channel_permission_errors(channel, guild)
+        if missing:
+            self.log_ticket_channel_warning(
+                guild.id,
+                f"canal de tickets {channel_id} sin permisos: {', '.join(missing)}; usando canal del Panel de Banco",
+            )
+            return fallback_channel
+        return channel
+
+    async def try_create_ticket_thread(self, interaction: discord.Interaction, code: str, channel):
+        if channel is None or not callable(getattr(channel, "create_thread", None)):
             return None
         try:
             if isinstance(channel, discord.ForumChannel):
@@ -1034,10 +1086,11 @@ class Bank(commands.Cog):
                 type=discord.ChannelType.public_thread,
                 reason="Ticket Banco G3NESYS",
             )
-            await thread.send(
-                f"Ticket `{code}` creado por {interaction.user.mention}. "
-                "Envia aqui las imagenes o evidencias relacionadas."
-            )
+            if callable(getattr(thread, "send", None)):
+                await thread.send(
+                    f"Ticket `{code}` creado por {interaction.user.mention}. "
+                    "Envia aqui las imagenes o evidencias relacionadas."
+                )
             return thread
         except (discord.Forbidden, discord.HTTPException):
             return None
@@ -1085,16 +1138,27 @@ class Bank(commands.Cog):
             embed.set_image(url=str(attachments[0]["url"]))
         return embed
 
-    async def notify_ticket_created(self, guild: discord.Guild, ticket) -> None:
+    async def notify_ticket_created(self, guild: discord.Guild, ticket, ticket_channel) -> None:
         view = TicketAdminActionView(self, guild.id, str(ticket["code"]))
         self.bot.add_view(view)
-        message = await send_admin_notification(
-            self.db,
-            guild=guild,
-            category="general_admin",
-            embed=self.ticket_admin_embed(guild, ticket),
-            view=view,
-        )
+        message = None
+        if ticket_channel is not None and callable(getattr(ticket_channel, "send", None)):
+            try:
+                message = await ticket_channel.send(embed=self.ticket_admin_embed(guild, ticket), view=view)
+            except (discord.Forbidden, discord.HTTPException):
+                message = None
+        if message is None:
+            self.log_ticket_channel_warning(
+                guild.id,
+                f"no se pudo publicar el mensaje principal del ticket {ticket['code']} en el canal de tickets",
+            )
+            message = await send_admin_notification(
+                self.db,
+                guild=guild,
+                category="general_admin",
+                embed=self.ticket_admin_embed(guild, ticket),
+                view=view,
+            )
         if message is not None:
             set_ticket_notification(self.db, int(ticket["id"]), message.id)
 
