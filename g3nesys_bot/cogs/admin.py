@@ -12,6 +12,7 @@ from ..constants import (
     ADMIN_PANEL_IMAGE,
     ACTIVITY_FINISHED,
     ACTIVITY_TYPE_MANDATORY,
+    OFFICIAL_MEMBER_ROLE_ID,
     PAYOUT_APPROVED,
     PAYOUT_DEPOSITED,
     PAYOUT_CORRECTION,
@@ -32,10 +33,13 @@ from ..constants import (
 from ..permissions import (
     CALLER_PANEL_ROLE_NAMES,
     CALLER_PANEL_ROLE_SETTING_KEY,
+    add_member_access_role,
+    configured_member_role_ids,
     has_any_configured_role,
     is_admin_subject,
     is_caller_panel_subject,
     is_split_admin_subject,
+    remove_member_access_role,
     require_admin_context,
 )
 from ..services.activity_audit import (
@@ -90,8 +94,11 @@ from ..services.notifications import (
     send_dm_safe,
 )
 from ..services.ticket_channels import (
+    TICKET_CONVERSATION_CHANNEL_LABEL,
+    TICKET_CONVERSATION_CHANNEL_SETTING_KEY,
     TICKET_CHANNEL_LABEL,
     TICKET_CHANNEL_SETTING_KEY,
+    is_normal_text_ticket_channel,
     is_text_ticket_channel,
     ticket_channel_permission_errors,
 )
@@ -2484,12 +2491,23 @@ class RegearNotificationChannelConfigView(discord.ui.View):
         )
 
 class TicketChannelConfigView(discord.ui.View):
-    def __init__(self, cog: "Admin"):
+    def __init__(
+        self,
+        cog: "Admin",
+        *,
+        setting_key: str,
+        label: str,
+        conversation: bool = False,
+    ):
         super().__init__(timeout=300)
         self.cog = cog
+        self.setting_key = setting_key
+        self.label = label
+        self.conversation = conversation
+        channel_types = [discord.ChannelType.text] if conversation else [discord.ChannelType.text, discord.ChannelType.news]
         self.channel_select = discord.ui.ChannelSelect(
-            placeholder="Selecciona el canal de tickets"[:150],
-            channel_types=[discord.ChannelType.text, discord.ChannelType.news],
+            placeholder=f"Selecciona {label}"[:150],
+            channel_types=channel_types,
             min_values=1,
             max_values=1,
             row=0,
@@ -2502,7 +2520,7 @@ class TicketChannelConfigView(discord.ui.View):
             return True
         await private_response(
             interaction,
-            "Solo admins autorizados pueden configurar el canal de tickets.",
+            f"Solo admins autorizados pueden configurar {self.label}.",
         )
         return False
 
@@ -2510,10 +2528,19 @@ class TicketChannelConfigView(discord.ui.View):
         if interaction.guild is None:
             await private_response(interaction, "Esta configuracion solo aplica dentro de un servidor.")
             return
-        if not is_text_ticket_channel(channel):
-            await private_response(interaction, "Selecciona un canal de texto valido para tickets.")
+        is_valid_channel = (
+            is_normal_text_ticket_channel(channel)
+            if self.conversation
+            else is_text_ticket_channel(channel)
+        )
+        if not is_valid_channel:
+            await private_response(interaction, f"Selecciona un canal de texto valido para {self.label}.")
             return
-        missing = ticket_channel_permission_errors(channel, interaction.guild)
+        missing = ticket_channel_permission_errors(
+            channel,
+            interaction.guild,
+            conversation=self.conversation,
+        )
         if missing:
             await private_response(
                 interaction,
@@ -2521,19 +2548,24 @@ class TicketChannelConfigView(discord.ui.View):
             )
             return
         channel_id = int(channel.id)
-        self.cog.db.set_setting(interaction.guild.id, TICKET_CHANNEL_SETTING_KEY, str(channel_id))
+        self.cog.db.set_setting(interaction.guild.id, self.setting_key, str(channel_id))
         log_action(
             self.cog.db,
             interaction.guild.id,
             admin_id=interaction.user.id,
-            action="Configurar canal de tickets",
+            action=f"Configurar {self.label}",
             system="Configuracion",
             observation=str(channel_id),
         )
         mention = getattr(channel, "mention", f"<#{channel_id}>")
+        success_label = (
+            "Canal de conversaciones de tickets"
+            if self.conversation
+            else "Canal de notificaciones de tickets"
+        )
         await private_response(
             interaction,
-            f"✅ Canal de tickets configurado correctamente: {mention}",
+            f"✅ {success_label} configurado correctamente: {mention}",
         )
 
     async def select_channel(self, interaction: discord.Interaction) -> None:
@@ -2565,16 +2597,16 @@ class TicketChannelConfigView(discord.ui.View):
     async def clear_channel(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
         if not await self.require_admin(interaction):
             return
-        self.cog.db.set_setting(interaction.guild.id, TICKET_CHANNEL_SETTING_KEY, "")
+        self.cog.db.set_setting(interaction.guild.id, self.setting_key, "")
         log_action(
             self.cog.db,
             interaction.guild.id,
             admin_id=interaction.user.id,
-            action="Quitar canal de tickets",
+            action=f"Quitar {self.label}",
             system="Configuracion",
-            observation=TICKET_CHANNEL_SETTING_KEY,
+            observation=self.setting_key,
         )
-        await private_response(interaction, "🎫 Canal de tickets\nNo configurado")
+        await private_response(interaction, f"🎫 {self.label}\nNo configurado")
 
 class NotificationCategorySelect(discord.ui.Select):
     def __init__(self, cog: "Admin"):
@@ -2712,25 +2744,56 @@ class NotificationsAdminView(discord.ui.View):
         )
 
     @discord.ui.button(
-        label="ESTABLECER CANAL DE TICKETS",
-        emoji="🎫",
+        label="Establecer canal de notificaciones de tickets",
+        emoji="📢",
         style=discord.ButtonStyle.primary,
         row=2,
     )
-    async def ticket_channel(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
+    async def ticket_notification_channel(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
         if interaction.guild is None or not is_admin_subject(self.cog.db, interaction):
             await private_response(
                 interaction,
-                "Solo admins autorizados pueden configurar el canal de tickets.",
+                "Solo admins autorizados pueden configurar el canal de notificaciones de tickets.",
             )
             return
         await private_response(
             interaction,
             (
                 f"{self.cog.ticket_channel_status_text(interaction.guild.id)}\n\n"
-                "Selecciona un canal de texto para recibir los tickets nuevos."
+                "Selecciona un canal de texto para recibir los embeds administrativos de tickets."
             ),
-            view=TicketChannelConfigView(self.cog),
+            view=TicketChannelConfigView(
+                self.cog,
+                setting_key=TICKET_CHANNEL_SETTING_KEY,
+                label=TICKET_CHANNEL_LABEL,
+            ),
+        )
+
+    @discord.ui.button(
+        label="Establecer canal de conversaciones de tickets",
+        emoji="🔒",
+        style=discord.ButtonStyle.primary,
+        row=2,
+    )
+    async def ticket_conversation_channel(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
+        if interaction.guild is None or not is_admin_subject(self.cog.db, interaction):
+            await private_response(
+                interaction,
+                "Solo admins autorizados pueden configurar el canal de conversaciones de tickets.",
+            )
+            return
+        await private_response(
+            interaction,
+            (
+                f"{self.cog.ticket_channel_status_text(interaction.guild.id)}\n\n"
+                "Selecciona un canal de texto normal para crear hilos privados de tickets."
+            ),
+            view=TicketChannelConfigView(
+                self.cog,
+                setting_key=TICKET_CONVERSATION_CHANNEL_SETTING_KEY,
+                label=TICKET_CONVERSATION_CHANNEL_LABEL,
+                conversation=True,
+            ),
         )
 
     @discord.ui.button(
@@ -3282,6 +3345,160 @@ class MemberPenaltyConfirmRemovalView(discord.ui.View):
         await interaction.response.edit_message(content="Operacion cancelada.", view=None)
 
 
+class MemberAccessRoleAddSelect(discord.ui.RoleSelect):
+    def __init__(self, cog: "Admin", *, admin_id: int):
+        super().__init__(placeholder="Selecciona el rol equivalente a miembro", min_values=1, max_values=1)
+        self.cog = cog
+        self.admin_id = admin_id
+
+    async def callback(self, interaction: discord.Interaction) -> None:
+        if interaction.guild is None:
+            await private_response(interaction, "Esta operacion debe realizarse dentro del servidor.")
+            return
+        if interaction.user.id != self.admin_id or not is_admin_subject(self.cog.db, interaction):
+            log_action(
+                self.cog.db,
+                interaction.guild.id,
+                admin_id=interaction.user.id,
+                action="Intento sin permisos roles de miembro",
+                system="Permisos",
+                observation="add",
+            )
+            await private_response(interaction, "Solo el admin que abrio este menu puede usarlo.")
+            return
+        role = self.values[0]
+        added = add_member_access_role(self.cog.db, interaction.guild.id, role.id)
+        if not added:
+            await private_response(interaction, f"{role.mention} ya esta configurado como rol de miembro.")
+            return
+        log_action(
+            self.cog.db,
+            interaction.guild.id,
+            admin_id=interaction.user.id,
+            action="Agregar rol equivalente de miembro",
+            system="Permisos",
+            observation=str(role.id),
+        )
+        await private_response(interaction, f"✅ Rol equivalente de miembro añadido: {role.mention}")
+
+
+class MemberAccessRoleAddView(discord.ui.View):
+    def __init__(self, cog: "Admin", *, admin_id: int):
+        super().__init__(timeout=300)
+        self.add_item(MemberAccessRoleAddSelect(cog, admin_id=admin_id))
+
+
+class MemberAccessRoleRemoveSelect(discord.ui.Select):
+    def __init__(self, cog: "Admin", *, admin_id: int, guild: discord.Guild):
+        configured_roles = sorted(configured_member_role_ids(cog.db, guild.id) - {OFFICIAL_MEMBER_ROLE_ID})
+        options = []
+        for role_id in configured_roles[:25]:
+            role = guild.get_role(role_id)
+            label = role.name if role is not None else f"Rol no disponible {role_id}"
+            description = f"ID {role_id}"
+            options.append(
+                discord.SelectOption(
+                    label=label[:100],
+                    value=str(role_id),
+                    description=description[:100],
+                    emoji="👥",
+                )
+            )
+        super().__init__(placeholder="Selecciona el rol equivalente que deseas quitar", min_values=1, max_values=1, options=options)
+        self.cog = cog
+        self.admin_id = admin_id
+
+    async def callback(self, interaction: discord.Interaction) -> None:
+        if interaction.guild is None:
+            await private_response(interaction, "Esta operacion debe realizarse dentro del servidor.")
+            return
+        if interaction.user.id != self.admin_id or not is_admin_subject(self.cog.db, interaction):
+            log_action(
+                self.cog.db,
+                interaction.guild.id,
+                admin_id=interaction.user.id,
+                action="Intento sin permisos roles de miembro",
+                system="Permisos",
+                observation="remove",
+            )
+            await private_response(interaction, "Solo el admin que abrio este menu puede usarlo.")
+            return
+        role_id = int(self.values[0])
+        try:
+            removed = remove_member_access_role(self.cog.db, interaction.guild.id, role_id)
+        except ValueError as exc:
+            await private_response(interaction, f"❌ {exc}")
+            return
+        role = interaction.guild.get_role(role_id)
+        mention = role.mention if role is not None else f"`{role_id}`"
+        if not removed:
+            await private_response(interaction, f"{mention} no estaba configurado como rol equivalente.")
+            return
+        log_action(
+            self.cog.db,
+            interaction.guild.id,
+            admin_id=interaction.user.id,
+            action="Quitar rol equivalente de miembro",
+            system="Permisos",
+            observation=str(role_id),
+        )
+        await private_response(interaction, f"✅ Rol equivalente de miembro quitado: {mention}")
+
+
+class MemberAccessRoleRemoveView(discord.ui.View):
+    def __init__(self, cog: "Admin", *, admin_id: int, guild: discord.Guild):
+        super().__init__(timeout=300)
+        self.add_item(MemberAccessRoleRemoveSelect(cog, admin_id=admin_id, guild=guild))
+
+
+class MemberAccessRolesView(discord.ui.View):
+    def __init__(self, cog: "Admin"):
+        super().__init__(timeout=300)
+        self.cog = cog
+
+    async def require_admin(self, interaction: discord.Interaction) -> bool:
+        if interaction.guild is not None and is_admin_subject(self.cog.db, interaction):
+            return True
+        await private_response(interaction, "Solo admins autorizados pueden configurar roles de miembro.")
+        return False
+
+    @discord.ui.button(label="Añadir rol de miembro", emoji="➕", style=discord.ButtonStyle.success, custom_id="g3n:admin:members:roles:add", row=0)
+    async def add_role(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
+        if await self.require_admin(interaction):
+            await private_response(
+                interaction,
+                "Selecciona el rol que tendra permisos funcionales de miembro:",
+                view=MemberAccessRoleAddView(self.cog, admin_id=interaction.user.id),
+            )
+
+    @discord.ui.button(label="Quitar rol de miembro", emoji="➖", style=discord.ButtonStyle.danger, custom_id="g3n:admin:members:roles:remove", row=0)
+    async def remove_role(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
+        if not await self.require_admin(interaction):
+            return
+        configured_roles = configured_member_role_ids(self.cog.db, interaction.guild.id) - {OFFICIAL_MEMBER_ROLE_ID}
+        if not configured_roles:
+            await private_response(interaction, "No hay roles equivalentes adicionales configurados.")
+            return
+        await private_response(
+            interaction,
+            "Selecciona el rol equivalente que deseas quitar:",
+            view=MemberAccessRoleRemoveView(self.cog, admin_id=interaction.user.id, guild=interaction.guild),
+        )
+
+    @discord.ui.button(label="Ver roles de miembro", emoji="📋", style=discord.ButtonStyle.primary, custom_id="g3n:admin:members:roles:view", row=0)
+    async def view_roles(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
+        if await self.require_admin(interaction):
+            await private_response(interaction, self.cog.member_access_roles_text(interaction.guild))
+
+    @discord.ui.button(label="Volver", emoji="↩️", style=discord.ButtonStyle.secondary, custom_id="g3n:admin:members:roles:back", row=1)
+    async def back(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
+        await interaction.response.edit_message(
+            content="Gestión de miembros:",
+            embed=None,
+            view=MembersAdminView(self.cog),
+        )
+
+
 class MembersAdminView(discord.ui.View):
     def __init__(self, cog: "Admin"):
         super().__init__(timeout=300)
@@ -3313,6 +3530,17 @@ class MembersAdminView(discord.ui.View):
                 "Selecciona el miembro al que deseas eliminarle una penalizacion activa:",
                 view=MemberPenaltyUserSelectView(self.cog, action="remove", admin_id=interaction.user.id),
             )
+
+    @discord.ui.button(label="Roles de miembro", emoji="👥", style=discord.ButtonStyle.primary, custom_id="g3n:admin:members:roles", row=1)
+    async def member_roles(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
+        if interaction.guild is not None and is_admin_subject(self.cog.db, interaction):
+            await interaction.response.edit_message(
+                content=self.cog.member_access_roles_text(interaction.guild),
+                embed=None,
+                view=MemberAccessRolesView(self.cog),
+            )
+            return
+        await private_response(interaction, "Solo admins autorizados pueden configurar roles de miembro.")
 
     @discord.ui.button(label="Volver", emoji="\u21a9\ufe0f", style=discord.ButtonStyle.secondary, custom_id="g3n:admin:members:back", row=1)
     async def back(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
@@ -4491,6 +4719,27 @@ class Admin(commands.Cog):
                 f"Alta: `{row['added_at']}` por <@{row['added_by']}> | "
                 f"Pagos activos: {active_payments}"
             )
+        return "\n".join(lines)[:1900]
+
+    def member_access_roles_text(self, guild: discord.Guild) -> str:
+        official_role = guild.get_role(OFFICIAL_MEMBER_ROLE_ID)
+        official_label = official_role.mention if official_role is not None else f"<@&{OFFICIAL_MEMBER_ROLE_ID}>"
+        configured_roles = sorted(configured_member_role_ids(self.db, guild.id) - {OFFICIAL_MEMBER_ROLE_ID})
+        lines = [
+            "👥 **ROLES CON ACCESO DE MIEMBRO**",
+            "",
+            "Rol principal:",
+            f"• {official_label}",
+            "",
+            "Roles equivalentes:",
+        ]
+        if not configured_roles:
+            lines.append("No hay roles equivalentes adicionales configurados.")
+        else:
+            for role_id in configured_roles:
+                role = guild.get_role(role_id)
+                label = role.mention if role is not None else f"`{role_id}` (rol no disponible)"
+                lines.append(f"• {label}")
         return "\n".join(lines)[:1900]
 
     async def add_payment_delegate_interaction(self, interaction: discord.Interaction, member: discord.Member | None) -> None:
@@ -6426,7 +6675,11 @@ class Admin(commands.Cog):
             raise ValueError("No puedes pagar mas de la cantidad pendiente.")
         account = get_account(self.db, guild.id, int(withdrawal["user_id"]))
         if int(account["available"]) < amount:
-            raise ValueError("El usuario no tiene saldo disponible suficiente.")
+            raise ValueError(
+                "El usuario ya no tiene saldo disponible suficiente para pagar esta solicitud. "
+                f"Saldo actual: {format_amount(account['available'])}. "
+                f"Monto a pagar: {format_amount(amount)}."
+            )
 
         adjust_user_balance(self.db, guild.id, int(withdrawal["user_id"]), available_delta=-amount)
         total_paid = already_paid + amount
@@ -6954,28 +7207,60 @@ class Admin(commands.Cog):
         return "\n".join(lines)
 
     def ticket_channel_status_text(self, guild_id: int) -> str:
-        raw_channel_id = self.db.get_setting(guild_id, TICKET_CHANNEL_SETTING_KEY)
-        lines = [f"🎫 **{TICKET_CHANNEL_LABEL}**"]
-        if not raw_channel_id:
-            lines.append("No configurado")
-            lines.append("Advertencia: los tickets nuevos usaran temporalmente el canal del Panel de Banco.")
-            return "\n".join(lines)
-        if not raw_channel_id.isdigit():
-            lines.append(f"Configurado: ID invalido `{raw_channel_id}`")
-            lines.append("Advertencia: selecciona un canal de tickets valido.")
-            return "\n".join(lines)
         guild = self.bot.get_guild(guild_id)
+        lines = ["🎫 **Sistema de tickets**"]
+        lines.extend(
+            self.ticket_channel_status_lines(
+                guild,
+                guild_id,
+                setting_key=TICKET_CHANNEL_SETTING_KEY,
+                title="Canal de notificaciones",
+                conversation=False,
+            )
+        )
+        lines.extend(
+            self.ticket_channel_status_lines(
+                guild,
+                guild_id,
+                setting_key=TICKET_CONVERSATION_CHANNEL_SETTING_KEY,
+                title="Canal de conversaciones",
+                conversation=True,
+            )
+        )
+        return "\n".join(lines)
+
+    def ticket_channel_status_lines(
+        self,
+        guild: discord.Guild | None,
+        guild_id: int,
+        *,
+        setting_key: str,
+        title: str,
+        conversation: bool,
+    ) -> list[str]:
+        raw_channel_id = self.db.get_setting(guild_id, setting_key)
+        if not raw_channel_id:
+            return [f"{title}: No configurado"]
+        if not raw_channel_id.isdigit():
+            return [
+                f"{title}: ID invalido `{raw_channel_id}`",
+                f"Advertencia: selecciona un canal valido para {title.lower()}.",
+            ]
         channel = guild.get_channel(int(raw_channel_id)) if guild is not None else None
         if channel is None:
-            lines.append(f"Configurado: canal no disponible · ID `{raw_channel_id}`")
-            lines.append("Advertencia: el canal configurado no existe o el bot no puede verlo.")
-            return "\n".join(lines)
+            return [
+                f"{title}: canal no disponible · ID `{raw_channel_id}`",
+                "Advertencia: el canal configurado no existe o el bot no puede verlo.",
+            ]
         mention = getattr(channel, "mention", f"<#{raw_channel_id}>")
-        lines.append(f"Configurado: {mention}")
-        missing = ticket_channel_permission_errors(channel, guild)
+        lines = [f"{title}: {mention}"]
+        if conversation and not is_normal_text_ticket_channel(channel):
+            lines.append("Advertencia: el canal de conversaciones debe ser un canal de texto normal.")
+            return lines
+        missing = ticket_channel_permission_errors(channel, guild, conversation=conversation)
         if missing:
             lines.append("Advertencia: faltan permisos del bot: " + ", ".join(missing) + ".")
-        return "\n".join(lines)
+        return lines
 
     def default_rates_text(self, guild_id: int) -> str:
         lines = [

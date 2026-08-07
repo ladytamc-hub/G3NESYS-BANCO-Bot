@@ -21,6 +21,7 @@ from ..permissions import has_bank_access, is_admin_subject, is_full_member, req
 from ..services.audit import log_action
 from ..services.callers import is_caller_penalized
 from ..services.economy import (
+    ActiveWithdrawalError,
     create_withdrawal_request,
     format_percent,
     get_account,
@@ -55,7 +56,9 @@ from ..services.tickets import (
     validate_ticket_status,
 )
 from ..services.ticket_channels import (
+    TICKET_CONVERSATION_CHANNEL_SETTING_KEY,
     TICKET_CHANNEL_SETTING_KEY,
+    is_normal_text_ticket_channel,
     is_text_ticket_channel,
     ticket_channel_permission_errors,
 )
@@ -881,10 +884,11 @@ class Bank(commands.Cog):
         paid = int(withdrawal["amount_liquidated"] or 0)
         requested = int(withdrawal["amount_requested"] or 0)
         pending = 0 if withdrawal["status"] == WITHDRAWAL_REJECTED else max(0, requested - paid)
+        color = discord.Color.green() if withdrawal["status"] == WITHDRAWAL_PAID else discord.Color.gold()
         embed = discord.Embed(
             title=f"💳 Solicitud de cobro {withdrawal['code']}",
             description=f"Estado: {withdrawal['status']}",
-            color=discord.Color.gold(),
+            color=color,
         )
         embed.add_field(name="Usuario", value=f"<@{withdrawal['user_id']}>", inline=True)
         embed.add_field(name="Solicitado", value=format_amount(requested), inline=True)
@@ -993,11 +997,25 @@ class Bank(commands.Cog):
         except ValueError as exc:
             await private_response(interaction, str(exc))
             return
-        ticket_channel = await self.resolve_ticket_destination_channel(interaction.guild, interaction.channel)
-        thread = await self.try_create_ticket_thread(interaction, str(ticket["code"]), ticket_channel)
+        ticket_admin_channel = await self.resolve_ticket_notification_channel(interaction.guild)
+        admin_message = await self.notify_ticket_created(interaction.guild, ticket, ticket_admin_channel)
+        ticket_conversation_channel = await self.resolve_ticket_conversation_channel(interaction.guild)
+        thread = await self.try_create_ticket_thread(
+            interaction,
+            str(ticket["code"]),
+            ticket_conversation_channel,
+        )
         if thread is not None:
             set_ticket_thread(self.db, int(ticket["id"]), thread.id)
             ticket = get_ticket(self.db, interaction.guild.id, str(ticket["code"]))
+            if admin_message is not None:
+                try:
+                    await admin_message.edit(
+                        embed=self.ticket_admin_embed(interaction.guild, ticket),
+                        view=TicketAdminActionView(self, interaction.guild.id, str(ticket["code"])),
+                    )
+                except (discord.Forbidden, discord.HTTPException, AttributeError):
+                    pass
         dm_sent = await send_dm_safe(
             self.db,
             guild_id=interaction.guild.id,
@@ -1014,14 +1032,18 @@ class Bank(commands.Cog):
             affected_user_id=interaction.user.id,
             observation=f"Ticket {ticket['code']} creado. DM={'ok' if dm_sent else 'fallo'}.",
         )
-        await self.notify_ticket_created(interaction.guild, ticket, ticket_channel)
-        evidence_target = thread.mention if thread is not None else getattr(ticket_channel, "mention", "este canal mencionando el ID del ticket")
+        evidence_target = thread.mention if thread is not None else None
         dm_note = "" if dm_sent else " No pude enviarte la confirmacion por DM, pero el ticket fue creado."
+        evidence_note = (
+            f"Si deseas adjuntar evidencias, envia las imagenes en {evidence_target}."
+            if evidence_target is not None
+            else "El ticket fue creado, pero no se pudo generar el espacio privado de conversacion para evidencias."
+        )
         await private_response(
             interaction,
             (
                 f"Ticket `{ticket['code']}` creado con estado `{ticket['status']}`.{dm_note}\n"
-                f"Si deseas adjuntar evidencias, envia las imagenes en {evidence_target}."
+                f"{evidence_note}"
             ),
         )
 
@@ -1036,16 +1058,16 @@ class Bank(commands.Cog):
             observation=reason[:1800],
         )
 
-    async def resolve_ticket_destination_channel(self, guild: discord.Guild, fallback_channel):
+    async def resolve_ticket_notification_channel(self, guild: discord.Guild):
         raw_channel_id = self.db.get_setting(guild.id, TICKET_CHANNEL_SETTING_KEY)
         if not raw_channel_id:
-            self.log_ticket_channel_warning(guild.id, "ticket_channel_id no configurado; usando canal del Panel de Banco")
-            return fallback_channel
+            self.log_ticket_channel_warning(guild.id, "ticket_channel_id no configurado para notificaciones de tickets")
+            return None
         try:
             channel_id = int(raw_channel_id)
         except (TypeError, ValueError):
-            self.log_ticket_channel_warning(guild.id, f"ticket_channel_id invalido: {raw_channel_id}; usando canal del Panel de Banco")
-            return fallback_channel
+            self.log_ticket_channel_warning(guild.id, f"ticket_channel_id invalido para notificaciones de tickets: {raw_channel_id}")
+            return None
         channel = guild.get_channel(channel_id) or self.bot.get_channel(channel_id)
         if channel is None:
             try:
@@ -1053,18 +1075,49 @@ class Bank(commands.Cog):
             except (discord.Forbidden, discord.NotFound, discord.HTTPException, AttributeError):
                 channel = None
         if channel is None:
-            self.log_ticket_channel_warning(guild.id, f"canal de tickets {channel_id} no existe; usando canal del Panel de Banco")
-            return fallback_channel
+            self.log_ticket_channel_warning(guild.id, f"canal de notificaciones de tickets {channel_id} no existe")
+            return None
         if not is_text_ticket_channel(channel):
-            self.log_ticket_channel_warning(guild.id, f"canal de tickets {channel_id} no es un canal de texto; usando canal del Panel de Banco")
-            return fallback_channel
+            self.log_ticket_channel_warning(guild.id, f"canal de notificaciones de tickets {channel_id} no es un canal de texto")
+            return None
         missing = ticket_channel_permission_errors(channel, guild)
         if missing:
             self.log_ticket_channel_warning(
                 guild.id,
-                f"canal de tickets {channel_id} sin permisos: {', '.join(missing)}; usando canal del Panel de Banco",
+                f"canal de notificaciones de tickets {channel_id} sin permisos: {', '.join(missing)}",
             )
-            return fallback_channel
+            return None
+        return channel
+
+    async def resolve_ticket_conversation_channel(self, guild: discord.Guild):
+        raw_channel_id = self.db.get_setting(guild.id, TICKET_CONVERSATION_CHANNEL_SETTING_KEY)
+        if not raw_channel_id:
+            self.log_ticket_channel_warning(guild.id, "ticket_conversation_channel_id no configurado; no se creara hilo privado")
+            return None
+        try:
+            channel_id = int(raw_channel_id)
+        except (TypeError, ValueError):
+            self.log_ticket_channel_warning(guild.id, f"ticket_conversation_channel_id invalido: {raw_channel_id}; no se creara hilo privado")
+            return None
+        channel = guild.get_channel(channel_id) or self.bot.get_channel(channel_id)
+        if channel is None:
+            try:
+                channel = await self.bot.fetch_channel(channel_id)
+            except (discord.Forbidden, discord.NotFound, discord.HTTPException, AttributeError):
+                channel = None
+        if channel is None:
+            self.log_ticket_channel_warning(guild.id, f"canal de conversaciones de tickets {channel_id} no existe; no se creara hilo privado")
+            return None
+        if not is_normal_text_ticket_channel(channel):
+            self.log_ticket_channel_warning(guild.id, f"canal de conversaciones de tickets {channel_id} no es un canal de texto normal; no se creara hilo privado")
+            return None
+        missing = ticket_channel_permission_errors(channel, guild, conversation=True)
+        if missing:
+            self.log_ticket_channel_warning(
+                guild.id,
+                f"canal de conversaciones de tickets {channel_id} sin permisos: {', '.join(missing)}; no se creara hilo privado",
+            )
+            return None
         return channel
 
     async def try_create_ticket_thread(self, interaction: discord.Interaction, code: str, channel):
@@ -1096,7 +1149,12 @@ class Bank(commands.Cog):
                     "Envia aqui las imagenes o evidencias relacionadas."
                 )
             return thread
-        except (discord.Forbidden, discord.HTTPException):
+        except (discord.Forbidden, discord.HTTPException, AttributeError) as exc:
+            guild_id = interaction.guild.id if interaction.guild is not None else 0
+            self.log_ticket_channel_warning(
+                guild_id,
+                f"no se pudo crear el hilo privado del ticket {code}: {exc}",
+            )
             return None
 
     def ticket_user_confirmation_embed(
@@ -1128,7 +1186,8 @@ class Bank(commands.Cog):
                 "Hemos recibido correctamente tu solicitud.\n\n"
                 "Nuestro equipo administrativo dará seguimiento a tu solicitud "
                 "lo antes posible.\n\n"
-                "En este momento no fue posible generar el enlace directo al hilo."
+                "En este momento no fue posible generar el espacio privado de "
+                "conversacion para evidencias."
             )
 
         embed.add_field(
@@ -1158,7 +1217,39 @@ class Bank(commands.Cog):
 
         return embed
 
-    async def notify_ticket_created(self, guild: discord.Guild, ticket, ticket_channel) -> None:
+    def ticket_admin_embed(self, guild: discord.Guild, ticket) -> discord.Embed:
+        attachments = ticket_attachments(self.db, int(ticket["id"]), limit=5)
+        messages = list(reversed(ticket_messages(self.db, int(ticket["id"]), limit=8)))
+        embed = discord.Embed(
+            title=f"Ticket {ticket['code']}",
+            description=str(ticket["description"])[:1800],
+            color=discord.Color.orange() if ticket["status"] in OPEN_TICKET_STATUSES else discord.Color.green(),
+        )
+        embed.add_field(name="Usuario", value=f"<@{ticket['user_id']}>", inline=True)
+        embed.add_field(name="Discord ID", value=str(ticket["user_id"]), inline=True)
+        embed.add_field(name="Estado", value=str(ticket["status"]), inline=True)
+        embed.add_field(name="Asunto", value=str(ticket["subject"])[:1024], inline=False)
+        embed.add_field(name="Creado", value=str(ticket["created_at"]), inline=True)
+        embed.add_field(name="Actualizado", value=str(ticket["updated_at"]), inline=True)
+        assigned = f"<@{ticket['assigned_admin_id']}>" if ticket["assigned_admin_id"] else "Sin asignar"
+        embed.add_field(name="Admin asignado", value=assigned, inline=True)
+        embed.add_field(name="Imagenes adjuntas", value=str(len(attachments)), inline=True)
+        if ticket["thread_id"]:
+            embed.add_field(name="Conversacion privada", value=f"<#{ticket['thread_id']}>", inline=True)
+        if messages:
+            lines = []
+            for row in messages:
+                marker = "Usuario" if row["message_type"] == "respuesta_usuario" else "Admin" if row["message_type"] == TICKET_ADMIN_REPLY else "Interna"
+                status = f" ({row['old_status']} -> {row['new_status']})" if row["new_status"] else ""
+                lines.append(f"{marker}{status}: {str(row['content'])[:160]}")
+            embed.add_field(name="Historial reciente", value="\n".join(lines)[:1024], inline=False)
+        if attachments:
+            links = [f"[{row['filename']}]({row['url']})" for row in attachments]
+            embed.add_field(name="Evidencias", value="\n".join(links)[:1024], inline=False)
+            embed.set_image(url=str(attachments[0]["url"]))
+        return embed
+
+    async def notify_ticket_created(self, guild: discord.Guild, ticket, ticket_channel):
         view = TicketAdminActionView(self, guild.id, str(ticket["code"]))
         self.bot.add_view(view)
         message = None
@@ -1181,6 +1272,7 @@ class Bank(commands.Cog):
             )
         if message is not None:
             set_ticket_notification(self.db, int(ticket["id"]), message.id)
+        return message
 
     def ticket_list_text(self, rows) -> str:
         lines = ["**Tickets**"]
@@ -1429,6 +1521,31 @@ class Bank(commands.Cog):
             ]
         )
 
+    def active_withdrawal_text(self, withdrawal) -> str:
+        lines = [
+            "⚠️ Ya tienes una solicitud de cobro activa.",
+            f"Solicitud: `{withdrawal['code']}`",
+            f"Monto solicitado: {format_amount(withdrawal['amount_requested'])}",
+            f"Estado: {withdrawal['status']}",
+        ]
+        if withdrawal["created_at"]:
+            lines.append(f"Fecha: {withdrawal['created_at']}")
+        lines.extend(
+            [
+                "",
+                "No necesitas enviar otra solicitud. Si es aceptada, los pagos se realizan los domingos.",
+            ]
+        )
+        return "\n".join(lines)
+
+    def withdrawal_created_text(self, code: str) -> str:
+        return (
+            "✅ Tu solicitud de cobro fue enviada correctamente.\n"
+            f"Solicitud: `{code}`\n\n"
+            "En caso de que sea aceptada, recuerda que los pagos se realizan los domingos. "
+            "No necesitas crear otra solicitud mientras esta permanezca activa."
+        )
+
     async def perform_member_transfer(
         self,
         guild: discord.Guild,
@@ -1651,11 +1768,14 @@ class Bank(commands.Cog):
                 amount=amount,
                 reason=reason,
             )
+        except ActiveWithdrawalError as exc:
+            await private_response(interaction, self.active_withdrawal_text(exc.withdrawal))
+            return
         except ValueError as exc:
             await private_response(interaction, str(exc))
             return
         await self.send_withdrawal_to_admins(interaction.guild, code)
-        await private_response(interaction, f"Solicitud de cobro creada: `{code}`.")
+        await private_response(interaction, self.withdrawal_created_text(code))
 
     async def transfer_interaction(
         self,
@@ -1716,11 +1836,14 @@ class Bank(commands.Cog):
                 amount=amount,
                 reason=reason,
             )
+        except ActiveWithdrawalError as exc:
+            await ctx.reply(self.active_withdrawal_text(exc.withdrawal), mention_author=False)
+            return
         except ValueError as exc:
             await ctx.reply(str(exc), mention_author=False)
             return
         await self.send_withdrawal_to_admins(ctx.guild, code)
-        await ctx.reply(f"Solicitud de cobro creada: `{code}`.", mention_author=False)
+        await ctx.reply(self.withdrawal_created_text(code), mention_author=False)
 
     async def send_withdrawal_to_admins(self, guild: discord.Guild, code: str) -> None:
         row = self.db.fetch_one(

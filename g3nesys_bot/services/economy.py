@@ -1,9 +1,32 @@
 from __future__ import annotations
 
-from ..constants import FINE_PAID, FINE_PENDING, WITHDRAWAL_PENDING
+from ..constants import (
+    FINE_PAID,
+    FINE_PENDING,
+    WITHDRAWAL_APPROVED,
+    WITHDRAWAL_DELEGATED,
+    WITHDRAWAL_PARTIAL,
+    WITHDRAWAL_PENDING,
+    WITHDRAWAL_REASSIGNMENT,
+)
 from ..database import Database
 from ..utils import format_amount, utc_now_iso
 from .audit import log_action
+
+
+ACTIVE_WITHDRAWAL_STATUSES = (
+    WITHDRAWAL_PENDING,
+    WITHDRAWAL_APPROVED,
+    WITHDRAWAL_PARTIAL,
+    WITHDRAWAL_DELEGATED,
+    WITHDRAWAL_REASSIGNMENT,
+)
+
+
+class ActiveWithdrawalError(ValueError):
+    def __init__(self, withdrawal):
+        super().__init__("Ya tienes una solicitud de cobro activa.")
+        self.withdrawal = withdrawal
 
 
 def format_percent(value: float) -> str:
@@ -50,6 +73,19 @@ def pending_fines_total(db: Database, guild_id: int, user_id: int) -> tuple[int,
         (guild_id, user_id, FINE_PENDING),
     )
     return int(row["count"]), int(row["total"])
+
+
+def active_withdrawal_for_user(db: Database, guild_id: int, user_id: int):
+    placeholders = ",".join("?" for _ in ACTIVE_WITHDRAWAL_STATUSES)
+    return db.fetch_one(
+        f"""
+        SELECT * FROM withdrawals
+        WHERE guild_id = ? AND user_id = ? AND status IN ({placeholders})
+        ORDER BY created_at ASC, id ASC
+        LIMIT 1
+        """,
+        (guild_id, user_id, *ACTIVE_WITHDRAWAL_STATUSES),
+    )
 
 
 def create_movement(
@@ -362,33 +398,89 @@ def create_withdrawal_request(
     amount: int,
     reason: str | None,
 ) -> str:
-    fine_count, _ = pending_fines_total(db, guild_id, user_id)
-    if fine_count > 0:
-        raise ValueError("No puedes solicitar cobro con multas pendientes.")
-    account = get_account(db, guild_id, user_id)
-    if int(account["available"]) < amount:
-        raise ValueError("No tienes saldo disponible suficiente.")
+    now = utc_now_iso()
+    with db.transaction() as cursor:
+        active_placeholders = ",".join("?" for _ in ACTIVE_WITHDRAWAL_STATUSES)
+        active = cursor.execute(
+            f"""
+            SELECT * FROM withdrawals
+            WHERE guild_id = ? AND user_id = ? AND status IN ({active_placeholders})
+            ORDER BY created_at ASC, id ASC
+            LIMIT 1
+            """,
+            (guild_id, user_id, *ACTIVE_WITHDRAWAL_STATUSES),
+        ).fetchone()
+        if active is not None:
+            raise ActiveWithdrawalError(active)
 
-    code = db.next_code(guild_id, "COBRO")
-    db.execute(
-        """
-        INSERT INTO withdrawals (
-            code, guild_id, user_id, amount_requested, status, reason, created_at
+        fine_row = cursor.execute(
+            """
+            SELECT COUNT(*) AS count
+            FROM fines
+            WHERE guild_id = ? AND user_id = ? AND status = ?
+            """,
+            (guild_id, user_id, FINE_PENDING),
+        ).fetchone()
+        if int(fine_row["count"]) > 0:
+            raise ValueError("No puedes solicitar cobro con multas pendientes.")
+
+        cursor.execute(
+            """
+            INSERT INTO accounts (guild_id, user_id, available, retained, seized, updated_at)
+            VALUES (?, ?, 0, 0, 0, ?)
+            ON CONFLICT(guild_id, user_id) DO NOTHING
+            """,
+            (guild_id, user_id, now),
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?)
-        """,
-        (code, guild_id, user_id, amount, WITHDRAWAL_PENDING, reason, utc_now_iso()),
-    )
-    log_action(
-        db,
-        guild_id,
-        admin_id=user_id,
-        action="Solicitud de cobro creada",
-        system="Banco",
-        affected_user_id=user_id,
-        amount=amount,
-        observation=reason,
-    )
+        account = cursor.execute(
+            "SELECT * FROM accounts WHERE guild_id = ? AND user_id = ?",
+            (guild_id, user_id),
+        ).fetchone()
+        if int(account["available"]) < amount:
+            raise ValueError("No tienes saldo disponible suficiente.")
+
+        counter = cursor.execute(
+            "SELECT last_value FROM id_counters WHERE guild_id = ? AND prefix = ?",
+            (guild_id, "COBRO"),
+        ).fetchone()
+        next_value = int(counter["last_value"]) + 1 if counter else 1
+        cursor.execute(
+            """
+            INSERT INTO id_counters (guild_id, prefix, last_value)
+            VALUES (?, ?, ?)
+            ON CONFLICT(guild_id, prefix)
+            DO UPDATE SET last_value = excluded.last_value
+            """,
+            (guild_id, "COBRO", next_value),
+        )
+        code = f"COBRO-{next_value:06d}"
+        cursor.execute(
+            """
+            INSERT INTO withdrawals (
+                code, guild_id, user_id, amount_requested, status, reason, created_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            (code, guild_id, user_id, amount, WITHDRAWAL_PENDING, reason, now),
+        )
+        cursor.execute(
+            """
+            INSERT INTO audit_logs (
+                guild_id, admin_id, action, affected_user_id, amount,
+                system, observation, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                guild_id,
+                user_id,
+                "Solicitud de cobro creada",
+                user_id,
+                amount,
+                "Banco",
+                reason,
+                now,
+            ),
+        )
     return code
 
 

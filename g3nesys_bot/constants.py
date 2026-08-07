@@ -84,6 +84,8 @@ PAYOUT_CANCELLED = "Cancelado"
 
 DEFAULT_MEMBER_ROLE_NAME = "MIEMBRO G3NESYS"
 DEFAULT_GUEST_ROLE_NAME = "INVITADO"
+OFFICIAL_MEMBER_ROLE_ID = 1403114230143651941
+DEFAULT_MEMBER_ACCESS_ROLE_IDS = "1533482540223168553"
 
 DEFAULT_SETTINGS = {
     "channel_pings_id": "",
@@ -95,6 +97,7 @@ DEFAULT_SETTINGS = {
     "channel_repartos_id": "",
     "channel_requips_id": "",
     "ticket_channel_id": "",
+    "ticket_conversation_channel_id": "",
     "channel_notify_requips_id": "",
     "channel_notify_splits_id": "",
     "channel_notify_withdrawals_id": "",
@@ -109,6 +112,7 @@ DEFAULT_SETTINGS = {
     "regear_reviewer_role_ids": "",
     "caller_panel_role_ids": "",
     "alliance_role_ids": "",
+    "member_role_ids": DEFAULT_MEMBER_ACCESS_ROLE_IDS,
     "member_role_name": DEFAULT_MEMBER_ROLE_NAME,
     "guest_role_name": DEFAULT_GUEST_ROLE_NAME,
     "guild_percentage_default": "10",

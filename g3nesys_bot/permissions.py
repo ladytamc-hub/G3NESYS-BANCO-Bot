@@ -3,9 +3,10 @@ from __future__ import annotations
 import discord
 from discord.ext import commands
 
+from .constants import OFFICIAL_MEMBER_ROLE_ID
 from .database import Database
 from .services.callers import is_caller_penalized
-from .utils import split_csv_ids
+from .utils import join_csv_ids, split_csv_ids
 
 
 ADMIN_ROLE_NAMES = {
@@ -18,6 +19,7 @@ ADMIN_ROLE_NAMES = {
 }
 CALLER_PANEL_ROLE_SETTING_KEY = "caller_panel_role_ids"
 ALLIANCE_ROLE_SETTING_KEY = "alliance_role_ids"
+MEMBER_ACCESS_ROLE_SETTING_KEY = "member_role_ids"
 CALLER_PANEL_ROLE_NAMES = {
     "pcall",
     "p call",
@@ -45,6 +47,53 @@ def has_any_configured_role(member: discord.Member, role_ids_csv: str) -> bool:
     if not role_ids:
         return False
     return any(role.id in role_ids for role in member.roles)
+
+
+def configured_member_role_ids(db: Database, guild_id: int) -> set[int]:
+    return split_csv_ids(db.get_setting(guild_id, MEMBER_ACCESS_ROLE_SETTING_KEY))
+
+
+def member_access_role_ids(db: Database, guild_id: int) -> set[int]:
+    return {OFFICIAL_MEMBER_ROLE_ID} | configured_member_role_ids(db, guild_id)
+
+
+def has_official_member_role(member: discord.Member) -> bool:
+    return any(role.id == OFFICIAL_MEMBER_ROLE_ID for role in member.roles)
+
+
+def has_configured_member_role(db: Database, member: discord.Member) -> bool:
+    return any(role.id in configured_member_role_ids(db, member.guild.id) for role in member.roles)
+
+
+def is_bot_member(db: Database, member: discord.Member) -> bool:
+    if getattr(member, "guild", None) is None:
+        return False
+    if has_official_member_role(member) or has_configured_member_role(db, member):
+        return True
+    member_role = db.get_setting(member.guild.id, "member_role_name")
+    return has_named_role(member, member_role)
+
+
+def add_member_access_role(db: Database, guild_id: int, role_id: int) -> bool:
+    configured_roles = configured_member_role_ids(db, guild_id)
+    role_id = int(role_id)
+    if role_id == OFFICIAL_MEMBER_ROLE_ID or role_id in configured_roles:
+        return False
+    configured_roles.add(role_id)
+    db.set_setting(guild_id, MEMBER_ACCESS_ROLE_SETTING_KEY, join_csv_ids(configured_roles))
+    return True
+
+
+def remove_member_access_role(db: Database, guild_id: int, role_id: int) -> bool:
+    role_id = int(role_id)
+    if role_id == OFFICIAL_MEMBER_ROLE_ID:
+        raise ValueError("El rol principal de miembro no se puede quitar.")
+    configured_roles = configured_member_role_ids(db, guild_id)
+    if role_id not in configured_roles:
+        return False
+    configured_roles.remove(role_id)
+    db.set_setting(guild_id, MEMBER_ACCESS_ROLE_SETTING_KEY, join_csv_ids(configured_roles))
+    return True
 
 
 def has_named_admin_role(member: discord.Member) -> bool:
@@ -183,9 +232,8 @@ def has_configured_alliance_role(db: Database, member: discord.Member) -> bool:
 
 
 def has_service_access(db: Database, member: discord.Member, *, include_guest: bool = True) -> bool:
-    member_role = db.get_setting(member.guild.id, "member_role_name")
     guest_role = db.get_setting(member.guild.id, "guest_role_name")
-    if has_named_role(member, member_role):
+    if is_bot_member(db, member):
         return True
     if include_guest and has_named_role(member, guest_role):
         return True
