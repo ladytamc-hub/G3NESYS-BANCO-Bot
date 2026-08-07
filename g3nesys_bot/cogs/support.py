@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import re
 
 import discord
 from discord.ext import commands
@@ -26,6 +27,10 @@ SUPPORT_PANEL_TYPE = "support"
 SUPPORT_PANEL_CHANNEL_SETTING_KEY = "support_panel_channel_id"
 SUPPORT_PANEL_BANNER_SETTING_KEY = "support_panel_banner_url"
 SUPPORT_TICKETS_PAGE_SIZE = 5
+DISCORD_MESSAGE_URL_RE = re.compile(
+    r"https://(?:(?:ptb|canary)\.)?discord(?:app)?\.com/channels/"
+    r"(?P<guild_id>\d+)/(?P<channel_id>\d+)/(?P<message_id>\d+)"
+)
 
 SUPPORT_TICKET_STATUS_LABELS = {
     TICKET_PENDING: "Abierto",
@@ -49,6 +54,23 @@ def channel_setting_text(raw_channel_id: str) -> str:
 
 def is_panel_text_channel(channel) -> bool:
     return getattr(channel, "type", None) in {discord.ChannelType.text, discord.ChannelType.news}
+
+
+def normalize_support_banner_url(value: str | None) -> str:
+    return str(value or "").strip()
+
+
+def is_direct_image_url(value: str) -> bool:
+    lowered = value.split("?", 1)[0].lower()
+    return lowered.startswith("https://") and lowered.endswith(
+        (".png", ".jpg", ".jpeg", ".gif", ".webp")
+    )
+
+
+def is_image_attachment(attachment) -> bool:
+    content_type = str(getattr(attachment, "content_type", "") or "").lower()
+    filename = str(getattr(attachment, "filename", "") or "").lower()
+    return content_type.startswith("image/") or filename.endswith((".png", ".jpg", ".jpeg", ".gif", ".webp"))
 
 
 def support_panel_permission_errors(channel, guild: discord.Guild) -> list[str]:
@@ -247,8 +269,8 @@ class SupportBannerModal(discord.ui.Modal, title="Banner del Panel de Soporte"):
             await private_response(interaction, "Solo admins autorizados pueden configurar el banner.")
             return
         value = str(self.image_url.value).strip()
-        if value and not value.startswith(("http://", "https://")):
-            await private_response(interaction, "La URL del banner debe empezar con http:// o https://.")
+        if value and not value.startswith("https://"):
+            await private_response(interaction, "La URL del banner debe ser una URL pública HTTPS.")
             return
         self.cog.db.set_setting(interaction.guild.id, SUPPORT_PANEL_BANNER_SETTING_KEY, value)
         log_action(
@@ -332,7 +354,7 @@ class Support(commands.Cog):
     async def cog_load(self) -> None:
         self.bot.add_view(SupportPanelView(self))
 
-    def build_support_panel_embed(self, guild_id: int) -> discord.Embed:
+    def build_support_panel_embed(self, guild_id: int, *, banner_url: str | None = None) -> discord.Embed:
         embed = discord.Embed(
             title="🎫 PANEL DE SOPORTE G3NESYS",
             description=(
@@ -348,10 +370,42 @@ class Support(commands.Cog):
             ),
             color=discord.Color.gold(),
         )
-        banner_url = self.db.get_setting(guild_id, SUPPORT_PANEL_BANNER_SETTING_KEY)
+        if banner_url is None:
+            banner_url = self.db.get_setting(guild_id, SUPPORT_PANEL_BANNER_SETTING_KEY)
+        banner_url = normalize_support_banner_url(banner_url)
         if banner_url:
             embed.set_image(url=banner_url)
         return embed
+
+    async def resolve_support_banner_url(self, guild: discord.Guild) -> str:
+        raw_url = normalize_support_banner_url(self.db.get_setting(guild.id, SUPPORT_PANEL_BANNER_SETTING_KEY))
+        if not raw_url:
+            return ""
+        if is_direct_image_url(raw_url):
+            return raw_url
+        match = DISCORD_MESSAGE_URL_RE.fullmatch(raw_url)
+        if match is None:
+            return raw_url if raw_url.startswith("https://") else ""
+
+        channel_id = int(match.group("channel_id"))
+        message_id = int(match.group("message_id"))
+        channel = guild.get_channel(channel_id) or self.bot.get_channel(channel_id)
+        try:
+            if channel is None:
+                channel = await self.bot.fetch_channel(channel_id)
+            message = await channel.fetch_message(message_id)
+        except (discord.Forbidden, discord.NotFound, discord.HTTPException, AttributeError) as exc:
+            LOGGER.warning("No pude resolver el banner del Panel de Soporte desde %s: %s", raw_url, exc)
+            return ""
+        for attachment in getattr(message, "attachments", []):
+            if is_image_attachment(attachment):
+                return normalize_support_banner_url(getattr(attachment, "url", ""))
+        LOGGER.warning("El mensaje configurado como banner del Panel de Soporte no tiene adjuntos de imagen: %s", raw_url)
+        return ""
+
+    async def build_support_panel_embed_for_guild(self, guild: discord.Guild) -> discord.Embed:
+        banner_url = await self.resolve_support_banner_url(guild)
+        return self.build_support_panel_embed(guild.id, banner_url=banner_url)
 
     def user_tickets_embed(self, guild_id: int, user_id: int, *, page: int = 0) -> tuple[discord.Embed, list, int]:
         total = count_tickets_by_user(self.db, guild_id, user_id)
@@ -455,7 +509,7 @@ class Support(commands.Cog):
 
     async def publish_support_panel(self, guild: discord.Guild, admin_id: int, *, channel=None):
         target = channel or await self.configured_support_channel(guild)
-        message = await target.send(embed=self.build_support_panel_embed(guild.id), view=SupportPanelView(self))
+        message = await target.send(embed=await self.build_support_panel_embed_for_guild(guild), view=SupportPanelView(self))
         self.db.execute(
             """
             INSERT INTO panel_messages (
@@ -498,7 +552,7 @@ class Support(commands.Cog):
         if channel is None:
             raise ValueError("No encontré el canal donde estaba publicado el Panel de Soporte.")
         message = await channel.fetch_message(message_id)
-        await message.edit(embed=self.build_support_panel_embed(guild.id), view=SupportPanelView(self))
+        await message.edit(embed=await self.build_support_panel_embed_for_guild(guild), view=SupportPanelView(self))
         log_action(
             self.db,
             guild.id,

@@ -49,6 +49,7 @@ class FakeChannel:
         self.mention = f"<#{channel_id}>"
         self.type = discord.ChannelType.text
         self.sent_messages = []
+        self.fetched_messages = {}
 
     def permissions_for(self, _member):
         return FakePermissions()
@@ -59,6 +60,8 @@ class FakeChannel:
         return message
 
     async def fetch_message(self, message_id):
+        if message_id in self.fetched_messages:
+            return self.fetched_messages[message_id]
         for message in self.sent_messages:
             if message.id == message_id:
                 return message
@@ -185,7 +188,7 @@ class SupportPanelTests(unittest.IsolatedAsyncioTestCase):
         guild = FakeGuild(channels=[channel])
         support, _bot = self.support(guild=guild, channels=[channel])
         self.db.set_setting(guild.id, SUPPORT_PANEL_CHANNEL_SETTING_KEY, str(channel.id))
-        self.db.set_setting(guild.id, SUPPORT_PANEL_BANNER_SETTING_KEY, "https://example.com/banner.png")
+        self.db.set_setting(guild.id, SUPPORT_PANEL_BANNER_SETTING_KEY, "  https://example.com/banner.png  ")
 
         message = await support.publish_support_panel(guild, admin_id=42)
         row = self.db.fetch_one(
@@ -198,6 +201,32 @@ class SupportPanelTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(row["message_id"], message.id)
         self.assertEqual(channel.sent_messages[0].embed.title, "🎫 PANEL DE SOPORTE G3NESYS")
         self.assertEqual(channel.sent_messages[0].embed.image.url, "https://example.com/banner.png")
+
+    async def test_support_panel_resolves_discord_message_link_to_image_attachment(self):
+        channel = FakeChannel(1517430214584700950)
+        channel.fetched_messages[1535320874817822730] = SimpleNamespace(
+            attachments=[
+                SimpleNamespace(
+                    url="https://cdn.discordapp.com/attachments/1517430214584700950/banner.png",
+                    filename="banner.png",
+                    content_type="image/png",
+                )
+            ]
+        )
+        guild = FakeGuild(guild_id=1450908940953981073, channels=[channel])
+        support, _bot = self.support(guild=guild, channels=[channel])
+        self.db.set_setting(
+            guild.id,
+            SUPPORT_PANEL_BANNER_SETTING_KEY,
+            "https://ptb.discord.com/channels/1450908940953981073/1517430214584700950/1535320874817822730",
+        )
+
+        embed = await support.build_support_panel_embed_for_guild(guild)
+
+        self.assertEqual(
+            embed.image.url,
+            "https://cdn.discordapp.com/attachments/1517430214584700950/banner.png",
+        )
 
     async def test_open_ticket_reuses_existing_bank_ticket_flow(self):
         bank = SimpleNamespace(open_ticket_modal=AsyncMock())
@@ -291,4 +320,3 @@ class SupportPanelTests(unittest.IsolatedAsyncioTestCase):
 
 if __name__ == "__main__":
     unittest.main()
-
