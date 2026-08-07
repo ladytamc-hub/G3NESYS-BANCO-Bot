@@ -86,7 +86,7 @@ class AdminUserManagementTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(
             self.labels(MembersAdminView(self.admin)),
-            ["Ver penalizaciones", "Eliminar penalizaci\u00f3n", "Volver"],
+            ["Ver penalizaciones", "Eliminar penalizaci\u00f3n", "Roles de miembro", "Volver"],
         )
 
     def test_legacy_panel_keeps_old_custom_ids_for_published_messages(self):
