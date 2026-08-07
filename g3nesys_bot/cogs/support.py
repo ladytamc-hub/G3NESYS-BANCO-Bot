@@ -338,7 +338,7 @@ class Support(commands.Cog):
             description=(
                 "¿Necesitas ayuda, quieres realizar una reclamación o tienes dudas sobre cómo utilizar el bot?\n\n"
                 "Desde este panel puedes abrir un ticket de soporte, consultar tus solicitudes anteriores "
-                "o acceder a nuestras guías de usuario.\n\n"
+                "o acceder a las guías de usuario.\n\n"
                 "💰 **Reclamaciones de pagos**\n\n"
                 "Para solicitar cualquier auditoría de tus pagos, tienes un plazo máximo de 15 días naturales "
                 "después de la actividad en cuestión para abrir una reclamación.\n\n"
