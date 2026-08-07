@@ -86,6 +86,7 @@ DEFAULT_MEMBER_ROLE_NAME = "MIEMBRO G3NESYS"
 DEFAULT_GUEST_ROLE_NAME = "INVITADO"
 OFFICIAL_MEMBER_ROLE_ID = 1403114230143651941
 DEFAULT_MEMBER_ACCESS_ROLE_IDS = "1533482540223168553"
+DEFAULT_SUPPORT_PANEL_BANNER_URL = "https://ptb.discord.com/channels/1450908940953981073/1517430214584700950/1535320874817822730"
 
 DEFAULT_SETTINGS = {
     "channel_pings_id": "",
@@ -98,6 +99,8 @@ DEFAULT_SETTINGS = {
     "channel_requips_id": "",
     "ticket_channel_id": "",
     "ticket_conversation_channel_id": "",
+    "support_panel_channel_id": "",
+    "support_panel_banner_url": DEFAULT_SUPPORT_PANEL_BANNER_URL,
     "channel_notify_requips_id": "",
     "channel_notify_splits_id": "",
     "channel_notify_withdrawals_id": "",

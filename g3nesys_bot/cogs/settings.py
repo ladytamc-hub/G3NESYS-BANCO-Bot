@@ -47,6 +47,7 @@ class Settings(commands.Cog):
                 [
                     "`!panel_pings` - Publica Panel de Callers.",
                     "`!panel_banco` - Publica panel bancario.",
+                    "`!panel_soporte` - Publica panel de soporte.",
                     "`!panel_admin` - Publica panel administrativo.",
                 ],
             ),

@@ -102,6 +102,7 @@ from ..services.ticket_channels import (
     is_text_ticket_channel,
     ticket_channel_permission_errors,
 )
+from .support import SupportAdminView
 from ..services.payout_audit import log_payout_action, payout_audit_text
 from ..services.quick_liquidations import (
     get_liquidatable_participants,
@@ -3061,6 +3062,20 @@ class ConfigAdminView(discord.ui.View):
                 self.cog.notification_settings_text(interaction.guild.id),
                 view=NotificationsAdminView(self.cog),
             )
+
+    @discord.ui.button(label="Panel de Soporte", emoji="🎫", style=discord.ButtonStyle.primary)
+    async def support_panel(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
+        if not await self.require_admin(interaction):
+            return
+        support_cog = self.cog.bot.get_cog("Support")
+        if support_cog is None:
+            await private_response(interaction, "El módulo de soporte no está disponible.")
+            return
+        await private_response(
+            interaction,
+            support_cog.support_panel_status_text(interaction.guild),
+            view=SupportAdminView(support_cog),
+        )
 
     @discord.ui.button(label="Tasas predeterminadas", style=discord.ButtonStyle.secondary)
     async def default_rates(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:

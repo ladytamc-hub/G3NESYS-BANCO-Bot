@@ -111,7 +111,26 @@ def list_tickets(
     )
 
 
-def search_tickets_by_user(db: Database, guild_id: int, user_id: int, *, limit: int = 10) -> list[sqlite3.Row]:
+def count_tickets_by_user(db: Database, guild_id: int, user_id: int) -> int:
+    row = db.fetch_one(
+        """
+        SELECT COUNT(*) AS total
+        FROM tickets
+        WHERE guild_id = ? AND user_id = ?
+        """,
+        (guild_id, user_id),
+    )
+    return int(row["total"] if row is not None else 0)
+
+
+def search_tickets_by_user(
+    db: Database,
+    guild_id: int,
+    user_id: int,
+    *,
+    limit: int = 10,
+    offset: int = 0,
+) -> list[sqlite3.Row]:
     return db.fetch_all(
         """
         SELECT t.*,
@@ -120,9 +139,9 @@ def search_tickets_by_user(db: Database, guild_id: int, user_id: int, *, limit: 
         FROM tickets t
         WHERE t.guild_id = ? AND t.user_id = ?
         ORDER BY t.created_at DESC, t.id DESC
-        LIMIT ?
+        LIMIT ? OFFSET ?
         """,
-        (guild_id, user_id, limit),
+        (guild_id, user_id, limit, offset),
     )
 
 
