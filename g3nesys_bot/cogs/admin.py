@@ -4658,9 +4658,12 @@ class GuildEconomyView(discord.ui.View):
         try:
             text, total = self.cog.outside_balances_text(interaction.guild, page=0)
             print("[OUTSIDE_BALANCES] send_start")
+            print("[OUTSIDE_BALANCES] view_build_start")
+            view = OutsideBalancesView(self.cog, page=0, total=total) if total > 8 else None
+            print("[OUTSIDE_BALANCES] view_build_ok")
             await interaction.followup.send(
                 text,
-                view=OutsideBalancesView(self.cog, page=0, total=total) if total > 8 else None,
+                view=view,
                 ephemeral=True,
             )
             print("[OUTSIDE_BALANCES] send_ok")
@@ -8388,6 +8391,7 @@ class Admin(commands.Cog):
         rows, total = list_outside_users_with_balance(self.db, guild, limit=8, offset=page * 8)
         print(f"[OUTSIDE_BALANCES] query_ok count={total}")
         print("[OUTSIDE_BALANCES] build_start")
+        print("[OUTSIDE_BALANCES] embed_build_start")
         lines = ["👥 **USUARIOS FUERA CON SALDO**"]
         if not rows:
             lines.extend(
@@ -8398,24 +8402,37 @@ class Admin(commands.Cog):
                     "Actualmente no hay usuarios fuera del servidor con saldo a favor.",
                 ]
             )
+            print("[OUTSIDE_BALANCES] embed_build_ok")
             print("[OUTSIDE_BALANCES] build_ok")
             return "\n".join(lines), total
-        for row in rows:
-            left_text = discord_date(row.left_at, "d") if row.left_at else "No disponible / anterior al registro"
-            time_text = f"{row.days_out} días" if row.days_out is not None else "No disponible"
+        for index, row in enumerate(rows):
+            print(f"[OUTSIDE_BALANCES] build_row index={index} user_id={getattr(row, 'user_id', 'unknown')}")
+            user_id = str(getattr(row, "user_id", "No disponible") or "No disponible")
+            display_name = str(getattr(row, "display_name", None) or "No disponible")[:250]
+            albion_name = str(getattr(row, "albion_name", None) or "No disponible")[:250]
+            left_at = getattr(row, "left_at", None)
+            days_out = getattr(row, "days_out", None)
+            try:
+                available = int(getattr(row, "available", 0) or 0)
+            except (TypeError, ValueError):
+                available = 0
+            left_text = discord_date(str(left_at), "d") if left_at else "No disponible / anterior al registro"
+            time_text = f"{int(days_out)} días" if days_out is not None else "No disponible"
             lines.extend(
                 [
                     "",
-                    f"Usuario: `{row.user_id}`",
-                    f"Nombre conocido: {row.display_name}",
-                    f"Albion: {row.albion_name}",
-                    f"Balance: {format_amount(row.available)}",
+                    f"Usuario: `{user_id}`",
+                    f"Nombre conocido: {display_name}",
+                    f"Albion: {albion_name}",
+                    f"Balance: {format_amount(available)}",
                     f"Fecha de salida: {left_text}",
                     f"Tiempo fuera: {time_text}",
                 ]
             )
+            print(f"[OUTSIDE_BALANCES] build_row_ok index={index}")
         last_page = max(0, (total - 1) // 8)
         lines.append(f"\nPágina {page + 1}/{last_page + 1} · {total} usuario(s)")
+        print("[OUTSIDE_BALANCES] embed_build_ok")
         print("[OUTSIDE_BALANCES] build_ok")
         return "\n".join(lines)[:1900], total
 
