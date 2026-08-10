@@ -228,6 +228,50 @@ class BalanceControlTests(unittest.IsolatedAsyncioTestCase):
         finally:
             con.close()
 
+    def test_outside_balances_tolerates_null_display_name_without_historical_tables(self):
+        con = sqlite3.connect(":memory:")
+        con.row_factory = sqlite3.Row
+
+        class MinimalDb:
+            def fetch_all(self, query, params=()):
+                return list(con.execute(query, tuple(params)).fetchall())
+
+            def fetch_one(self, query, params=()):
+                return con.execute(query, tuple(params)).fetchone()
+
+        try:
+            con.executescript(
+                """
+                CREATE TABLE accounts (
+                    guild_id INTEGER,
+                    user_id INTEGER,
+                    available INTEGER,
+                    retained INTEGER,
+                    seized INTEGER,
+                    updated_at TEXT
+                );
+                CREATE TABLE member_departures (
+                    guild_id INTEGER,
+                    user_id INTEGER,
+                    display_name TEXT,
+                    left_at TEXT,
+                    last_alerted_at TEXT,
+                    in_server INTEGER,
+                    updated_at TEXT
+                );
+                INSERT INTO accounts VALUES (10, 100, 5000, 0, 0, 'now');
+                INSERT INTO member_departures VALUES (10, 100, NULL, NULL, NULL, 0, 'now');
+                """
+            )
+
+            rows, total = list_outside_users_with_balance(MinimalDb(), self.guild)
+
+            self.assertEqual(total, 1)
+            self.assertEqual(rows[0].display_name, "No disponible")
+            self.assertIsNone(rows[0].left_at)
+        finally:
+            con.close()
+
     @patch("g3nesys_bot.cogs.admin.is_admin_subject", return_value=True)
     async def test_outside_balances_button_defers_and_reports_empty_result(self, _is_admin):
         admin = Admin(SimpleNamespace(db=self.db, add_view=lambda _view: None))
@@ -256,8 +300,9 @@ class BalanceControlTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("Fecha de salida: No disponible / anterior al registro", content)
 
     @patch("g3nesys_bot.cogs.admin.traceback.print_exc")
+    @patch("builtins.print")
     @patch("g3nesys_bot.cogs.admin.is_admin_subject", return_value=True)
-    async def test_outside_balances_button_returns_controlled_error(self, _is_admin, print_exc):
+    async def test_outside_balances_button_returns_controlled_error(self, _is_admin, print_log, print_exc):
         class BrokenAdmin(Admin):
             def outside_balances_text(self, guild, *, page=0):
                 raise RuntimeError("boom")
@@ -269,6 +314,7 @@ class BalanceControlTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertTrue(interaction.response.deferred)
         self.assertIn("No se pudo consultar", interaction.followup.messages[0]["content"])
+        print_log.assert_called_once_with("[OUTSIDE_BALANCES_ERROR] RuntimeError: boom")
         print_exc.assert_called_once()
 
     @patch("g3nesys_bot.cogs.admin.send_admin_notification", new_callable=AsyncMock)

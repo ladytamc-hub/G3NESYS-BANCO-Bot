@@ -334,9 +334,7 @@ def list_outside_users_with_balance(
             continue
         left_at = str(row["left_at"]) if row["left_at"] else None
         left_dt = parse_iso_datetime(left_at)
-        display_name = str(row["display_name"] or "").strip()
-        if not display_name:
-            display_name = known_user_name(db, guild.id, user_id) if has_departures else f"Usuario {user_id}"
+        display_name = str(row["display_name"] or "").strip() or "No disponible"
         outside.append(
             OutsideBalanceRow(
                 user_id=user_id,

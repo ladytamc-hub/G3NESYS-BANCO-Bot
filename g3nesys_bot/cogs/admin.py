@@ -4330,7 +4330,8 @@ class OutsideBalancesView(discord.ui.View):
                 content=text,
                 view=OutsideBalancesView(self.cog, page=page, total=total),
             )
-        except Exception:
+        except Exception as exc:
+            print(f"[OUTSIDE_BALANCES_ERROR] {type(exc).__name__}: {exc}")
             traceback.print_exc()
             await interaction.followup.send(
                 "❌ No se pudo consultar los saldos de usuarios fuera.\nEl error fue registrado.",
@@ -4660,7 +4661,8 @@ class GuildEconomyView(discord.ui.View):
                 view=OutsideBalancesView(self.cog, page=0, total=total) if total > 8 else None,
                 ephemeral=True,
             )
-        except Exception:
+        except Exception as exc:
+            print(f"[OUTSIDE_BALANCES_ERROR] {type(exc).__name__}: {exc}")
             traceback.print_exc()
             await interaction.followup.send(
                 "❌ No se pudo consultar los saldos de usuarios fuera.\nEl error fue registrado.",
