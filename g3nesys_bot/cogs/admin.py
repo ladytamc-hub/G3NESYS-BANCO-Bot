@@ -4661,11 +4661,17 @@ class GuildEconomyView(discord.ui.View):
             print("[OUTSIDE_BALANCES] view_build_start")
             view = OutsideBalancesView(self.cog, page=0, total=total) if total > 8 else None
             print("[OUTSIDE_BALANCES] view_build_ok")
-            await interaction.followup.send(
-                text,
-                view=view,
-                ephemeral=True,
-            )
+            if view is not None:
+                await interaction.followup.send(
+                    text,
+                    view=view,
+                    ephemeral=True,
+                )
+            else:
+                await interaction.followup.send(
+                    text,
+                    ephemeral=True,
+                )
             print("[OUTSIDE_BALANCES] send_ok")
         except Exception as exc:
             print(f"[OUTSIDE_BALANCES_ERROR] {type(exc).__name__}: {exc}")

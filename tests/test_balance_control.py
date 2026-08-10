@@ -408,6 +408,24 @@ class BalanceControlTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("Fecha de salida: No disponible / anterior al registro", content)
         print_log.assert_any_call("[OUTSIDE_BALANCES] query_ok count=1")
 
+    @patch("builtins.print")
+    @patch("g3nesys_bot.cogs.admin.is_admin_subject", return_value=True)
+    async def test_outside_balances_button_with_four_results_does_not_send_none_view(self, _is_admin, print_log):
+        for user_id in (100, 101, 102, 103):
+            self.add_account(user_id, available=5000)
+        admin = Admin(SimpleNamespace(db=self.db, add_view=lambda _view: None))
+        interaction = FakeInteraction(self.guild, FakeMember(900, "Admin"))
+
+        await press_outside_balances_button(GuildEconomyView(admin), interaction)
+
+        message = interaction.followup.messages[0]
+        self.assertTrue(message["ephemeral"])
+        self.assertNotIn("view", message)
+        self.assertIn("Usuario: `100`", message["content"])
+        self.assertIn("Usuario: `103`", message["content"])
+        print_log.assert_any_call("[OUTSIDE_BALANCES] query_ok count=4")
+        print_log.assert_any_call("[OUTSIDE_BALANCES] send_ok")
+
     @patch("g3nesys_bot.cogs.admin.traceback.print_exc")
     @patch("builtins.print")
     @patch("g3nesys_bot.cogs.admin.is_admin_subject", return_value=True)
