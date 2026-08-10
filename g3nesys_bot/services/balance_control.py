@@ -293,6 +293,7 @@ def list_outside_users_with_balance(
     rows = db.fetch_all(
         """
         SELECT a.user_id, a.available, md.display_name, md.left_at
+             , md.in_server
         FROM accounts a
         LEFT JOIN member_departures md
           ON md.guild_id = a.guild_id AND md.user_id = a.user_id
@@ -303,9 +304,13 @@ def list_outside_users_with_balance(
     )
     outside: list[OutsideBalanceRow] = []
     now_dt = datetime.now(timezone.utc)
+    guild_members = getattr(guild, "members", [])
+    if isinstance(guild_members, dict):
+        guild_members = guild_members.values()
+    current_member_ids = {int(member.id) for member in guild_members}
     for row in rows:
         user_id = int(row["user_id"])
-        if guild.get_member(user_id) is not None:
+        if user_id in current_member_ids or guild.get_member(user_id) is not None:
             continue
         left_at = str(row["left_at"]) if row["left_at"] else None
         left_dt = parse_iso_datetime(left_at)

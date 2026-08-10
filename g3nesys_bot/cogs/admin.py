@@ -4318,11 +4318,24 @@ class OutsideBalancesView(discord.ui.View):
         self.total = total
 
     async def show_page(self, interaction: discord.Interaction, page: int) -> None:
+        if not interaction.response.is_done():
+            await interaction.response.defer(ephemeral=True)
         if interaction.guild is None or not is_admin_subject(self.cog.db, interaction):
-            await private_response(interaction, "Solo admins autorizados pueden consultar estos saldos.")
+            await interaction.followup.send("Solo admins autorizados pueden consultar estos saldos.", ephemeral=True)
             return
-        text, total = self.cog.outside_balances_text(interaction.guild, page=page)
-        await interaction.response.edit_message(content=text, view=OutsideBalancesView(self.cog, page=page, total=total))
+        try:
+            text, total = self.cog.outside_balances_text(interaction.guild, page=page)
+            await edit_guild_economy_message(
+                interaction,
+                content=text,
+                view=OutsideBalancesView(self.cog, page=page, total=total),
+            )
+        except Exception:
+            traceback.print_exc()
+            await interaction.followup.send(
+                "❌ No se pudo consultar los saldos de usuarios fuera.\nEl error fue registrado.",
+                ephemeral=True,
+            )
 
     @discord.ui.button(label="Anterior", emoji="⬅️", style=discord.ButtonStyle.secondary, custom_id="g3n:admin:outside_balances:prev", row=0)
     async def previous_page(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
@@ -4549,7 +4562,7 @@ async def edit_guild_economy_message(interaction: discord.Interaction, **kwargs)
 
 class GuildEconomyView(discord.ui.View):
     def __init__(self, cog: "Admin"):
-        super().__init__(timeout=300)
+        super().__init__(timeout=None)
         self.cog = cog
 
     async def _defer(self, interaction: discord.Interaction) -> None:
@@ -4640,12 +4653,19 @@ class GuildEconomyView(discord.ui.View):
         await self._defer(interaction)
         if not await self.require_admin(interaction):
             return
-        text, total = self.cog.outside_balances_text(interaction.guild, page=0)
-        await interaction.followup.send(
-            text,
-            view=OutsideBalancesView(self.cog, page=0, total=total) if total > 8 else None,
-            ephemeral=True,
-        )
+        try:
+            text, total = self.cog.outside_balances_text(interaction.guild, page=0)
+            await interaction.followup.send(
+                text,
+                view=OutsideBalancesView(self.cog, page=0, total=total) if total > 8 else None,
+                ephemeral=True,
+            )
+        except Exception:
+            traceback.print_exc()
+            await interaction.followup.send(
+                "❌ No se pudo consultar los saldos de usuarios fuera.\nEl error fue registrado.",
+                ephemeral=True,
+            )
 
     @discord.ui.button(label="Decomisar balance", emoji="💰", style=discord.ButtonStyle.danger, custom_id="g3n:admin:guild_economy:seize_balance", row=1)
     async def seize_balance(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
@@ -4897,6 +4917,7 @@ class Admin(commands.Cog):
 
     async def cog_load(self) -> None:
         self.bot.add_view(AdminPanelView(self))
+        self.bot.add_view(GuildEconomyView(self))
         self.bot.add_view(LegacyAdminPanelCallbacksView(self))
         rows = self.db.fetch_all(
             """
@@ -8288,9 +8309,16 @@ class Admin(commands.Cog):
 
     def outside_balances_text(self, guild: discord.Guild, *, page: int = 0) -> tuple[str, int]:
         rows, total = list_outside_users_with_balance(self.db, guild, limit=8, offset=page * 8)
-        lines = ["👥 **SALDOS DE USUARIOS FUERA**"]
+        lines = ["👥 **USUARIOS FUERA CON SALDO**"]
         if not rows:
-            lines.append("No hay usuarios fuera del servidor con balance disponible positivo.")
+            lines.extend(
+                [
+                    "",
+                    "✅ Revisión completada",
+                    "",
+                    "Actualmente no hay usuarios fuera del servidor con saldo a favor.",
+                ]
+            )
             return "\n".join(lines), total
         for row in rows:
             left_text = discord_date(row.left_at, "d") if row.left_at else "No disponible / anterior al registro"
@@ -8302,7 +8330,7 @@ class Admin(commands.Cog):
                     f"Nombre conocido: {row.display_name}",
                     f"Albion: {row.albion_name}",
                     f"Balance: {format_amount(row.available)}",
-                    f"Fuera del servidor desde: {left_text}",
+                    f"Fecha de salida: {left_text}",
                     f"Tiempo fuera: {time_text}",
                 ]
             )

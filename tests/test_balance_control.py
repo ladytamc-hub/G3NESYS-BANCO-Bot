@@ -24,6 +24,8 @@ class FakeMember:
         self.display_name = display_name or f"User {user_id}"
         self.mention = f"<@{user_id}>"
         self.guild = None
+        self.guild_permissions = SimpleNamespace(administrator=False)
+        self.roles = []
 
 
 class FakeGuild:
@@ -38,6 +40,41 @@ class FakeGuild:
 
     def get_channel(self, _channel_id: int):
         return None
+
+
+class FakeResponse:
+    def __init__(self):
+        self._done = False
+        self.deferred = False
+
+    def is_done(self):
+        return self._done
+
+    async def defer(self, *, ephemeral=False):
+        self.deferred = ephemeral
+        self._done = True
+
+
+class FakeFollowup:
+    def __init__(self):
+        self.messages = []
+
+    async def send(self, content=None, *, ephemeral=False, **kwargs):
+        self.messages.append({"content": content, "ephemeral": ephemeral, **kwargs})
+
+
+class FakeInteraction:
+    def __init__(self, guild, user):
+        self.guild = guild
+        self.guild_id = guild.id
+        self.user = user
+        self.response = FakeResponse()
+        self.followup = FakeFollowup()
+
+
+async def press_outside_balances_button(view: GuildEconomyView, interaction: FakeInteraction):
+    button = next(item for item in view.children if item.custom_id == "g3n:admin:guild_economy:outside_balances")
+    await button.callback(interaction)
 
 
 class BalanceControlTests(unittest.IsolatedAsyncioTestCase):
@@ -122,6 +159,76 @@ class BalanceControlTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(rows[0].user_id, 100)
         self.assertEqual(rows[0].left_at, None)
         self.assertEqual(rows[0].days_out, None)
+
+    def test_outside_balances_include_registered_departure_and_exclude_zero_balance(self):
+        self.add_account(100, available=5000)
+        self.add_account(200, available=0)
+        self.db.execute(
+            """
+            INSERT INTO member_departures (
+                guild_id, user_id, display_name, left_at, last_alerted_at, in_server, updated_at
+            ) VALUES (?, ?, ?, ?, NULL, 0, ?)
+            """,
+            (10, 100, "Fuera", "2026-08-01T00:00:00+00:00", "2026-08-01T00:00:00+00:00"),
+        )
+        self.db.execute(
+            """
+            INSERT INTO member_departures (
+                guild_id, user_id, display_name, left_at, last_alerted_at, in_server, updated_at
+            ) VALUES (?, ?, ?, ?, NULL, 0, ?)
+            """,
+            (10, 200, "Sin saldo", "2026-08-01T00:00:00+00:00", "2026-08-01T00:00:00+00:00"),
+        )
+
+        rows, total = list_outside_users_with_balance(self.db, self.guild)
+
+        self.assertEqual(total, 1)
+        self.assertEqual(rows[0].user_id, 100)
+        self.assertEqual(rows[0].display_name, "Fuera")
+        self.assertEqual(rows[0].left_at, "2026-08-01T00:00:00+00:00")
+
+    @patch("g3nesys_bot.cogs.admin.is_admin_subject", return_value=True)
+    async def test_outside_balances_button_defers_and_reports_empty_result(self, _is_admin):
+        admin = Admin(SimpleNamespace(db=self.db, add_view=lambda _view: None))
+        interaction = FakeInteraction(self.guild, FakeMember(900, "Admin"))
+
+        await press_outside_balances_button(GuildEconomyView(admin), interaction)
+
+        self.assertTrue(interaction.response.deferred)
+        self.assertEqual(len(interaction.followup.messages), 1)
+        message = interaction.followup.messages[0]
+        self.assertTrue(message["ephemeral"])
+        self.assertIn("Revisión completada", message["content"])
+        self.assertIn("no hay usuarios fuera", message["content"])
+
+    @patch("g3nesys_bot.cogs.admin.is_admin_subject", return_value=True)
+    async def test_outside_balances_button_reports_unknown_departure_user(self, _is_admin):
+        self.add_account(100, available=5000)
+        admin = Admin(SimpleNamespace(db=self.db, add_view=lambda _view: None))
+        interaction = FakeInteraction(self.guild, FakeMember(900, "Admin"))
+
+        await press_outside_balances_button(GuildEconomyView(admin), interaction)
+
+        content = interaction.followup.messages[0]["content"]
+        self.assertIn("USUARIOS FUERA CON SALDO", content)
+        self.assertIn("Usuario: `100`", content)
+        self.assertIn("Fecha de salida: No disponible / anterior al registro", content)
+
+    @patch("g3nesys_bot.cogs.admin.traceback.print_exc")
+    @patch("g3nesys_bot.cogs.admin.is_admin_subject", return_value=True)
+    async def test_outside_balances_button_returns_controlled_error(self, _is_admin, print_exc):
+        class BrokenAdmin(Admin):
+            def outside_balances_text(self, guild, *, page=0):
+                raise RuntimeError("boom")
+
+        admin = BrokenAdmin(SimpleNamespace(db=self.db, add_view=lambda _view: None))
+        interaction = FakeInteraction(self.guild, FakeMember(900, "Admin"))
+
+        await press_outside_balances_button(GuildEconomyView(admin), interaction)
+
+        self.assertTrue(interaction.response.deferred)
+        self.assertIn("No se pudo consultar", interaction.followup.messages[0]["content"])
+        print_exc.assert_called_once()
 
     @patch("g3nesys_bot.cogs.admin.send_admin_notification", new_callable=AsyncMock)
     async def test_member_remove_records_departure_and_alerts_once_when_balance_is_positive(self, send_admin):
