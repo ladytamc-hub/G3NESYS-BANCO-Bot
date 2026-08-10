@@ -4651,16 +4651,19 @@ class GuildEconomyView(discord.ui.View):
 
     @discord.ui.button(label="Saldos de usuarios fuera", emoji="👥", style=discord.ButtonStyle.primary, custom_id="g3n:admin:guild_economy:outside_balances", row=1)
     async def outside_balances(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
+        print("[OUTSIDE_BALANCES] callback_start")
         await self._defer(interaction)
         if not await self.require_admin(interaction):
             return
         try:
             text, total = self.cog.outside_balances_text(interaction.guild, page=0)
+            print("[OUTSIDE_BALANCES] send_start")
             await interaction.followup.send(
                 text,
                 view=OutsideBalancesView(self.cog, page=0, total=total) if total > 8 else None,
                 ephemeral=True,
             )
+            print("[OUTSIDE_BALANCES] send_ok")
         except Exception as exc:
             print(f"[OUTSIDE_BALANCES_ERROR] {type(exc).__name__}: {exc}")
             traceback.print_exc()
@@ -6576,11 +6579,17 @@ class Admin(commands.Cog):
         if user_id is None:
             await private_response(interaction, "No pude leer el usuario.")
             return
-        member = interaction.guild.get_member(user_id)
-        if member is None:
-            await private_response(interaction, "No encontre al usuario en el servidor.")
+        if interaction.guild is None:
+            await private_response(interaction, "Esta accion debe consultarse dentro del servidor.")
             return
-        await private_response(interaction, self.user_statement_text(interaction.guild.id, member))
+        member = interaction.guild.get_member(user_id)
+        if member is None and not self.has_economic_records(interaction.guild.id, user_id):
+            await private_response(interaction, "No se encontró información económica para este usuario.")
+            return
+        await private_response(
+            interaction,
+            self.user_statement_text(interaction.guild.id, member=member, user_id=user_id),
+        )
 
     async def execute_confirmed_action(
         self,
@@ -8284,22 +8293,76 @@ class Admin(commands.Cog):
             lines.append(f"{idx}. <@{row['usuario_id']}> - {row['total']} asistencias")
         return "\n".join(lines)
 
-    def user_statement_text(self, guild_id: int, member: discord.Member) -> str:
-        account = get_account(self.db, guild_id, member.id)
-        fine_count, fine_total = pending_fines_total(self.db, guild_id, member.id)
+    def has_economic_records(self, guild_id: int, user_id: int) -> bool:
+        queries = [
+            ("SELECT 1 FROM accounts WHERE guild_id = ? AND user_id = ? LIMIT 1", (guild_id, user_id)),
+            (
+                "SELECT 1 FROM movements WHERE guild_id = ? AND (user_id = ? OR counterparty_id = ?) LIMIT 1",
+                (guild_id, user_id, user_id),
+            ),
+            ("SELECT 1 FROM withdrawals WHERE guild_id = ? AND user_id = ? LIMIT 1", (guild_id, user_id)),
+            ("SELECT 1 FROM fines WHERE guild_id = ? AND user_id = ? LIMIT 1", (guild_id, user_id)),
+        ]
+        return any(self.db.fetch_one(query, params) is not None for query, params in queries)
+
+    def economic_display_name(self, guild_id: int, user_id: int, member: discord.Member | None = None) -> str:
+        if member is not None:
+            return str(member.display_name)
+        columns = {str(row["name"]) for row in self.db.fetch_all("PRAGMA table_info(member_departures)")}
+        if {"guild_id", "user_id", "display_name"}.issubset(columns):
+            row = self.db.fetch_one(
+                """
+                SELECT display_name FROM member_departures
+                WHERE guild_id = ? AND user_id = ?
+                """,
+                (guild_id, user_id),
+            )
+            if row is not None and str(row["display_name"] or "").strip():
+                return str(row["display_name"]).strip()
+        return "No disponible"
+
+    def user_statement_text(
+        self,
+        guild_id: int,
+        member: discord.Member | None = None,
+        *,
+        user_id: int | None = None,
+    ) -> str:
+        target_id = int(member.id if member is not None else user_id)
+        account = self.db.fetch_one(
+            "SELECT * FROM accounts WHERE guild_id = ? AND user_id = ?",
+            (guild_id, target_id),
+        )
+        available = int(account["available"] or 0) if account is not None else 0
+        retained = int(account["retained"] or 0) if account is not None else 0
+        seized = int(account["seized"] or 0) if account is not None else 0
+        fine_count, fine_total = pending_fines_total(self.db, guild_id, target_id)
         movements = self.db.fetch_all(
             """
             SELECT * FROM movements
             WHERE guild_id = ? AND (user_id = ? OR counterparty_id = ?)
             ORDER BY id DESC LIMIT 8
             """,
-            (guild_id, member.id, member.id),
+            (guild_id, target_id, target_id),
         )
+        withdrawals = self.db.fetch_all(
+            """
+            SELECT code, amount_requested, amount_liquidated, status, created_at
+            FROM withdrawals
+            WHERE guild_id = ? AND user_id = ?
+            ORDER BY id DESC LIMIT 5
+            """,
+            (guild_id, target_id),
+        )
+        display_name = self.economic_display_name(guild_id, target_id, member)
+        presence = "Dentro del servidor" if member is not None else "Fuera del servidor / no disponible"
         lines = [
-            f"**Estado de cuenta de {member.display_name}**",
-            f"Disponible: {format_amount(account['available'])}",
-            f"Retenido: {format_amount(account['retained'])}",
-            f"Decomisado: {format_amount(account['seized'])}",
+            f"**Estado de cuenta de {display_name}**",
+            f"Discord ID: `{target_id}`",
+            f"Presencia Discord: {presence}",
+            f"Disponible: {format_amount(available)}",
+            f"Retenido: {format_amount(retained)}",
+            f"Decomisado: {format_amount(seized)}",
             f"Multas pendientes: {fine_count} ({format_amount(fine_total)})",
             "",
             "**Movimientos recientes**",
@@ -8307,10 +8370,24 @@ class Admin(commands.Cog):
         lines.extend(movement_history_line(row) for row in movements)
         if not movements:
             lines.append("Sin movimientos.")
+        lines.append("")
+        lines.append("**Solicitudes de cobro recientes**")
+        for row in withdrawals:
+            paid = int(row["amount_liquidated"] or 0)
+            lines.append(
+                f"`{row['code']}` {row['status']} · "
+                f"Solicitado: {format_amount(row['amount_requested'])} · "
+                f"Pagado: {format_amount(paid)}"
+            )
+        if not withdrawals:
+            lines.append("Sin solicitudes.")
         return "\n".join(lines)
 
     def outside_balances_text(self, guild: discord.Guild, *, page: int = 0) -> tuple[str, int]:
+        print("[OUTSIDE_BALANCES] query_start")
         rows, total = list_outside_users_with_balance(self.db, guild, limit=8, offset=page * 8)
+        print(f"[OUTSIDE_BALANCES] query_ok count={total}")
+        print("[OUTSIDE_BALANCES] build_start")
         lines = ["👥 **USUARIOS FUERA CON SALDO**"]
         if not rows:
             lines.extend(
@@ -8321,6 +8398,7 @@ class Admin(commands.Cog):
                     "Actualmente no hay usuarios fuera del servidor con saldo a favor.",
                 ]
             )
+            print("[OUTSIDE_BALANCES] build_ok")
             return "\n".join(lines), total
         for row in rows:
             left_text = discord_date(row.left_at, "d") if row.left_at else "No disponible / anterior al registro"
@@ -8338,6 +8416,7 @@ class Admin(commands.Cog):
             )
         last_page = max(0, (total - 1) // 8)
         lines.append(f"\nPágina {page + 1}/{last_page + 1} · {total} usuario(s)")
+        print("[OUTSIDE_BALANCES] build_ok")
         return "\n".join(lines)[:1900], total
 
     def balance_seizure_target_text(self, guild: discord.Guild, user_id: int) -> str:

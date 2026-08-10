@@ -46,12 +46,17 @@ class FakeResponse:
     def __init__(self):
         self._done = False
         self.deferred = False
+        self.messages = []
 
     def is_done(self):
         return self._done
 
     async def defer(self, *, ephemeral=False):
         self.deferred = ephemeral
+        self._done = True
+
+    async def send_message(self, content=None, *, ephemeral=False, **kwargs):
+        self.messages.append({"content": content, "ephemeral": ephemeral, **kwargs})
         self._done = True
 
 
@@ -101,6 +106,28 @@ class BalanceControlTests(unittest.IsolatedAsyncioTestCase):
             DO UPDATE SET available = excluded.available, seized = excluded.seized
             """,
             (10, user_id, available, seized, "2026-08-10T00:00:00+00:00"),
+        )
+
+    def add_movement(self, user_id: int, *, code: str = "MOV-000001", amount: int = 500):
+        self.db.execute(
+            """
+            INSERT INTO movements (
+                code, guild_id, type, category, user_id, counterparty_id, amount,
+                source_table, source_id, description, created_by, created_at,
+                fee_amount, net_amount
+            ) VALUES (?, ?, ?, ?, ?, NULL, ?, NULL, NULL, ?, ?, ?, 0, NULL)
+            """,
+            (
+                code,
+                10,
+                "DEPOSITO",
+                "Prueba",
+                user_id,
+                amount,
+                "Movimiento de prueba",
+                900,
+                "2026-08-10T00:00:00+00:00",
+            ),
         )
 
     def withdrawal(self, code: str):
@@ -272,8 +299,81 @@ class BalanceControlTests(unittest.IsolatedAsyncioTestCase):
         finally:
             con.close()
 
+    def test_user_statement_inside_member_with_balance_works(self):
+        user_id = 111111111111111111
+        member = FakeMember(user_id, "Dentro")
+        self.guild.members[user_id] = member
+        self.add_account(user_id, available=5000)
+        admin = Admin(SimpleNamespace(db=self.db, add_view=lambda _view: None))
+
+        text = admin.user_statement_text(10, member=member, user_id=user_id)
+
+        self.assertIn("Estado de cuenta de Dentro", text)
+        self.assertIn(f"Discord ID: `{user_id}`", text)
+        self.assertIn("Presencia Discord: Dentro del servidor", text)
+        self.assertIn("Disponible: 5,000 plata", text)
+
+    async def test_user_statement_outside_member_with_balance_works(self):
+        user_id = 111111111111111112
+        self.add_account(user_id, available=7000)
+        self.db.execute(
+            """
+            INSERT INTO member_departures (
+                guild_id, user_id, display_name, left_at, last_alerted_at, in_server, updated_at
+            ) VALUES (?, ?, ?, ?, NULL, 0, ?)
+            """,
+            (10, user_id, "Fuera", "2026-08-01T00:00:00+00:00", "2026-08-01T00:00:00+00:00"),
+        )
+        admin = Admin(SimpleNamespace(db=self.db, add_view=lambda _view: None))
+        interaction = FakeInteraction(self.guild, FakeMember(900, "Admin"))
+
+        await admin.user_statement_interaction(interaction, str(user_id))
+
+        content = interaction.response.messages[0]["content"]
+        self.assertIn("Estado de cuenta de Fuera", content)
+        self.assertIn("Presencia Discord: Fuera del servidor", content)
+        self.assertIn("Disponible: 7,000 plata", content)
+
+    def test_user_statement_outside_member_with_movements_shows_movements(self):
+        user_id = 111111111111111113
+        self.add_movement(user_id, code="MOV-000113", amount=900)
+        admin = Admin(SimpleNamespace(db=self.db, add_view=lambda _view: None))
+
+        text = admin.user_statement_text(10, user_id=user_id)
+
+        self.assertIn("Estado de cuenta de No disponible", text)
+        self.assertIn("MOV-000113", text)
+        self.assertIn("Movimiento de prueba", text)
+
+    def test_user_statement_outside_member_without_name_does_not_break(self):
+        user_id = 111111111111111114
+        self.add_account(user_id, available=1)
+        admin = Admin(SimpleNamespace(db=self.db, add_view=lambda _view: None))
+
+        text = admin.user_statement_text(10, user_id=user_id)
+
+        self.assertIn("Estado de cuenta de No disponible", text)
+        self.assertIn(f"Discord ID: `{user_id}`", text)
+
+    async def test_user_statement_unknown_economic_user_returns_no_information(self):
+        user_id = 111111111111111115
+        admin = Admin(SimpleNamespace(db=self.db, add_view=lambda _view: None))
+        interaction = FakeInteraction(self.guild, FakeMember(900, "Admin"))
+
+        await admin.user_statement_interaction(interaction, str(user_id))
+
+        self.assertEqual(
+            interaction.response.messages[0]["content"],
+            "No se encontró información económica para este usuario.",
+        )
+        self.assertEqual(
+            self.db.fetch_one("SELECT COUNT(*) AS total FROM accounts WHERE guild_id = ? AND user_id = ?", (10, user_id))["total"],
+            0,
+        )
+
+    @patch("builtins.print")
     @patch("g3nesys_bot.cogs.admin.is_admin_subject", return_value=True)
-    async def test_outside_balances_button_defers_and_reports_empty_result(self, _is_admin):
+    async def test_outside_balances_button_defers_and_reports_empty_result(self, _is_admin, print_log):
         admin = Admin(SimpleNamespace(db=self.db, add_view=lambda _view: None))
         interaction = FakeInteraction(self.guild, FakeMember(900, "Admin"))
 
@@ -285,9 +385,17 @@ class BalanceControlTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(message["ephemeral"])
         self.assertIn("Revisión completada", message["content"])
         self.assertIn("no hay usuarios fuera", message["content"])
+        print_log.assert_any_call("[OUTSIDE_BALANCES] callback_start")
+        print_log.assert_any_call("[OUTSIDE_BALANCES] query_start")
+        print_log.assert_any_call("[OUTSIDE_BALANCES] query_ok count=0")
+        print_log.assert_any_call("[OUTSIDE_BALANCES] build_start")
+        print_log.assert_any_call("[OUTSIDE_BALANCES] build_ok")
+        print_log.assert_any_call("[OUTSIDE_BALANCES] send_start")
+        print_log.assert_any_call("[OUTSIDE_BALANCES] send_ok")
 
+    @patch("builtins.print")
     @patch("g3nesys_bot.cogs.admin.is_admin_subject", return_value=True)
-    async def test_outside_balances_button_reports_unknown_departure_user(self, _is_admin):
+    async def test_outside_balances_button_reports_unknown_departure_user(self, _is_admin, print_log):
         self.add_account(100, available=5000)
         admin = Admin(SimpleNamespace(db=self.db, add_view=lambda _view: None))
         interaction = FakeInteraction(self.guild, FakeMember(900, "Admin"))
@@ -298,6 +406,7 @@ class BalanceControlTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("USUARIOS FUERA CON SALDO", content)
         self.assertIn("Usuario: `100`", content)
         self.assertIn("Fecha de salida: No disponible / anterior al registro", content)
+        print_log.assert_any_call("[OUTSIDE_BALANCES] query_ok count=1")
 
     @patch("g3nesys_bot.cogs.admin.traceback.print_exc")
     @patch("builtins.print")
@@ -314,7 +423,8 @@ class BalanceControlTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertTrue(interaction.response.deferred)
         self.assertIn("No se pudo consultar", interaction.followup.messages[0]["content"])
-        print_log.assert_called_once_with("[OUTSIDE_BALANCES_ERROR] RuntimeError: boom")
+        print_log.assert_any_call("[OUTSIDE_BALANCES] callback_start")
+        print_log.assert_any_call("[OUTSIDE_BALANCES_ERROR] RuntimeError: boom")
         print_exc.assert_called_once()
 
     @patch("g3nesys_bot.cogs.admin.send_admin_notification", new_callable=AsyncMock)
