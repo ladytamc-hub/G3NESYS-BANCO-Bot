@@ -12,8 +12,9 @@ from ..services.callers import (
     is_caller_penalized,
     revoke_caller,
 )
+from ..services.notifications import send_admin_notification
 from ..services.notifications import send_dm_safe
-from ..utils import join_csv_ids, split_csv_ids
+from ..utils import format_amount, join_csv_ids, split_csv_ids
 
 
 def format_percent_value(raw: str) -> str:
@@ -231,8 +232,43 @@ class Settings(commands.Cog):
                 mention_author=False,
             )
             return
+        balance_rows = []
+        for member in role.members:
+            account = self.db.fetch_one(
+                "SELECT available FROM accounts WHERE guild_id = ? AND user_id = ?",
+                (ctx.guild.id, member.id),
+            )
+            if account is not None and int(account["available"] or 0) > 0:
+                balance_rows.append((member, int(account["available"])))
         current.remove(role.id)
         self.db.set_setting(ctx.guild.id, ALLIANCE_ROLE_SETTING_KEY, join_csv_ids(current))
+        if balance_rows:
+            total = sum(amount for _, amount in balance_rows)
+            lines = [
+                "⚠️ **SALDOS PENDIENTES DE ALIANZA ELIMINADA**",
+                "",
+                f"Alianza: {role.mention}",
+                "",
+                "Usuarios con balance:",
+            ]
+            for member, amount in balance_rows[:25]:
+                lines.append(f"* {member.mention} (`{member.id}`) — {format_amount(amount)}")
+            if len(balance_rows) > 25:
+                lines.append(f"* ... y {len(balance_rows) - 25} usuario(s) más.")
+            lines.extend(
+                [
+                    "",
+                    f"Total: {format_amount(total)}",
+                    "",
+                    "Estos balances quedan pendientes de decisión administrativa.",
+                ]
+            )
+            await send_admin_notification(
+                self.db,
+                guild=ctx.guild,
+                category="general_admin",
+                content="\n".join(lines),
+            )
         await ctx.reply(
             f"Rol de alianza retirado del acceso base: {role.mention}",
             mention_author=False,

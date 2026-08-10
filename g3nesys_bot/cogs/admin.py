@@ -53,6 +53,14 @@ from ..services.activity_audit import (
     pending_days,
 )
 from ..services.audit import log_action
+from ..services.balance_control import (
+    known_user_name,
+    list_outside_users_with_balance,
+    mark_member_alerted,
+    record_member_departure,
+    record_member_join,
+    seize_user_balance,
+)
 from ..services.liquidation_expedient import (
     ActivityNotFoundError,
     ActivityWithoutLiquidationError,
@@ -4302,6 +4310,231 @@ def build_guild_economy_embed(summary: GuildEconomySummary) -> discord.Embed:
     return embed
 
 
+class OutsideBalancesView(discord.ui.View):
+    def __init__(self, cog: "Admin", *, page: int = 0, total: int = 0):
+        super().__init__(timeout=300)
+        self.cog = cog
+        self.page = page
+        self.total = total
+
+    async def show_page(self, interaction: discord.Interaction, page: int) -> None:
+        if interaction.guild is None or not is_admin_subject(self.cog.db, interaction):
+            await private_response(interaction, "Solo admins autorizados pueden consultar estos saldos.")
+            return
+        text, total = self.cog.outside_balances_text(interaction.guild, page=page)
+        await interaction.response.edit_message(content=text, view=OutsideBalancesView(self.cog, page=page, total=total))
+
+    @discord.ui.button(label="Anterior", emoji="⬅️", style=discord.ButtonStyle.secondary, custom_id="g3n:admin:outside_balances:prev", row=0)
+    async def previous_page(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
+        await self.show_page(interaction, max(0, self.page - 1))
+
+    @discord.ui.button(label="Siguiente", emoji="➡️", style=discord.ButtonStyle.secondary, custom_id="g3n:admin:outside_balances:next", row=0)
+    async def next_page(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
+        last_page = max(0, (self.total - 1) // 8)
+        await self.show_page(interaction, min(last_page, self.page + 1))
+
+
+class BalanceSeizureTargetModal(discord.ui.Modal, title="Decomisar balance"):
+    user_id = discord.ui.TextInput(label="Discord ID o mención del usuario", max_length=40)
+
+    def __init__(self, cog: "Admin"):
+        super().__init__(timeout=180)
+        self.cog = cog
+
+    async def on_submit(self, interaction: discord.Interaction) -> None:
+        if interaction.guild is None or not is_admin_subject(self.cog.db, interaction):
+            await private_response(interaction, "Solo admins autorizados pueden decomisar balance.")
+            return
+        target_id = parse_channel_id(str(self.user_id.value))
+        if target_id is None:
+            await private_response(interaction, "No pude leer ese Discord ID.")
+            return
+        account = self.cog.db.fetch_one(
+            "SELECT * FROM accounts WHERE guild_id = ? AND user_id = ?",
+            (interaction.guild.id, target_id),
+        )
+        if account is None:
+            await private_response(interaction, "Ese usuario no tiene cuenta de balance registrada.")
+            return
+        await private_response(
+            interaction,
+            self.cog.balance_seizure_target_text(interaction.guild, target_id),
+            view=BalanceSeizureTargetView(self.cog, admin_id=interaction.user.id, user_id=target_id),
+        )
+
+
+class BalanceSeizureSpecificModal(discord.ui.Modal, title="Cantidad a decomisar"):
+    amount = discord.ui.TextInput(label="Cantidad", placeholder="4000000", max_length=30)
+    reason = discord.ui.TextInput(label="Razón obligatoria", style=discord.TextStyle.paragraph, max_length=900)
+    origin = discord.ui.TextInput(label="Origen/tipo", placeholder="pago manual / alianza / corrección / otro", max_length=80, default="otro")
+
+    def __init__(self, cog: "Admin", *, admin_id: int, user_id: int):
+        super().__init__(timeout=180)
+        self.cog = cog
+        self.admin_id = admin_id
+        self.user_id = user_id
+
+    async def on_submit(self, interaction: discord.Interaction) -> None:
+        if interaction.user.id != self.admin_id or interaction.guild is None or not is_admin_subject(self.cog.db, interaction):
+            await private_response(interaction, "Solo el admin que inició el decomiso puede confirmarlo.")
+            return
+        try:
+            amount = parse_int_amount(str(self.amount.value))
+        except ValueError as exc:
+            await private_response(interaction, str(exc))
+            return
+        reason = str(self.reason.value).strip()
+        if not reason:
+            await private_response(interaction, "La razón del decomiso es obligatoria.")
+            return
+        origin = str(self.origin.value).strip()
+        await private_response(
+            interaction,
+            self.cog.balance_seizure_confirmation_text(
+                interaction.guild,
+                self.user_id,
+                amount=amount,
+                reason=reason,
+                origin=origin,
+            ),
+            view=BalanceSeizureConfirmView(
+                self.cog,
+                admin_id=self.admin_id,
+                user_id=self.user_id,
+                amount=amount,
+                reason=reason,
+                origin=origin,
+            ),
+        )
+
+
+class BalanceSeizureAllReasonModal(discord.ui.Modal, title="Decomisar todo el balance"):
+    reason = discord.ui.TextInput(label="Razón obligatoria", style=discord.TextStyle.paragraph, max_length=900)
+    origin = discord.ui.TextInput(label="Origen/tipo", placeholder="abandono Discord / alianza / pago manual / corrección / otro", max_length=80, default="otro")
+
+    def __init__(self, cog: "Admin", *, admin_id: int, user_id: int):
+        super().__init__(timeout=180)
+        self.cog = cog
+        self.admin_id = admin_id
+        self.user_id = user_id
+
+    async def on_submit(self, interaction: discord.Interaction) -> None:
+        if interaction.user.id != self.admin_id or interaction.guild is None or not is_admin_subject(self.cog.db, interaction):
+            await private_response(interaction, "Solo el admin que inició el decomiso puede confirmarlo.")
+            return
+        account = get_account(self.cog.db, interaction.guild.id, self.user_id)
+        amount = int(account["available"])
+        if amount <= 0:
+            await private_response(interaction, "Ese usuario no tiene balance disponible para decomisar.")
+            return
+        reason = str(self.reason.value).strip()
+        if not reason:
+            await private_response(interaction, "La razón del decomiso es obligatoria.")
+            return
+        origin = str(self.origin.value).strip()
+        await private_response(
+            interaction,
+            self.cog.balance_seizure_confirmation_text(
+                interaction.guild,
+                self.user_id,
+                amount=amount,
+                reason=reason,
+                origin=origin,
+                all_balance=True,
+            ),
+            view=BalanceSeizureConfirmView(
+                self.cog,
+                admin_id=self.admin_id,
+                user_id=self.user_id,
+                amount=amount,
+                reason=reason,
+                origin=origin,
+            ),
+        )
+
+
+class BalanceSeizureTargetView(discord.ui.View):
+    def __init__(self, cog: "Admin", *, admin_id: int, user_id: int):
+        super().__init__(timeout=180)
+        self.cog = cog
+        self.admin_id = admin_id
+        self.user_id = user_id
+
+    async def require_admin(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id == self.admin_id and interaction.guild is not None and is_admin_subject(self.cog.db, interaction):
+            return True
+        await private_response(interaction, "Solo el admin que inició el decomiso puede usar esta confirmación.")
+        return False
+
+    @discord.ui.button(label="TODO EL BALANCE", emoji="💰", style=discord.ButtonStyle.danger, custom_id="g3n:admin:balance_seizure:all", row=0)
+    async def all_balance(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
+        if await self.require_admin(interaction):
+            await interaction.response.send_modal(BalanceSeizureAllReasonModal(self.cog, admin_id=self.admin_id, user_id=self.user_id))
+
+    @discord.ui.button(label="CANTIDAD ESPECÍFICA", emoji="✏️", style=discord.ButtonStyle.primary, custom_id="g3n:admin:balance_seizure:specific", row=0)
+    async def specific_amount(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
+        if await self.require_admin(interaction):
+            await interaction.response.send_modal(BalanceSeizureSpecificModal(self.cog, admin_id=self.admin_id, user_id=self.user_id))
+
+    @discord.ui.button(label="Cancelar", emoji="❌", style=discord.ButtonStyle.secondary, custom_id="g3n:admin:balance_seizure:cancel", row=1)
+    async def cancel(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
+        if interaction.user.id != self.admin_id:
+            await private_response(interaction, "Solo el admin que inició esta operación puede cancelarla.")
+            return
+        await interaction.response.edit_message(content="Operación cancelada.", view=None)
+
+
+class BalanceSeizureConfirmView(discord.ui.View):
+    def __init__(
+        self,
+        cog: "Admin",
+        *,
+        admin_id: int,
+        user_id: int,
+        amount: int,
+        reason: str,
+        origin: str,
+    ):
+        super().__init__(timeout=180)
+        self.cog = cog
+        self.admin_id = admin_id
+        self.user_id = user_id
+        self.amount = amount
+        self.reason = reason
+        self.origin = origin
+
+    async def require_admin(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id == self.admin_id and interaction.guild is not None and is_admin_subject(self.cog.db, interaction):
+            return True
+        await private_response(interaction, "Solo el admin que inició el decomiso puede confirmarlo.")
+        return False
+
+    @discord.ui.button(label="CONFIRMAR DECOMISO", emoji="⚠️", style=discord.ButtonStyle.danger, custom_id="g3n:admin:balance_seizure:confirm", row=0)
+    async def confirm(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
+        if not await self.require_admin(interaction):
+            return
+        try:
+            result = await self.cog.execute_balance_seizure(
+                interaction.guild,
+                user_id=self.user_id,
+                amount=self.amount,
+                admin_id=interaction.user.id,
+                reason=self.reason,
+                origin=self.origin,
+            )
+        except ValueError as exc:
+            await private_response(interaction, str(exc))
+            return
+        await interaction.response.edit_message(content=result, view=None)
+
+    @discord.ui.button(label="CANCELAR", emoji="❌", style=discord.ButtonStyle.secondary, custom_id="g3n:admin:balance_seizure:confirm_cancel", row=0)
+    async def cancel(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
+        if interaction.user.id != self.admin_id:
+            await private_response(interaction, "Solo el admin que inició esta operación puede cancelarla.")
+            return
+        await interaction.response.edit_message(content="Operación cancelada.", view=None)
+
+
 async def edit_guild_economy_message(interaction: discord.Interaction, **kwargs) -> None:
     edit_original = getattr(interaction, "edit_original_response", None)
     if callable(edit_original):
@@ -4401,6 +4634,25 @@ class GuildEconomyView(discord.ui.View):
         except Exception:
             traceback.print_exc()
             await interaction.followup.send("No fue posible consultar la Econom\u00eda Gremial.", ephemeral=True)
+
+    @discord.ui.button(label="Saldos de usuarios fuera", emoji="👥", style=discord.ButtonStyle.primary, custom_id="g3n:admin:guild_economy:outside_balances", row=1)
+    async def outside_balances(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
+        await self._defer(interaction)
+        if not await self.require_admin(interaction):
+            return
+        text, total = self.cog.outside_balances_text(interaction.guild, page=0)
+        await interaction.followup.send(
+            text,
+            view=OutsideBalancesView(self.cog, page=0, total=total) if total > 8 else None,
+            ephemeral=True,
+        )
+
+    @discord.ui.button(label="Decomisar balance", emoji="💰", style=discord.ButtonStyle.danger, custom_id="g3n:admin:guild_economy:seize_balance", row=1)
+    async def seize_balance(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
+        if interaction.guild is None or not is_admin_subject(self.cog.db, interaction):
+            await private_response(interaction, "⛔ No tienes permisos para decomisar balances.")
+            return
+        await interaction.response.send_modal(BalanceSeizureTargetModal(self.cog))
 
     @discord.ui.button(label="Volver", emoji="\u21a9\ufe0f", style=discord.ButtonStyle.secondary, custom_id="g3n:admin:guild_economy:back", row=0)
     async def back(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
@@ -4656,6 +4908,47 @@ class Admin(commands.Cog):
         )
         for row in rows:
             self.bot.add_view(PayoutReviewView(self, row["code"]))
+
+    @commands.Cog.listener()
+    async def on_member_join(self, member: discord.Member) -> None:
+        record_member_join(
+            self.db,
+            member.guild.id,
+            user_id=member.id,
+            display_name=member.display_name,
+        )
+
+    @commands.Cog.listener()
+    async def on_member_remove(self, member: discord.Member) -> None:
+        account = self.db.fetch_one(
+            "SELECT available FROM accounts WHERE guild_id = ? AND user_id = ?",
+            (member.guild.id, member.id),
+        )
+        should_alert = record_member_departure(
+            self.db,
+            member.guild.id,
+            user_id=member.id,
+            display_name=member.display_name,
+        )
+        if account is None or int(account["available"] or 0) <= 0 or not should_alert:
+            return
+        left_at = utc_now_iso()
+        await send_admin_notification(
+            self.db,
+            guild=member.guild,
+            category="general_admin",
+            content=(
+                "⚠️ **USUARIO FUERA DEL SERVIDOR CON SALDO**\n\n"
+                f"Usuario: {member.mention}\n"
+                f"Discord ID: `{member.id}`\n"
+                "Albion: No registrado\n"
+                f"Balance disponible: {format_amount(account['available'])}\n"
+                f"Fecha de salida: {left_at}\n\n"
+                "Este usuario salió del servidor manteniendo saldo a favor.\n"
+                "El balance NO debe decomisarse automáticamente."
+            ),
+        )
+        mark_member_alerted(self.db, member.guild.id, member.id)
 
     def build_payout_review_view(self, code: str) -> PayoutReviewView:
         return PayoutReviewView(self, code)
@@ -7992,6 +8285,117 @@ class Admin(commands.Cog):
         if not movements:
             lines.append("Sin movimientos.")
         return "\n".join(lines)
+
+    def outside_balances_text(self, guild: discord.Guild, *, page: int = 0) -> tuple[str, int]:
+        rows, total = list_outside_users_with_balance(self.db, guild, limit=8, offset=page * 8)
+        lines = ["👥 **SALDOS DE USUARIOS FUERA**"]
+        if not rows:
+            lines.append("No hay usuarios fuera del servidor con balance disponible positivo.")
+            return "\n".join(lines), total
+        for row in rows:
+            left_text = discord_date(row.left_at, "d") if row.left_at else "No disponible / anterior al registro"
+            time_text = f"{row.days_out} días" if row.days_out is not None else "No disponible"
+            lines.extend(
+                [
+                    "",
+                    f"Usuario: `{row.user_id}`",
+                    f"Nombre conocido: {row.display_name}",
+                    f"Albion: {row.albion_name}",
+                    f"Balance: {format_amount(row.available)}",
+                    f"Fuera del servidor desde: {left_text}",
+                    f"Tiempo fuera: {time_text}",
+                ]
+            )
+        last_page = max(0, (total - 1) // 8)
+        lines.append(f"\nPágina {page + 1}/{last_page + 1} · {total} usuario(s)")
+        return "\n".join(lines)[:1900], total
+
+    def balance_seizure_target_text(self, guild: discord.Guild, user_id: int) -> str:
+        account = get_account(self.db, guild.id, user_id)
+        name = known_user_name(self.db, guild.id, user_id, guild)
+        return "\n".join(
+            [
+                "💰 **DECOMISAR BALANCE**",
+                f"Usuario: {name}",
+                f"Discord ID: `{user_id}`",
+                "Albion: No registrado",
+                f"Balance disponible actual: {format_amount(account['available'])}",
+                "",
+                "Elige si deseas decomisar todo el balance disponible o una cantidad específica.",
+            ]
+        )
+
+    def balance_seizure_confirmation_text(
+        self,
+        guild: discord.Guild,
+        user_id: int,
+        *,
+        amount: int,
+        reason: str,
+        origin: str,
+        all_balance: bool = False,
+    ) -> str:
+        name = known_user_name(self.db, guild.id, user_id, guild)
+        header = "⚠️ **CONFIRMAR DECOMISO**"
+        scope = "TODO el balance disponible" if all_balance else "la cantidad indicada"
+        return "\n".join(
+            [
+                header,
+                "",
+                f"Usuario: {name}",
+                f"Discord ID: `{user_id}`",
+                f"Balance a decomisar: {format_amount(amount)}",
+                "",
+                f"Esta acción moverá {scope} del usuario a Decomisado.",
+                "",
+                f"Razón:\n{reason or 'Sin razón'}",
+                f"Origen/tipo: {origin or 'otro'}",
+            ]
+        )
+
+    async def execute_balance_seizure(
+        self,
+        guild: discord.Guild,
+        *,
+        user_id: int,
+        amount: int,
+        admin_id: int,
+        reason: str,
+        origin: str,
+    ) -> str:
+        name = known_user_name(self.db, guild.id, user_id, guild)
+        result = seize_user_balance(
+            self.db,
+            guild.id,
+            user_id=user_id,
+            amount=amount,
+            admin_id=admin_id,
+            reason=reason,
+            origin=origin,
+            known_name=name,
+        )
+        await send_admin_notification(
+            self.db,
+            guild=guild,
+            category="general_admin",
+            content=(
+                "💰 **BALANCE DECOMISADO**\n\n"
+                f"Usuario: <@{user_id}> (`{user_id}`)\n"
+                f"Monto: {format_amount(result.amount)}\n"
+                f"Disponible anterior: {format_amount(result.previous_available)}\n"
+                f"Disponible posterior: {format_amount(result.new_available)}\n"
+                f"Ejecutado por: <@{admin_id}>\n"
+                f"Origen/tipo: {origin or 'otro'}\n"
+                f"Razón: {reason}\n"
+                f"Movimiento ID: `{result.movement_id}`"
+            ),
+        )
+        return (
+            "✅ Decomiso registrado correctamente.\n"
+            f"Movimiento ID: `{result.movement_id}`\n"
+            f"Disponible: {format_amount(result.previous_available)} → {format_amount(result.new_available)}\n"
+            f"Decomisado acumulado: {format_amount(result.previous_seized)} → {format_amount(result.new_seized)}"
+        )
 
     def create_report(self, guild_id: int) -> Path:
         return create_admin_report(

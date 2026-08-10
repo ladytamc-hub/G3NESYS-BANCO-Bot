@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+from datetime import datetime, timezone
 
 import discord
 from discord.ext import commands
@@ -19,6 +20,11 @@ from ..constants import (
 )
 from ..permissions import has_bank_access, is_admin_subject, is_full_member, require_admin_context
 from ..services.audit import log_action
+from ..services.balance_control import (
+    WithdrawalCancellationCooldown,
+    cancel_pending_withdrawal_by_user,
+    human_cooldown,
+)
 from ..services.callers import is_caller_penalized
 from ..services.economy import (
     ActiveWithdrawalError,
@@ -133,6 +139,22 @@ class WithdrawalModal(discord.ui.Modal, title="Cobrar saldo"):
             str(self.amount.value),
             str(self.reason.value).strip(),
         )
+
+
+class WithdrawalCancelModal(discord.ui.Modal, title="Cancelar solicitud de cobro"):
+    code = discord.ui.TextInput(
+        label="ID de solicitud",
+        placeholder="COBRO-000001",
+        required=False,
+        max_length=20,
+    )
+
+    def __init__(self, cog: "Bank"):
+        super().__init__(timeout=180)
+        self.cog = cog
+
+    async def on_submit(self, interaction: discord.Interaction) -> None:
+        await self.cog.cancel_withdrawal_interaction(interaction, str(self.code.value).strip() or None)
 
 
 class TransferModal(discord.ui.Modal, title="Transferir plata"):
@@ -253,6 +275,10 @@ class BankPanelView(discord.ui.View):
     @discord.ui.button(label="Crear ticket", emoji="\U0001F3AB", style=discord.ButtonStyle.primary, custom_id="g3n:bank:create_ticket", row=2)
     async def create_ticket(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
         await self.cog.open_ticket_modal(interaction)
+
+    @discord.ui.button(label="Cancelar cobro", emoji="↩️", style=discord.ButtonStyle.danger, custom_id="g3n:bank:cancel_withdrawal", row=2)
+    async def cancel_withdrawal(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
+        await interaction.response.send_modal(WithdrawalCancelModal(self.cog))
 
 class ApproveWithdrawalReviewModal(discord.ui.Modal, title="Aprobar cobro"):
     admin_message = discord.ui.TextInput(
@@ -884,7 +910,12 @@ class Bank(commands.Cog):
         paid = int(withdrawal["amount_liquidated"] or 0)
         requested = int(withdrawal["amount_requested"] or 0)
         pending = 0 if withdrawal["status"] == WITHDRAWAL_REJECTED else max(0, requested - paid)
-        color = discord.Color.green() if withdrawal["status"] == WITHDRAWAL_PAID else discord.Color.gold()
+        if withdrawal["status"] == WITHDRAWAL_PAID:
+            color = discord.Color.green()
+        elif withdrawal["status"] == WITHDRAWAL_UNPAID:
+            color = discord.Color.red()
+        else:
+            color = discord.Color.gold()
         embed = discord.Embed(
             title=f"💳 Solicitud de cobro {withdrawal['code']}",
             description=f"Estado: {withdrawal['status']}",
@@ -1655,6 +1686,32 @@ class Bank(commands.Cog):
             return
         await self.create_withdrawal_and_notify(ctx, ctx.author, amount_raw, reason)
 
+    @commands.command(name="cancelar_cobro", aliases=["cancelar_solicitud_cobro"])
+    async def cancelar_cobro(self, ctx: commands.Context, code: str = "") -> None:
+        if not isinstance(ctx.author, discord.Member) or not has_bank_access(self.db, ctx.author):
+            await ctx.reply("Necesitas rol MIEMBRO G3NESYS, INVITADO o alianza configurada para cancelar cobros.", mention_author=False)
+            return
+        try:
+            cancelled_code = cancel_pending_withdrawal_by_user(
+                self.db,
+                ctx.guild.id,
+                user_id=ctx.author.id,
+                code=code or None,
+            )
+        except WithdrawalCancellationCooldown as exc:
+            remaining = exc.retry_at - datetime.now(timezone.utc)
+            await ctx.reply(
+                "❌ No puedes cancelar otra solicitud todavía.\n"
+                f"Podrás volver a cancelar una solicitud en: {human_cooldown(remaining)}.",
+                mention_author=False,
+            )
+            return
+        except ValueError as exc:
+            await ctx.reply(str(exc), mention_author=False)
+            return
+        await self.after_user_cancelled_withdrawal(ctx.guild, ctx.author.id, cancelled_code)
+        await ctx.reply(f"Solicitud `{cancelled_code}` cancelada correctamente.", mention_author=False)
+
     async def show_balance_interaction(self, interaction: discord.Interaction) -> None:
         if not isinstance(interaction.user, discord.Member) or not has_bank_access(self.db, interaction.user):
             await private_response(interaction, "Necesitas rol MIEMBRO G3NESYS, INVITADO o alianza configurada.")
@@ -1777,6 +1834,31 @@ class Bank(commands.Cog):
         await self.send_withdrawal_to_admins(interaction.guild, code)
         await private_response(interaction, self.withdrawal_created_text(code))
 
+    async def cancel_withdrawal_interaction(self, interaction: discord.Interaction, code: str | None) -> None:
+        if not isinstance(interaction.user, discord.Member) or not has_bank_access(self.db, interaction.user):
+            await private_response(interaction, "Necesitas rol MIEMBRO G3NESYS, INVITADO o alianza configurada.")
+            return
+        try:
+            cancelled_code = cancel_pending_withdrawal_by_user(
+                self.db,
+                interaction.guild.id,
+                user_id=interaction.user.id,
+                code=code,
+            )
+        except WithdrawalCancellationCooldown as exc:
+            remaining = exc.retry_at - datetime.now(timezone.utc)
+            await private_response(
+                interaction,
+                "❌ No puedes cancelar otra solicitud todavía.\n"
+                f"Podrás volver a cancelar una solicitud en: {human_cooldown(remaining)}.",
+            )
+            return
+        except ValueError as exc:
+            await private_response(interaction, str(exc))
+            return
+        await self.after_user_cancelled_withdrawal(interaction.guild, interaction.user.id, cancelled_code)
+        await private_response(interaction, f"Solicitud `{cancelled_code}` cancelada correctamente.")
+
     async def transfer_interaction(
         self,
         interaction: discord.Interaction,
@@ -1881,6 +1963,16 @@ class Bank(commands.Cog):
                 affected_user_id=int(row["user_id"]),
                 observation=code,
             )
+
+    async def after_user_cancelled_withdrawal(self, guild: discord.Guild, user_id: int, code: str) -> None:
+        await send_admin_notification(
+            self.db,
+            guild=guild,
+            category="withdrawals",
+            content=f"↩️ Solicitud de cobro `{code}` cancelada por el usuario <@{user_id}>.",
+        )
+        await self.refresh_withdrawal_admin_message(guild, code, actor_id=user_id)
+
     def balance_text(self, guild_id: int, member: discord.Member) -> str:
         account = get_account(self.db, guild_id, member.id)
         fine_count, fine_total = pending_fines_total(self.db, guild_id, member.id)

@@ -234,6 +234,13 @@ class WithdrawalActiveRequestTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(embed.color.value, discord.Color.green().value)
 
+    def test_unpaid_withdrawal_embed_is_red(self):
+        code = self.create_request(status=WITHDRAWAL_UNPAID)
+
+        embed = self.bank.withdrawal_admin_embed(self.guild, self.withdrawal(code))
+
+        self.assertEqual(embed.color.value, discord.Color.red().value)
+
     @patch("g3nesys_bot.cogs.bank.send_admin_notification", new_callable=AsyncMock)
     @patch("g3nesys_bot.cogs.bank.has_bank_access", return_value=True)
     @patch("g3nesys_bot.cogs.bank.discord.Member", FakeMember)

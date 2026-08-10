@@ -224,6 +224,49 @@ class Database:
             if column not in withdrawal_columns:
                 self._conn.execute(f"ALTER TABLE withdrawals ADD COLUMN {column} {column_type}")
 
+        self._conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS withdrawal_user_cancellations (
+                guild_id INTEGER NOT NULL,
+                user_id INTEGER NOT NULL,
+                last_cancelled_at TEXT NOT NULL,
+                PRIMARY KEY (guild_id, user_id)
+            )
+            """
+        )
+        self._conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS member_departures (
+                guild_id INTEGER NOT NULL,
+                user_id INTEGER NOT NULL,
+                display_name TEXT,
+                left_at TEXT,
+                last_alerted_at TEXT,
+                in_server INTEGER NOT NULL DEFAULT 0,
+                updated_at TEXT NOT NULL,
+                PRIMARY KEY (guild_id, user_id)
+            )
+            """
+        )
+        self._conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS balance_seizure_logs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                guild_id INTEGER NOT NULL,
+                user_id INTEGER NOT NULL,
+                known_name TEXT,
+                albion_name TEXT,
+                amount INTEGER NOT NULL,
+                balance_before INTEGER NOT NULL,
+                balance_after INTEGER NOT NULL,
+                reason TEXT NOT NULL,
+                origin TEXT NOT NULL,
+                admin_id INTEGER NOT NULL,
+                movement_id INTEGER NOT NULL,
+                created_at TEXT NOT NULL
+            )
+            """
+        )
 
         regear_columns = {
             row["name"]
@@ -967,6 +1010,40 @@ CREATE TABLE IF NOT EXISTS withdrawals (
     notification_channel_id INTEGER,
     notification_message_id INTEGER,
     UNIQUE(guild_id, code)
+);
+
+CREATE TABLE IF NOT EXISTS withdrawal_user_cancellations (
+    guild_id INTEGER NOT NULL,
+    user_id INTEGER NOT NULL,
+    last_cancelled_at TEXT NOT NULL,
+    PRIMARY KEY (guild_id, user_id)
+);
+
+CREATE TABLE IF NOT EXISTS member_departures (
+    guild_id INTEGER NOT NULL,
+    user_id INTEGER NOT NULL,
+    display_name TEXT,
+    left_at TEXT,
+    last_alerted_at TEXT,
+    in_server INTEGER NOT NULL DEFAULT 0,
+    updated_at TEXT NOT NULL,
+    PRIMARY KEY (guild_id, user_id)
+);
+
+CREATE TABLE IF NOT EXISTS balance_seizure_logs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    guild_id INTEGER NOT NULL,
+    user_id INTEGER NOT NULL,
+    known_name TEXT,
+    albion_name TEXT,
+    amount INTEGER NOT NULL,
+    balance_before INTEGER NOT NULL,
+    balance_after INTEGER NOT NULL,
+    reason TEXT NOT NULL,
+    origin TEXT NOT NULL,
+    admin_id INTEGER NOT NULL,
+    movement_id INTEGER NOT NULL,
+    created_at TEXT NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS payouts (
