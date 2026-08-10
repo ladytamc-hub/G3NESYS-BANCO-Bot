@@ -290,18 +290,38 @@ def list_outside_users_with_balance(
     limit: int = 8,
     offset: int = 0,
 ) -> tuple[list[OutsideBalanceRow], int]:
-    rows = db.fetch_all(
-        """
-        SELECT a.user_id, a.available, md.display_name, md.left_at
-             , md.in_server
-        FROM accounts a
-        LEFT JOIN member_departures md
-          ON md.guild_id = a.guild_id AND md.user_id = a.user_id
-        WHERE a.guild_id = ? AND a.available > 0
-        ORDER BY COALESCE(md.left_at, '9999') ASC, a.available DESC, a.user_id ASC
-        """,
-        (guild.id,),
-    )
+    departure_columns = {
+        str(row["name"])
+        for row in db.fetch_all("PRAGMA table_info(member_departures)")
+    }
+    has_departures = {"guild_id", "user_id"}.issubset(departure_columns)
+    has_display_name = "display_name" in departure_columns
+    has_left_at = "left_at" in departure_columns
+    if has_departures:
+        display_expr = "md.display_name" if has_display_name else "NULL AS display_name"
+        left_at_select = "md.left_at" if has_left_at else "NULL AS left_at"
+        left_at_order = "md.left_at" if has_left_at else "NULL"
+        rows = db.fetch_all(
+            f"""
+            SELECT a.user_id, a.available, {display_expr}, {left_at_select}
+            FROM accounts a
+            LEFT JOIN member_departures md
+              ON md.guild_id = a.guild_id AND md.user_id = a.user_id
+            WHERE a.guild_id = ? AND a.available > 0
+            ORDER BY COALESCE({left_at_order}, '9999') ASC, a.available DESC, a.user_id ASC
+            """,
+            (guild.id,),
+        )
+    else:
+        rows = db.fetch_all(
+            """
+            SELECT user_id, available, NULL AS display_name, NULL AS left_at
+            FROM accounts
+            WHERE guild_id = ? AND available > 0
+            ORDER BY available DESC, user_id ASC
+            """,
+            (guild.id,),
+        )
     outside: list[OutsideBalanceRow] = []
     now_dt = datetime.now(timezone.utc)
     guild_members = getattr(guild, "members", [])
@@ -314,10 +334,13 @@ def list_outside_users_with_balance(
             continue
         left_at = str(row["left_at"]) if row["left_at"] else None
         left_dt = parse_iso_datetime(left_at)
+        display_name = str(row["display_name"] or "").strip()
+        if not display_name:
+            display_name = known_user_name(db, guild.id, user_id) if has_departures else f"Usuario {user_id}"
         outside.append(
             OutsideBalanceRow(
                 user_id=user_id,
-                display_name=str(row["display_name"] or "").strip() or known_user_name(db, guild.id, user_id),
+                display_name=display_name,
                 albion_name="No registrado",
                 available=int(row["available"]),
                 left_at=left_at,

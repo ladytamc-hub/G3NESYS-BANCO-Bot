@@ -187,6 +187,47 @@ class BalanceControlTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(rows[0].display_name, "Fuera")
         self.assertEqual(rows[0].left_at, "2026-08-01T00:00:00+00:00")
 
+    def test_outside_balances_works_without_member_departures_table(self):
+        con = sqlite3.connect(":memory:")
+        con.row_factory = sqlite3.Row
+
+        class LegacyDb:
+            def fetch_all(self, query, params=()):
+                return list(con.execute(query, tuple(params)).fetchall())
+
+            def fetch_one(self, query, params=()):
+                return con.execute(query, tuple(params)).fetchone()
+
+        try:
+            con.execute(
+                """
+                CREATE TABLE accounts (
+                    guild_id INTEGER NOT NULL,
+                    user_id INTEGER NOT NULL,
+                    available INTEGER NOT NULL DEFAULT 0,
+                    retained INTEGER NOT NULL DEFAULT 0,
+                    seized INTEGER NOT NULL DEFAULT 0,
+                    updated_at TEXT NOT NULL,
+                    PRIMARY KEY (guild_id, user_id)
+                )
+                """
+            )
+            con.execute(
+                """
+                INSERT INTO accounts (guild_id, user_id, available, retained, seized, updated_at)
+                VALUES (?, ?, ?, 0, 0, ?)
+                """,
+                (10, 100, 5000, "2026-08-10T00:00:00+00:00"),
+            )
+
+            rows, total = list_outside_users_with_balance(LegacyDb(), self.guild)
+
+            self.assertEqual(total, 1)
+            self.assertEqual(rows[0].user_id, 100)
+            self.assertIsNone(rows[0].left_at)
+        finally:
+            con.close()
+
     @patch("g3nesys_bot.cogs.admin.is_admin_subject", return_value=True)
     async def test_outside_balances_button_defers_and_reports_empty_result(self, _is_admin):
         admin = Admin(SimpleNamespace(db=self.db, add_view=lambda _view: None))
