@@ -187,6 +187,23 @@ class BalanceControlTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(rows[0].left_at, None)
         self.assertEqual(rows[0].days_out, None)
 
+    def test_outside_balances_removes_user_who_returned_to_guild(self):
+        self.add_account(100, available=5000)
+        self.db.execute(
+            """
+            INSERT INTO member_departures (
+                guild_id, user_id, display_name, left_at, last_alerted_at, in_server, updated_at
+            ) VALUES (?, ?, ?, ?, NULL, 0, ?)
+            """,
+            (10, 100, "Regreso", "2026-08-01T00:00:00+00:00", "2026-08-01T00:00:00+00:00"),
+        )
+        self.guild.members[100] = FakeMember(100, "Regreso")
+
+        rows, total = list_outside_users_with_balance(self.db, self.guild)
+
+        self.assertEqual(total, 0)
+        self.assertEqual(rows, [])
+
     def test_outside_balances_include_registered_departure_and_exclude_zero_balance(self):
         self.add_account(100, available=5000)
         self.add_account(200, available=0)
@@ -463,6 +480,72 @@ class BalanceControlTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(departure["in_server"], 0)
         self.assertIsNotNone(departure["left_at"])
         self.assertIsNotNone(departure["last_alerted_at"])
+        send_admin.assert_awaited_once()
+
+    def test_member_join_marks_user_inside_without_deleting_left_date(self):
+        from g3nesys_bot.services.balance_control import record_member_join
+
+        self.db.execute(
+            """
+            INSERT INTO member_departures (
+                guild_id, user_id, display_name, left_at, last_alerted_at, in_server, updated_at
+            ) VALUES (?, ?, ?, ?, ?, 0, ?)
+            """,
+            (
+                10,
+                100,
+                "Antes",
+                "2026-08-01T00:00:00+00:00",
+                "2026-08-01T01:00:00+00:00",
+                "2026-08-01T01:00:00+00:00",
+            ),
+        )
+
+        record_member_join(self.db, 10, user_id=100, display_name="Ahora")
+
+        row = self.db.fetch_one("SELECT * FROM member_departures WHERE guild_id = ? AND user_id = ?", (10, 100))
+        self.assertEqual(row["display_name"], "Ahora")
+        self.assertEqual(row["in_server"], 1)
+        self.assertEqual(row["left_at"], "2026-08-01T00:00:00+00:00")
+
+    async def test_balance_seizure_for_outside_discord_reason_requires_user_still_outside(self):
+        self.add_account(100, available=5000)
+        self.guild.members[100] = FakeMember(100, "Regreso")
+        admin = Admin(SimpleNamespace(db=self.db, add_view=lambda _view: None))
+
+        with self.assertRaisesRegex(ValueError, "ya está dentro"):
+            await admin.execute_balance_seizure(
+                self.guild,
+                user_id=100,
+                amount=1000,
+                admin_id=900,
+                reason="Usuario fuera del Discord",
+                origin="abandono Discord",
+            )
+
+        account = self.account(100)
+        self.assertEqual(account["available"], 5000)
+        self.assertEqual(account["seized"], 0)
+        self.assertEqual(self.db.fetch_one("SELECT COUNT(*) AS total FROM movements")["total"], 0)
+
+    @patch("g3nesys_bot.cogs.admin.send_admin_notification", new_callable=AsyncMock)
+    async def test_balance_seizure_manual_reason_still_allows_member_inside(self, send_admin):
+        self.add_account(100, available=5000)
+        self.guild.members[100] = FakeMember(100, "Dentro")
+        admin = Admin(SimpleNamespace(db=self.db, add_view=lambda _view: None))
+
+        await admin.execute_balance_seizure(
+            self.guild,
+            user_id=100,
+            amount=1000,
+            admin_id=900,
+            reason="Pago manual realizado fuera del sistema",
+            origin="pago manual",
+        )
+
+        account = self.account(100)
+        self.assertEqual(account["available"], 4000)
+        self.assertEqual(account["seized"], 1000)
         send_admin.assert_awaited_once()
 
     def test_seize_user_balance_moves_available_to_seized_and_audits(self):

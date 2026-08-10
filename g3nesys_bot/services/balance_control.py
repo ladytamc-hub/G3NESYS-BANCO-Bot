@@ -330,7 +330,9 @@ def list_outside_users_with_balance(
     current_member_ids = {int(member.id) for member in guild_members}
     for row in rows:
         user_id = int(row["user_id"])
-        if user_id in current_member_ids or guild.get_member(user_id) is not None:
+        if guild.get_member(user_id) is not None:
+            continue
+        if user_id in current_member_ids:
             continue
         left_at = str(row["left_at"]) if row["left_at"] else None
         left_dt = parse_iso_datetime(left_at)
