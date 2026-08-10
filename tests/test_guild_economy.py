@@ -7,7 +7,7 @@ from io import StringIO
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from g3nesys_bot.cogs.admin import AdminPanelView, GuildEconomyView
+from g3nesys_bot.cogs.admin import AdminPanelView, GuildEconomyAdminMenuView, GuildEconomyView
 from g3nesys_bot.constants import (
     WITHDRAWAL_PENDING,
     WITHDRAWAL_REASSIGNMENT,
@@ -133,8 +133,11 @@ class GuildEconomyTests(unittest.IsolatedAsyncioTestCase):
 
     def test_admin_panel_contains_guild_economy_button(self):
         labels = [item.label for item in AdminPanelView(self.cog).children if getattr(item, "label", None)]
+        submenu_labels = [item.label for item in GuildEconomyAdminMenuView(self.cog).children if getattr(item, "label", None)]
 
+        self.assertEqual(labels[0], "Economía Gremial")
         self.assertIn("Economía Gremial", labels)
+        self.assertIn("Ver Plata Gremial", submenu_labels)
 
     def test_summary_totals_use_real_sources_and_guild_scope(self):
         self.seed_economy()

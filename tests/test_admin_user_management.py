@@ -8,8 +8,10 @@ from unittest.mock import patch
 from g3nesys_bot.cogs.admin import (
     Admin,
     AdminPanelView,
+    GuildEconomyAdminMenuView,
     LegacyAdminPanelCallbacksView,
     MembersAdminView,
+    PaymentsAdminMenuView,
     UserManagementAdminView,
 )
 from g3nesys_bot.database import Database, SCHEMA
@@ -73,11 +75,42 @@ class AdminUserManagementTests(unittest.IsolatedAsyncioTestCase):
 
     def test_main_panel_replaces_user_buttons_with_user_management(self):
         labels = self.labels(AdminPanelView(self.admin))
-        self.assertIn("Gesti\u00f3n de usuarios", labels)
+        self.assertEqual(labels[:3], ["Economía Gremial", "Pagos", "GESTIÓN DE STAFF Y ROLES"])
+        self.assertNotIn("Ver Plata Gremial", labels)
+        self.assertNotIn("Registrar Ingreso", labels)
+        self.assertNotIn("Registrar Egreso", labels)
+        self.assertNotIn("Edo.Cta.Gremio", labels)
+        self.assertNotIn("Depositar a Usuario", labels)
+        self.assertNotIn("Solicitudes de Cobro", labels)
+        self.assertNotIn("Edo.Cta.Usuario", labels)
+        self.assertNotIn("Historial Liq.", labels)
         self.assertNotIn("Callers", labels)
         self.assertNotIn("Reclutadores", labels)
         self.assertNotIn("Delegados de pago", labels)
         self.assertNotIn("Admins", labels)
+
+    def test_admin_navigation_submenus_show_moved_buttons(self):
+        self.assertEqual(
+            self.labels(GuildEconomyAdminMenuView(self.admin)),
+            [
+                "Economía Gremial",
+                "Ver Plata Gremial",
+                "Registrar Ingreso",
+                "Registrar Egreso",
+                "Edo.Cta.Gremio",
+                "Volver",
+            ],
+        )
+        self.assertEqual(
+            self.labels(PaymentsAdminMenuView(self.admin)),
+            [
+                "Depositar a Usuario",
+                "Solicitudes de Cobro",
+                "Edo.Cta.Usuario",
+                "Historial Liq.",
+                "Volver",
+            ],
+        )
 
     def test_user_management_and_members_subpanels_show_expected_buttons(self):
         self.assertEqual(
@@ -134,6 +167,87 @@ class AdminUserManagementTests(unittest.IsolatedAsyncioTestCase):
             for manager in reversed(patches):
                 manager.stop()
         self.assertEqual(called, ["callers", "recruiters", "payment_delegates", "admins"])
+
+    async def test_admin_navigation_submenus_route_existing_panel_callbacks(self):
+        called = []
+
+        async def fake_treasury(self, interaction, button):
+            called.append("treasury")
+
+        async def fake_income(self, interaction, button):
+            called.append("income")
+
+        async def fake_expense(self, interaction, button):
+            called.append("expense")
+
+        async def fake_history(self, interaction, button):
+            called.append("history")
+
+        async def fake_deposit(self, interaction, button):
+            called.append("deposit")
+
+        async def fake_withdrawals(self, interaction, button):
+            called.append("withdrawals")
+
+        async def fake_statement(self, interaction, button):
+            called.append("statement")
+
+        async def fake_liquidation_history(self, interaction, button):
+            called.append("liquidation_history")
+
+        patches = [
+            patch.object(AdminPanelView, "treasury", fake_treasury),
+            patch.object(AdminPanelView, "income", fake_income),
+            patch.object(AdminPanelView, "expense", fake_expense),
+            patch.object(AdminPanelView, "history", fake_history),
+            patch.object(AdminPanelView, "deposit", fake_deposit),
+            patch.object(AdminPanelView, "withdrawals", fake_withdrawals),
+            patch.object(AdminPanelView, "statement", fake_statement),
+            patch.object(AdminPanelView, "liquidation_history", fake_liquidation_history),
+        ]
+        for manager in patches:
+            manager.start()
+        try:
+            interaction = FakeInteraction()
+            for view, custom_ids in (
+                (
+                    GuildEconomyAdminMenuView(self.admin),
+                    (
+                        "g3n:admin:treasury",
+                        "g3n:admin:income",
+                        "g3n:admin:expense",
+                        "g3n:admin:history",
+                    ),
+                ),
+                (
+                    PaymentsAdminMenuView(self.admin),
+                    (
+                        "g3n:admin:deposit",
+                        "g3n:admin:withdrawals",
+                        "g3n:admin:statement",
+                        "g3n:admin:liquidation_history",
+                    ),
+                ),
+            ):
+                for custom_id in custom_ids:
+                    button = next(item for item in view.children if item.custom_id == custom_id)
+                    await button.callback(interaction)
+        finally:
+            for manager in reversed(patches):
+                manager.stop()
+        self.assertEqual(
+            called,
+            [
+                "treasury",
+                "income",
+                "expense",
+                "history",
+                "deposit",
+                "withdrawals",
+                "statement",
+                "liquidation_history",
+            ],
+        )
 
     async def test_members_penalty_permissions_allow_admin_or_caller_and_reject_normal_user(self):
         view = MembersAdminView(self.admin)

@@ -5,7 +5,7 @@ import zipfile
 from io import BytesIO
 from types import SimpleNamespace
 
-from g3nesys_bot.cogs.admin import AdminPanelView
+from g3nesys_bot.cogs.admin import AdminPanelView, PaymentsAdminMenuView
 from g3nesys_bot.constants import (
     WITHDRAWAL_PAID,
     WITHDRAWAL_PARTIAL,
@@ -206,9 +206,12 @@ class WithdrawalAuditTests(unittest.TestCase):
         cog = SimpleNamespace(db=self.db)
         view = AdminPanelView(cog)
         labels = [item.label for item in view.children if getattr(item, "label", None)]
+        payments_labels = [item.label for item in PaymentsAdminMenuView(cog).children if getattr(item, "label", None)]
 
         self.assertIn("Auditoría pagos/cobros", labels)
-        self.assertIn("Solicitudes de Cobro", labels)
+        self.assertIn("Pagos", labels)
+        self.assertNotIn("Solicitudes de Cobro", labels)
+        self.assertIn("Solicitudes de Cobro", payments_labels)
 
 
 if __name__ == "__main__":
